@@ -43,6 +43,7 @@
 #include "outputs/outputs.hpp"
 #include "parameter_input.hpp"
 #include "utils/utils.hpp"
+#include "monte_carlo/mcgrid.hpp"
 #include "monte_carlo/montecarlo.hpp"
 
 // MPI/OpenMP headers
@@ -263,6 +264,15 @@ int main(int argc, char *argv[]) {
 
   //--- Step 4. --------------------------------------------------------------------------
   // Construct and initialize Mesh
+
+  // Take the grid from an athdf snapshot if one was named.  This rewrites the <mesh> and
+  // <meshblock> parameters before Mesh reads them in its member initializer list, so the
+  // Monte Carlo run is built on exactly the grid the snapshot was written from.  A
+  // restart carries its own mesh, so this applies only to a fresh start.
+  if (MONTE_CARLO_ENABLED) {
+    if (res_flag == 0 && MCGridFile::Requested(pinput))
+      MCGridFile::Load(pinput)->InjectMeshParameters(pinput);
+  }
 
   Mesh *pmesh;
 #ifdef ENABLE_EXCEPTIONS
@@ -684,7 +694,10 @@ int main(int argc, char *argv[]) {
   delete pmesh;
   delete ptlist;
   delete pouts;
-  if (MONTE_CARLO_ENABLED) delete pmc;
+  if (MONTE_CARLO_ENABLED) {
+    delete pmc;
+    MCGridFile::Free();
+  }
 
 #ifdef MPI_PARALLEL
   MPI_Finalize();

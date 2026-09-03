@@ -1,0 +1,321 @@
+# Reconstructing the Athena++ grid from an athdf snapshot: implementation plan
+
+Status: **phases A and B implemented** (`src/monte_carlo/mcgrid.{hpp,cpp}`, the gated hook
+in `main.cpp`, and the test in `tst/montecarlo/mcgrid/`). Uniform snapshots now set up
+their own grid. Phases C-E are not started. This note records the survey and the design so
+the rest can be picked up without re-deriving the context.
+
+Motivation: the Monte Carlo module reads athdf snapshots of earlier Athena++ runs. Today
+the reader requires the MC athinput to describe a grid that matches the snapshot exactly,
+which means having the original athinput and a run that was uniform or statically refined.
+AMR snapshots have no workable path at all; the current workaround is to flatten them to a
+uniform grid at some level with `vis/python/uniform.py` (or `athena_read`) and read the
+flattened file, which throws away the resolution that motivated the AMR in the first
+place.
+
+The goal is to set up the Athena++ mesh directly from the athdf file, for uniform, SMR and
+AMR snapshots alike, without a hand-written grid description.
+
+---
+
+## 1. Prior art: this does not exist upstream, and was deliberately declined
+
+Checked against `PrincetonUniversity/athena` `main` at `823614c9` (2026-08-13).
+
+Nothing upstream does this:
+
+- Two `Mesh` constructors only — `Mesh(pin, mesh_test)` and `Mesh(pin, resfile, mesh_test)`.
+  No athdf variant.
+- `MeshBlockTree::AddMeshBlockWithoutRefine` has exactly one caller in the entire tree: the
+  restart constructor. The tree-replay path exists only for `.rst`.
+- `src/inputs/hdf5_reader.hpp` exposes only `HDF5ReadRealArray` and `HDF5TableLoader`.
+  There is no attribute reader and no integer-dataset reader, so upstream cannot parse an
+  athdf header from C++ at all.
+- Outside the writer, no source file anywhere reads `LogicalLocations`, `Levels`,
+  `RootGridSize` or `MeshBlockSize`.
+- The only athdf-consuming pgen is still `from_array.cpp`, indexing by `gid`. Its shipped
+  input has `refinement = none`, and the regression tests pass `mesh/nx1` and
+  `meshblock/nx1` by hand — upstream's supported workflow is the manual one we are trying
+  to replace.
+- `vis/python/uniform.py` is upstream's answer to AMR, and it is the flattening workaround
+  described above.
+
+It was also considered and rejected as a direction. Issue #143 ("include input parameters
+in hdf5 output?", 2018) is this exact discussion; it was closed by merging PR #146, which
+*is* today's `hdf5_reader.cpp` + `from_array.cpp` and nothing more. The maintainers'
+position was that athdf and restart files should stay distinct, that athdf should remain
+compact, and that `.rst` is the vehicle for full run state since it embeds the input deck.
+Two counterpoints from that thread are worth carrying: restart files are architecture
+dependent and so are not portable between machines, and the long-term intent upstream is
+to move off HDF5 entirely.
+
+Consequences for us: there is no upstream code to borrow, little prospect of upstreaming
+this, and no upstream design that blocks doing it fork-locally. It also means the athdf
+layout should be treated as a **versioned contract we validate on read**, not as a stable
+format — see §4.
+
+---
+
+## 2. What an athdf actually contains
+
+From `src/outputs/athena_hdf5.cpp`, attributes at lines 579-655 and datasets at 687-703:
+
+| Item | Kind | Meaning |
+|---|---|---|
+| `Coordinates` | attr, string | the `COORDINATE_SYSTEM` macro |
+| `RootGridX1/X2/X3` | attr, 3x real | `(xmin, xmax, xrat)` of the root mesh |
+| `RootGridSize` | attr, 3x int | `mesh_size.nx1/2/3` |
+| `MeshBlockSize` | attr, 3x int | `block_size.nx1/2/3` |
+| `MaxLevel` | attr, int | `current_level - root_level`, physical |
+| `NumMeshBlocks` | attr, int | `nbtotal` |
+| `Levels` | dset `[nb]` | `loc.level - root_level`, **physical** level |
+| `LogicalLocations` | dset `[nb][3]` | `loc.lx1/lx2/lx3`, **logical** indices at `loc.level` |
+| `x1f,x2f,x3f` | dset `[nb][nx+1]` | per-block face coordinates |
+| `x1v,x2v,x3v` | dset `[nb][nx]` | per-block cell centers |
+
+Note the asymmetry at `athena_hdf5.cpp:390-393`: `Levels` is offset by `root_level` and
+`LogicalLocations` is not.
+
+**The .xdmf is never needed.** It is derived XML written by `MakeXDMF()` from data already
+in the athdf; `athena_read.athdf()` ignores it entirely.
+
+### The reconstruction identity
+
+The athdf carries exactly the tree information the restart ID list carries:
+
+```
+nrbx{1,2,3} = RootGridSize / MeshBlockSize
+root_level  = smallest r with (1<<r) >= max(nrbx1,nrbx2,nrbx3)     // mesh.cpp:341
+loclist[i]  = { lx = LogicalLocations[i], level = Levels[i] + root_level }
+```
+
+which then replays through the code that already exists for restarts, `mesh.cpp:857-870`:
+
+```cpp
+tree.CreateRootGrid();
+for (int i=0; i<nbtotal; i++) tree.AddMeshBlockWithoutRefine(loclist[i]);
+tree.GetMeshBlockList(loclist, nullptr, nnb);
+```
+
+**AMR is the easy case, not the hard one.** An AMR tree is just an arbitrary `loclist`, and
+`AddMeshBlockWithoutRefine` accepts any of them. What is awkward today is SMR, because the
+current constructor *re-derives* the tree from `<refinement>` blocks via the bisection
+search at `mesh.cpp:434-516`. Replaying `loclist` bypasses that and covers uniform, SMR and
+AMR through one path.
+
+A useful consequence: the block index in the file **is** the gid of the reconstructed mesh.
+`first_block = nslist[my_rank]` (`athena_hdf5.cpp:103`), and both runs order blocks by
+`tree.GetMeshBlockList` over the same tree, so `start_cons_file[1] = gid` in
+`from_array.cpp:65` and `mc_readhdf.cpp:483` keeps working. We should still build an
+explicit permutation rather than lean on the invariant — cheap insurance, see §5 Phase B.
+
+---
+
+## 3. What the athdf does *not* contain
+
+This is the answer to "is the file alone enough": enough for the **grid**, not for the
+physics.
+
+- **Physics parameters.** No GR spin or mass, no `gamma`, no units, no opacity settings, no
+  boundary flags. Boundary flags matter to us specifically:
+  `Photon::ApplyBoundaryConditions` (`photon.cpp:478`) branches on mesh extent for periodic
+  wrapping, and `mesh.cpp:144` already derives fluid BCs from the MC `ix1_mc_bc` settings.
+  An athinput is still required; it just no longer has to describe the grid.
+- **User mesh generators.** If the source run called `EnrollUserMeshGenerator`, the athdf
+  records only `x1rat`, and `SetBlockSizeAndBoundaries` (`mesh.cpp:1759`) will regenerate
+  the wrong face positions. Detectable by comparing against the stored `x1f` — do it.
+- **Precision.** Default athdf output is single precision (`athena_hdf5.cpp:43-53`;
+  `-h5double` opts in), so `x1min/x1max/x1rat` carry only about seven digits. The error
+  does **not** compound over `nx1`, contrary to what this note first assumed:
+  `DefaultMeshGeneratorX1` evaluates `rat^(x*nx)` on a normalized fraction rather than
+  multiplying iteratively, so what is left is just the float32 storage of the attributes.
+  Measured on a real 5-level spherical-polar AMR snapshot with a logarithmic radial grid
+  (r = 2.7 to 400, 83231 blocks), the worst disagreement between regenerated and stored
+  faces is 2.1e-7 relative, essentially float32 epsilon. The face check therefore uses a
+  1e-6 relative tolerance. `-h5double` is still worth recommending for new runs, but it is
+  not needed for the grid to be recovered correctly.
+- **`costlist`.** Restart has per-block costs; athdf does not. Uniform costs are fine for
+  post-processing.
+- **NGHOST / xorder.** Not stored, and with `multilevel` the constructor enforces
+  `block_size.nx >= max(2*(xorder-1), NGHOST)` (`mesh.cpp:300`). An MC build with
+  `NGHOST=4` reading a snapshot with 8^3 blocks will trip this. Needs a clear error.
+
+---
+
+## 4. Two upstream writer changes to defend against
+
+Our `athena_hdf5.cpp` is behind upstream, and both deltas touch what a reader consumes.
+Files produced by newer upstream builds may arrive here, so validate rather than assume.
+
+1. **`mesh_data` output option** (upstream `outputs.cpp:345`, default `true`). When false,
+   `Coordinates`, `RootGridX1/2/3`, `RootGridSize`, `NumMeshBlocks`, `MeshBlockSize`,
+   `MaxLevel` *and* `x1f..x3v` are all omitted. `Levels` and `LogicalLocations` are still
+   written unconditionally, so the tree survives but the root extent and the face
+   cross-check do not. Detect and fail with a clear message.
+2. **`ATHDF5Output` templated on output type**, with a per-output `data_format`
+   (`f16`/`f32`/`f64`/`f128`/`u8`..`u64`). Mesh coordinates follow a separate `mesh_t` that
+   tracks the cell-data type, except that unsigned dumps fall back to the compile-time
+   `H5Real` — so the precision caveat in §3 is not fixed upstream. The `u8`/`u16` modes
+   store cell data as integers scaled by `vmin`/`vmax` and should be rejected outright.
+
+The reconstruction identity itself is unchanged upstream: `Levels` is still
+`loc.level - root_level` and `LogicalLocations` still `loc.lx1/2/3`.
+
+---
+
+## 5. Containment: how this respects the module boundary
+
+The MC module is a separate code built on the Athena++ mesh, and development stays inside
+`src/monte_carlo/` wherever possible. Where other parts of the tree must be touched, the
+change is wrapped in `if (MONTE_CARLO_ENABLED)`. This plan keeps that.
+
+Three facts make full containment practical here:
+
+- `src/monte_carlo/*.cpp` is compiled **unconditionally** (`Makefile.in:55` wildcard). MC
+  translation units always link.
+- `MONTE_CARLO_ENABLED` is `#define`d to `0` or `1` (`defs.hpp.in:52`, `configure.py:797`),
+  so the house style outside the module is a runtime `if (MONTE_CARLO_ENABLED)` — see
+  `mesh.cpp:144`, `main.cpp:325`, `outputs.cpp:133`, `time_integrator.cpp:106`. The
+  preprocessor form appears only in pgens, as a whole-file `#error` guard.
+- Because both branches of a runtime `if` are compiled, MC types may be named freely in
+  gated code. `main.cpp:324` declares `MonteCarlo *pmc;` in plain scope and constructs it
+  inside the gate. The dead branch is optimized away when MC is off.
+
+Together these mean the entire reader lives in `src/monte_carlo/`, and the footprint
+outside it collapses to two small gated hooks. `mesh.cpp:144` is a direct precedent: an
+`if (MONTE_CARLO_ENABLED)` block *inside the Mesh constructor* that reads MC-specific input
+and adjusts mesh setup, with a comment about enforcing mesh refinement consistency.
+
+One deliberate departure from the earlier sketch of this work: the HDF5 attribute and
+integer-dataset readers do **not** go into `src/inputs/hdf5_reader.cpp`. They are needed
+only by this feature, so they go in the new MC file with their own `#ifdef HDF5OUTPUT`
+guard, mirroring how `hdf5_reader.cpp` guards itself. See §8 for the alternative.
+
+### Where the code goes
+
+| piece | file | in/out of module |
+|---|---|---|
+| `MCGridFile` — reads and validates the athdf header, owns `loclist`, `file_index` | `monte_carlo/mcgrid.cpp/.hpp` (new) | in |
+| HDF5 attribute + int/int64 dataset helpers, `#ifdef HDF5OUTPUT` | `monte_carlo/mcgrid.cpp` | in |
+| `MCGridFile::Requested(pin)`, `MCGridFile::InjectMeshParameters(pin)` | `monte_carlo/mcgrid.cpp` | in |
+| gated call to inject `<mesh>`/`<meshblock>` params before `new Mesh(...)` | `main.cpp` ~line 270 | **out, gated** |
+| gated branch replacing the `<refinement>` loop with the `loclist` replay | `mesh.cpp` ~383-519 | **out, gated** |
+| read cell data by `file_index[gid]` instead of `gid` | `pgen/mc_readhdf.cpp`, `pgen/mc_xrb_hdf_gr.cpp` | pgen, already MC-only |
+
+---
+
+## 6. Phased plan
+
+### Phase A — `MCGridFile`, header reading and validation (~250 lines, in module)
+
+New `src/monte_carlo/mcgrid.{hpp,cpp}`. A small class holding `mesh_size`, `block_size`,
+`nbtotal`, `root_level`, `max_level`, `loclist[]`, `file_index[]` and the `Coordinates`
+string, plus the HDF5 helpers to fill it. All HDF5 code inside `#ifdef HDF5OUTPUT`; the
+non-HDF5 build compiles to a stub that `ATHENA_ERROR`s if the feature is requested.
+HDF5 converts the BE on-disk types, so pass `H5T_NATIVE_INT` / `H5T_NATIVE_INT64`.
+
+Validation is most of the value here. All of it fails loudly rather than silently
+producing a wrong grid:
+
+- `RootGridSize % MeshBlockSize == 0`; catches `ghost_zones=true` outputs where
+  `MeshBlockSize` includes ghosts.
+- Reject sliced and summed outputs. These break the file-index/gid identity at
+  `athena_hdf5.cpp:311-318`, where `first_block` is recounted over active blocks only.
+- Reject files missing the §4 `mesh_data` attributes, and integer-quantized `data_format`.
+- `Coordinates` against `COORDINATE_SYSTEM`; abort on mismatch.
+- Reconstructed faces against the stored `x1f/x2f/x3f`, per block, at float tolerance.
+  This is the check that catches a user mesh generator (§3).
+- Block-size floor against `NGHOST`/`xorder` when the tree is multilevel (§3).
+
+Build `file_index[]` by matching `(level,lx1,lx2,lx3)` to the post-`GetMeshBlockList`
+`loclist` rather than assuming file order equals gid order.
+
+### Phase B — parameter injection (~10 lines out of module, gated)
+
+The `Mesh` constructor reads `<mesh>` in its member-initializer list, before the body runs,
+so injection must happen earlier. In `main.cpp`, immediately before
+`pmesh = new Mesh(pinput, mesh_flag)`:
+
+```cpp
+if (MONTE_CARLO_ENABLED) {
+  if (MCGridFile::Requested(pinput)) MCGridFile::InjectMeshParameters(pinput);
+}
+```
+
+which `pin->SetInteger`/`SetReal`s the twelve `<mesh>`/`<meshblock>` values and sets
+`refinement`. **Uniform snapshots are fully automatic at the end of this phase, with zero
+changes to `Mesh`** — worth landing and testing on its own.
+
+### Phase C — tree replay (~20 lines out of module, gated)
+
+One gated branch in the `Mesh` constructor selecting between the existing `<refinement>`
+loop (`mesh.cpp:383-519`) and the three-line replay from §2, with `adaptive` left false so
+`max_level = current_level` at `mesh.cpp:520` and no refinement happens during the MC run.
+Shaped like the `mesh.cpp:144` precedent. This is where SMR and AMR start working.
+
+### Phase D — pgen (~5 lines, already MC-only)
+
+Swap `start_cons_file[1] = gid` for `file_index[gid]`, and drop the hand-maintained grid
+parameters from the MC athinputs.
+
+### Phase E — photon transport across refinement boundaries
+
+**Budget most of the schedule here.** The grid reading is mechanical; this is the part that
+is genuinely unknown.
+
+The neighbor machinery is already level-aware and `Photon` inherits all of it:
+`Particles::LinkNeighbors` has a `multilevel` branch filling in missing fine-to-coarse
+directions from the tree (`particles.cpp:513-540`), and `FindTargetNeighbor` walks the
+neighbor list to pick the right fine block on coarse-to-fine (`particles.cpp:1045-1066`).
+But nothing in `src/monte_carlo/` mentions `level` at all, so **none of this has ever been
+exercised with photons**, and the pushers' cell-index arithmetic at a level jump is
+unverified.
+
+Also in this phase: with `multilevel` true the blocks allocate coarse buffers and
+`Mesh::Initialize` runs prolongation/restriction to fill ghost zones. The pgens set
+`phydro->w` on active zones only, so ghost values at a fine/coarse interface come from
+prolongation. Confirm that actually runs on the MC path before trusting opacities near a
+level jump.
+
+Suggested tests, smallest first: a two-level static box with a known analytic solution
+where photons must cross the interface in both directions; then the same with MPI and the
+blocks split across ranks; then energy conservation of the accumulated moments across the
+jump.
+
+---
+
+## 7. Open decisions
+
+- **Input parameter naming.** Something like `<montecarlo> grid_from_file = <path>`, or
+  reuse the existing `<problem> input_filename` that the MC pgens already take. The latter
+  avoids naming the same file twice but couples grid setup to a `<problem>` key.
+- **Whether to also snap `x1rat`.** With single-precision attributes we could round a
+  near-rational ratio to a clean value, or leave it and accept float-level face offsets.
+  Leaving it is simpler and the face check bounds the error; revisit only if it bites.
+- **How hard to fail on a `Coordinates` mismatch.** An error is right for a genuine
+  mismatch, but `gr_user` snapshots may legitimately carry a name that differs from the MC
+  build's. May need an override flag.
+
+## 8. Alternatives considered
+
+- **Use `.rst` instead.** A restart embeds the complete input deck via
+  `pin->ParameterDump` (`restart.cpp:70`) *and* the exact tree at double precision, so it
+  sidesteps Phases A-C entirely. Rejected as the primary path because restart files are
+  architecture dependent (per §1) and because we frequently have athdf snapshots without
+  matching restarts. Still the better route when a `.rst` is available on the same
+  architecture, and worth documenting for users.
+- **Put the HDF5 helpers in `src/inputs/hdf5_reader.cpp`.** More reusable and the natural
+  home if this were ever upstreamed, but it adds ungated API surface outside the module for
+  a feature only MC uses. Revisit if a non-MC caller appears.
+- **A third `Mesh` constructor** taking a filename. Cleaner separation than a gated branch,
+  but duplicates roughly 250 lines of the restart constructor's post-tree bookkeeping
+  (load balance, block creation, `SearchAndSetNeighbors`) and puts a large ungated block of
+  MC-motivated code in `mesh.cpp`. Rejected on both counts.
+
+## 9. Notes for whoever picks this up
+
+- `mcgrid.hpp` is a new header. Per the repo build rule, `make clean` before `make` after
+  touching it — the Makefile tracks no header dependencies, and a partial rebuild after a
+  layout change produces a silently mismatched binary.
+- The local `amr_reader` branch is currently byte-identical to `main`; there is no
+  work-in-progress there to build on.
