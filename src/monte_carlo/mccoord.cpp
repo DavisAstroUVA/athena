@@ -96,6 +96,32 @@ bool IsMCRelativistic(MCCoordSystem c) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn bool IsMCPusherAlwaysGeneral(MCCoordSystem c)
+//! \brief true when the coordinate system is integrated with GeneralPusher regardless of
+//!        <montecarlo>/general_pusher
+//!
+//! Mirrors the switch in the MonteCarloBlock constructor, which honours the input flag
+//! only for Cartesian and spherical-polar and picks GeneralPusher unconditionally for
+//! everything else.  Keep the two in step: general_pusher_flag does not select the
+//! pusher, it selects the four-vector storage convention and gates the polarization and
+//! frame machinery, so a coordinate system that forces GeneralPusher while the flag is
+//! false leaves the module in a split state.  MonteCarlo::SetCoordinateSystem rejects
+//! that combination.
+//!
+//! Distinct from IsMCRelativistic: cylindrical forces GeneralPusher but is not
+//! relativistic and needs no GR build.
+
+bool IsMCPusherAlwaysGeneral(MCCoordSystem c) {
+  switch (c) {
+    case MCCOORD_CARTESIAN:
+    case MCCOORD_SPHERICAL_POLAR:
+      return false;
+    default:
+      return true;
+  }
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn bool HasFlatOrthonormalBasis(MCCoordSystem c)
 //! \brief true when the flat scale factors orthonormalize the coordinate basis
 //

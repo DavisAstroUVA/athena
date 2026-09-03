@@ -627,6 +627,40 @@ void MonteCarlo::SetCoordinateSystem(ParameterInput *pin) {
     }
   }
 
+  // The pusher is chosen from the coordinate system, not from general_pusher_flag: the
+  // MonteCarloBlock constructor honours the flag only for Cartesian and spherical-polar
+  // and builds a GeneralPusher unconditionally for everything else.  The flag still
+  // selects the four-vector storage convention and gates the polarization and frame
+  // machinery, so the two must agree.  Reject rather than silently correct: the flag also
+  // changes what the outputs mean, so flipping it under the user would misdescribe files
+  // they are about to write.
+  if (IsMCPusherAlwaysGeneral(coord_system) && !general_pusher_flag) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo::SetCoordinateSystem" << std::endl
+        << "Coordinate system '" << GetMCCoordSystemName(coord_system)
+        << "' is always integrated with GeneralPusher, but <montecarlo>/general_pusher"
+        << std::endl
+        << "is false.  Set <montecarlo>/general_pusher = true." << std::endl
+        << std::endl
+        << "general_pusher does not select the pusher.  It selects the four-vector "
+        << "storage" << std::endl
+        << "convention -- with it false, TransformToCoordinate stores a unit spatial "
+        << "direction" << std::endl
+        << "plus ep while RK4Step reads k1p..k3p as contravariant components, so the "
+        << "geodesics" << std::endl
+        << "are integrated on the wrong vector.";
+    if (IsPolarized(polarized)) {
+      msg << "  With polarized = "
+          << GetMCPolarizationName(polarized) << " it also silently disables the"
+          << std::endl
+          << "Stokes/coherency conversions in polarization.cpp and drops the "
+          << "polarization" << std::endl
+          << "tensor whenever a photon crosses a MeshBlock boundary.";
+    }
+    msg << std::endl;
+    ATHENA_ERROR(msg);
+  }
+
   topology = GetMCTopology(coord_system);
   curved_metric = IsMCMetricCurved(coord_system);
 

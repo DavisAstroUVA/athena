@@ -13,7 +13,9 @@
 // C++ headers
 #include <cmath>      // pow, fabs
 #include <cstring>    // strncmp
+#include <iomanip>    // setprecision
 #include <iostream>
+#include <limits>     // numeric_limits
 #include <sstream>
 #include <string>
 
@@ -551,20 +553,43 @@ void MCGridFile::ValidateFaces() const {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void MCGridFile::SetRealExact(ParameterInput *pin, const char *block,
+//!                                   const char *name, Real value)
+//! \brief store a Real in the input deck without losing precision.
+//!
+//! ParameterInput::SetReal formats through a default ostringstream, which keeps only 6
+//! significant digits.  That is harmless for the grid extent but not for x1rat: the mesh
+//! generator evaluates rat^(x*nx), so a rounded ratio is amplified by nx in the exponent.
+//! A logarithmic radial grid with rat = 1.0812277 and nx1 = 64 loses 2.1e-6 in the ratio
+//! and about 1e-4 in the face positions, which is well outside the tolerance the faces
+//! were just validated against.  Go through SetString instead, which stores the text
+//! verbatim for GetReal to parse back.
+
+void MCGridFile::SetRealExact(ParameterInput *pin, const char *block, const char *name,
+                              Real value) {
+  std::ostringstream ss;
+  ss << std::setprecision(std::numeric_limits<Real>::max_digits10) << value;
+  pin->SetString(block, name, ss.str());
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MCGridFile::InjectMeshParameters(ParameterInput *pin) const
 //! \brief overwrite the <mesh> and <meshblock> grid description with the file's, so the
 //!        Mesh constructor builds the snapshot's grid.  Must run before Mesh is built.
+//!
+//! ParameterInput::Set* creates the block and the parameters if they do not exist, so an
+//! input file that names a snapshot needs no <mesh> block of its own.
 
 void MCGridFile::InjectMeshParameters(ParameterInput *pin) const {
-  pin->SetReal("mesh", "x1min", mesh_size.x1min);
-  pin->SetReal("mesh", "x1max", mesh_size.x1max);
-  pin->SetReal("mesh", "x1rat", mesh_size.x1rat);
-  pin->SetReal("mesh", "x2min", mesh_size.x2min);
-  pin->SetReal("mesh", "x2max", mesh_size.x2max);
-  pin->SetReal("mesh", "x2rat", mesh_size.x2rat);
-  pin->SetReal("mesh", "x3min", mesh_size.x3min);
-  pin->SetReal("mesh", "x3max", mesh_size.x3max);
-  pin->SetReal("mesh", "x3rat", mesh_size.x3rat);
+  SetRealExact(pin, "mesh", "x1min", mesh_size.x1min);
+  SetRealExact(pin, "mesh", "x1max", mesh_size.x1max);
+  SetRealExact(pin, "mesh", "x1rat", mesh_size.x1rat);
+  SetRealExact(pin, "mesh", "x2min", mesh_size.x2min);
+  SetRealExact(pin, "mesh", "x2max", mesh_size.x2max);
+  SetRealExact(pin, "mesh", "x2rat", mesh_size.x2rat);
+  SetRealExact(pin, "mesh", "x3min", mesh_size.x3min);
+  SetRealExact(pin, "mesh", "x3max", mesh_size.x3max);
+  SetRealExact(pin, "mesh", "x3rat", mesh_size.x3rat);
   pin->SetInteger("mesh", "nx1", mesh_size.nx1);
   pin->SetInteger("mesh", "nx2", mesh_size.nx2);
   pin->SetInteger("mesh", "nx3", mesh_size.nx3);

@@ -88,6 +88,11 @@ class MCGridFile {
   // reproduce Mesh's face position for one global logical face index
   Real MeshPosition(int dir, std::int64_t index, std::int64_t nrange) const;
 
+  // store a Real in the input deck at full precision.  ParameterInput::SetReal keeps
+  // only 6 significant digits, which is not enough for x1rat.
+  static void SetRealExact(ParameterInput *pin, const char *block, const char *name,
+                           Real value);
+
   static MCGridFile *ploaded_;
 };
 
