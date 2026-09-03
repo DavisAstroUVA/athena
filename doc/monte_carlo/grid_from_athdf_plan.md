@@ -1,9 +1,22 @@
 # Reconstructing the Athena++ grid from an athdf snapshot: implementation plan
 
-Status: **phases A and B implemented** (`src/monte_carlo/mcgrid.{hpp,cpp}`, the gated hook
-in `main.cpp`, and the test in `tst/montecarlo/mcgrid/`). Uniform snapshots now set up
-their own grid. Phases C-E are not started. This note records the survey and the design so
-the rest can be picked up without re-deriving the context.
+Status: **phases A, B and C implemented** (`src/monte_carlo/mcgrid.{hpp,cpp}`, gated hooks
+in `main.cpp` and `mesh.cpp`, and the test in `tst/montecarlo/mcgrid/`). Uniform, SMR and
+AMR snapshots all set up their own grid; the block tree is replayed from the file. Phases
+D and E are not started, so the cell data is still read by `gid` rather than through
+`MCGridFile::FileIndex`, and photon transport across refinement boundaries is unverified.
+This note records the survey and the design so the rest can be picked up without
+re-deriving the context.
+
+Phase C was verified against a real 83231-block, 5-level spherical-polar AMR snapshot: the
+rebuilt tree reproduces the file's per-level block counts exactly (288 / 1075 / 2948 /
+14216 / 64704), and `MapBlocks` matched every block by logical location. A conventional
+SMR mesh built from `<refinement>` regions is byte-identical before and after the
+`mesh.cpp` change, in both stdout and `mesh_structure.dat`.
+
+Known cost: `MCGridFile::MapBlocks` is a linear scan per gid, so O(N^2) in the block
+count. It runs once at setup and takes roughly 4 s for 83231 blocks. Sort the file's
+locations and bisect if that ever matters.
 
 Motivation: the Monte Carlo module reads athdf snapshots of earlier Athena++ runs. Today
 the reader requires the MC athinput to describe a grid that matches the snapshot exactly,

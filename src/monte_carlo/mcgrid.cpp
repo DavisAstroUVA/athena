@@ -598,20 +598,12 @@ void MCGridFile::InjectMeshParameters(ParameterInput *pin) const {
   pin->SetInteger("meshblock", "nx2", block_size.nx2);
   pin->SetInteger("meshblock", "nx3", block_size.nx3);
 
-  // A refined snapshot is replayed from the file's block list rather than refined during
-  // the run, so the mesh is static.  The tree replay itself lands in a later phase; a
-  // multilevel file cannot be built correctly until then.
-  if (multilevel) {
-    pin->SetString("mesh", "refinement", "static");
-    std::stringstream msg;
-    msg << "### FATAL ERROR in MCGridFile" << std::endl
-        << filename << " holds " << (max_level - root_level + 1) << " refinement levels."
-        << std::endl
-        << "Rebuilding a refined tree from an athdf file is not implemented yet; only"
-        << std::endl << "uniform snapshots can be read this way so far." << std::endl;
-    ATHENA_ERROR(msg);
-  }
-  pin->SetString("mesh", "refinement", "none");
+  // A refined snapshot is replayed from the file's block list by the Mesh constructor
+  // rather than refined during the run, so the mesh is static: "static" turns on the
+  // multilevel machinery (coarse buffers, prolongation and restriction at level jumps)
+  // without letting the tree change.  Never "adaptive" -- refining a post-processing run
+  // away from the grid the snapshot was written on would defeat the point.
+  pin->SetString("mesh", "refinement", multilevel ? "static" : "none");
 }
 
 //----------------------------------------------------------------------------------------
