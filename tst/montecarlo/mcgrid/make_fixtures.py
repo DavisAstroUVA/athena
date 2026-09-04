@@ -148,7 +148,12 @@ def main():
     write(p("bad_slice.athdf"), rgs, [8, 8, 1], uni, flat_l, flat_o, args.coord)
     write(p("bad_nomesh.athdf"), rgs, mbs, uni, flat_l, flat_o, args.coord,
           mesh_data=False)
-    write(p("bad_coord.athdf"), rgs, mbs, uni, flat_l, flat_o, "cartesian")
+    # a genuinely different grid topology must be rejected ...
+    write(p("bad_coord.athdf"), rgs, mbs, uni, flat_l, flat_o, "spherical_polar")
+    # ... while a different name for the same topology must not be.  This is the
+    # AthenaK case: such a snapshot is labelled "cartesian" even when the run was
+    # general-relativistic, because the name records the grid, not the spacetime.
+    write(p("coord_compatible.athdf"), rgs, mbs, uni, flat_l, flat_o, "minkowski")
     write(p("bad_tiling.athdf"), rgs, mbs, uni, flat_l, flat_o, args.coord,
           drop_block=True)
     write(p("bad_usergen.athdf"), rgs, mbs, uni, flat_l, flat_o, args.coord,

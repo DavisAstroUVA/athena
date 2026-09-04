@@ -28,13 +28,14 @@ DEFAULT_ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 
 # fixture -> (accepted?, substring the rejection message must contain)
 EXPECTED = {
-    "uniform_ok.athdf":   (True, None),
-    "ratio_ok.athdf":     (True, None),
-    "amr_ok.athdf":       (True, None),
+    "uniform_ok.athdf":       (True, None),
+    "ratio_ok.athdf":         (True, None),
+    "amr_ok.athdf":           (True, None),
+    "coord_compatible.athdf": (True, None),
     "bad_ghost.athdf":    (False, "not divisible by the block size"),
     "bad_slice.athdf":    (False, "sliced or summed output"),
     "bad_nomesh.athdf":   (False, "mesh_data = false"),
-    "bad_coord.athdf":    (False, "this build is configured for"),
+    "bad_coord.athdf":    (False, "different grid topology"),
     "bad_tiling.athdf":   (False, "gaps or overlaps"),
     "bad_usergen.athdf":  (False, "user-defined mesh generator"),
     "bad_intdata.athdf":  (False, "stores cell data as integers"),
@@ -120,7 +121,11 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(args.workdir, exist_ok=True)
-    coord = coord_of(os.path.join(args.path, "src", "defs.hpp")) or "cartesian"
+    # Build the fixture driver at a fixed coordinate system rather than whatever the tree
+    # happens to be configured for.  The coordinate check compares grid topologies, so a
+    # tree configured for gr_user -- which implies no topology -- would skip it entirely
+    # and quietly turn bad_coord.athdf into a no-op.
+    coord = "cartesian"
     print("building driver (COORDINATE_SYSTEM = %s)" % coord)
     exe = build(args.path, args.workdir, coord)
 

@@ -21,6 +21,8 @@
 #include "../inputs/hdf5_reader.hpp"  // HDF5ReadRealArray()
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"     // ParameterInput
+#include "../monte_carlo/mcgrid.hpp"
+#include "../monte_carlo/mcsnapshot.hpp"
 #include "../monte_carlo/montecarlo.hpp"
 #include "../monte_carlo/photon.hpp"
 #include "../monte_carlo/mcutils.hpp"
@@ -452,198 +454,17 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
-  // Determine locations of initial values
-  std::string input_filename = pin->GetString("problem", "input_filename");
-  bool resampled = pin->GetOrAddBoolean("problem","resampled",false);
-  bool collective = pin->GetOrAddBoolean("problem","collective",false);
-  bool athenak_input = pin->GetOrAddBoolean("problem","athenak_input",false);
-
-  if (resampled) {
-    for (int k=ks; k<=ke; ++k) {
-      Real z_now = pcoord->x3f(k);
-      int index_znow = getindex(x3coord, z_now);
-      for (int j=js; j<=je; ++j) {
-        Real y_now = pcoord->x2f(j);
-        int index_ynow = getindex(x2coord, y_now);
-        for (int i=is; i<=ie; ++i) {
-          Real x_now = pcoord->x1f(i);
-          int index_xnow = getindex(x1coord, x_now);
-
-          phydro->w(IDN,k,j,i) = pmy_mesh->ruser_mesh_data[0](index_znow, index_ynow,
-                                                              index_xnow);
-          phydro->w(IVX,k,j,i) = pmy_mesh->ruser_mesh_data[1](index_znow, index_ynow,
-                                                              index_xnow);
-          phydro->w(IVY,k,j,i) = pmy_mesh->ruser_mesh_data[2](index_znow, index_ynow,
-                                                              index_xnow);
-          phydro->w(IVZ,k,j,i) = pmy_mesh->ruser_mesh_data[3](index_znow, index_ynow,
-                                                              index_xnow);
-          phydro->w(IPR,k,j,i) = pmy_mesh->ruser_mesh_data[4](index_znow, index_ynow,
-                                                              index_xnow);
-          Real gaml = std::sqrt(SQR(phydro->w(IVX,k,j,i)) + SQR(phydro->w(IVY,k,j,i))
-            + SQR(phydro->w(IVZ,k,j,i)) + 1.);
-          phydro->w(IVX,k,j,i) /= gaml;
-          phydro->w(IVY,k,j,i) /= gaml;
-          phydro->w(IVZ,k,j,i) /= gaml;
-          printf("v: %g %g %g\n",phydro->w(IVX,k,j,i),phydro->w(IVY,k,j,i),
-                 phydro->w(IVZ,k,j,i));
-        }// end i
-      }//end j
-    }// end k
-  } else {
-    std::string dataset_cons = pin->GetString("problem", "dataset_cons");
-    int index_dens = pin->GetInteger("problem", "index_dens");
-    int index_mom1 = pin->GetInteger("problem", "index_mom1");
-    int index_mom2 = pin->GetInteger("problem", "index_mom2");
-    int index_mom3 = pin->GetInteger("problem", "index_mom3");
-    int index_etot = pin->GetInteger("problem", "index_etot");
-    std::string dataset_b1 = pin->GetString("problem", "dataset_b1");
-    std::string dataset_b2 = pin->GetString("problem", "dataset_b2");
-    std::string dataset_b3 = pin->GetString("problem", "dataset_b3");
-  
-    // Set conserved array selections
-    int start_cons_file[5];
-    start_cons_file[1] = gid;
-    start_cons_file[2] = 0;
-    start_cons_file[3] = 0;
-    start_cons_file[4] = 0;
-    int start_cons_indices[5];
-    start_cons_indices[IDN] = index_dens;
-    start_cons_indices[IM1] = index_mom1;
-    start_cons_indices[IM2] = index_mom2;
-    start_cons_indices[IM3] = index_mom3;
-    start_cons_indices[IEN] = index_etot;
-    int count_cons_file[5];
-    count_cons_file[0] = 1;
-    count_cons_file[1] = 1;
-    count_cons_file[2] = block_size.nx3;
-    count_cons_file[3] = block_size.nx2;
-    count_cons_file[4] = block_size.nx1;
-    int start_cons_mem[4];
-    start_cons_mem[1] = ks;
-    start_cons_mem[2] = js;
-    start_cons_mem[3] = is;
-    int count_cons_mem[4];
-    count_cons_mem[0] = 1;
-    count_cons_mem[1] = block_size.nx3;
-    count_cons_mem[2] = block_size.nx2;
-    count_cons_mem[3] = block_size.nx1;
-
-    // Set conserved values from file SWD: setting prims for now
-    for (int n = 0; n < NHYDRO; ++n) {
-      start_cons_file[0] = start_cons_indices[n];
-      start_cons_mem[0] = n;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_cons.c_str(), 5, start_cons_file,
-                        count_cons_file, 4, start_cons_mem,
-                        count_cons_mem, phydro->w, collective);
-    }
-
-    // Set field array selections
-    int start_field_file[4];
-    start_field_file[0] = gid;
-    start_field_file[1] = 0;
-    start_field_file[2] = 0;
-    start_field_file[3] = 0;
-    int count_field_file[4];
-    count_field_file[0] = 1;
-    int start_field_mem[3];
-    start_field_mem[0] = ks;
-    start_field_mem[1] = js;
-    start_field_mem[2] = is;
-    int count_field_mem[3];
-
-    // Set magnetic field values from file
-    if (MAGNETIC_FIELDS_ENABLED) {
-      // Set B1
-      count_field_file[1] = block_size.nx3;
-      count_field_file[2] = block_size.nx2;
-      count_field_file[3] = block_size.nx1 + 1;
-      count_field_mem[0] = block_size.nx3;
-      count_field_mem[1] = block_size.nx2;
-      count_field_mem[2] = block_size.nx1 + 1;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_b1.c_str(), 4, start_field_file,
-                        count_field_file, 3, start_field_mem,
-                        count_field_mem, pfield->b.x1f, collective);
-
-      // Set B2
-      count_field_file[1] = block_size.nx3;
-      count_field_file[2] = block_size.nx2 + 1;
-      count_field_file[3] = block_size.nx1;
-      count_field_mem[0] = block_size.nx3;
-      count_field_mem[1] = block_size.nx2 + 1;
-      count_field_mem[2] = block_size.nx1;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_b2.c_str(), 4, start_field_file,
-                        count_field_file, 3, start_field_mem,
-                        count_field_mem, pfield->b.x2f, collective);
-
-      // Set B3
-      count_field_file[1] = block_size.nx3 + 1;
-      count_field_file[2] = block_size.nx2;
-      count_field_file[3] = block_size.nx1;
-      count_field_mem[0] = block_size.nx3 + 1;
-      count_field_mem[1] = block_size.nx2;
-      count_field_mem[2] = block_size.nx1;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_b3.c_str(), 4, start_field_file,
-                        count_field_file, 3, start_field_mem,
-                        count_field_mem, pfield->b.x3f, collective);
-    }
-
-    // Make no-op collective reads if using MPI and ranks have unequal numbers of blocks
-#ifdef MPI_PARALLEL
-    {
-      int num_blocks_this_rank = pmy_mesh->nblist[Globals::my_rank];
-      if (lid == num_blocks_this_rank - 1) {
-        int block_shortage_this_rank = 0;
-        for (int rank = 0; rank < Globals::nranks; ++rank) {
-          block_shortage_this_rank =
-            std::max(block_shortage_this_rank,
-                     pmy_mesh->nblist[rank] - num_blocks_this_rank);
-        }
-        for (int block = 0; block < block_shortage_this_rank; ++block) {
-          for (int n = 0; n < NHYDRO; ++n) {
-            start_cons_file[0] = start_cons_indices[n];
-            start_cons_mem[0] = n;
-            HDF5ReadRealArray(input_filename.c_str(), dataset_cons.c_str(), 5,
-                              start_cons_file, count_cons_file, 4,
-                              start_cons_mem, count_cons_mem,
-                              phydro->w, collective, true);
-          }
-	  if (MAGNETIC_FIELDS_ENABLED) {
-	    count_field_file[1] = block_size.nx3;
-	    count_field_file[2] = block_size.nx2;
-	    count_field_file[3] = block_size.nx1 + 1;
-	    count_field_mem[0] = block_size.nx3;
-	    count_field_mem[1] = block_size.nx2;
-	    count_field_mem[2] = block_size.nx1 + 1;
-	    HDF5ReadRealArray(input_filename.c_str(), dataset_b1.c_str(), 4,
-                              start_field_file, count_field_file, 3,
-                              start_field_mem, count_field_mem,
-                              pfield->b.x1f, collective, true);
-	    count_field_file[1] = block_size.nx3;
-	    count_field_file[2] = block_size.nx2 + 1;
-	    count_field_file[3] = block_size.nx1;
-	    count_field_mem[0] = block_size.nx3;
-	    count_field_mem[1] = block_size.nx2 + 1;
-	    count_field_mem[2] = block_size.nx1;
-	    HDF5ReadRealArray(input_filename.c_str(), dataset_b2.c_str(), 4,
-                              start_field_file, count_field_file, 3,
-                              start_field_mem, count_field_mem,
-                              pfield->b.x2f, collective, true);
-	    count_field_file[1] = block_size.nx3 + 1;
-	    count_field_file[2] = block_size.nx2;
-	    count_field_file[3] = block_size.nx1;
-	    count_field_mem[0] = block_size.nx3 + 1;
-	    count_field_mem[1] = block_size.nx2;
-	    count_field_mem[2] = block_size.nx1;
-	    HDF5ReadRealArray(input_filename.c_str(), dataset_b3.c_str(), 4,
-			      start_field_file, count_field_file, 3,
-			      start_field_mem, count_field_mem,
-			      pfield->b.x3f, collective, true);
-	  }	  
-        }
-      }
-    }
-#endif
-  } // end if (resampled) else
+  // All of the hyperslab bookkeeping now lives in MCReadSnapshotBlock, which locates the
+  // variables by name from the file itself.  That covers both an Athena++ dump (rho,
+  // press, vel1) and one converted from an AthenaK run (dens, eint, velx), so the
+  // <problem>/dataset_cons, index_* and athenak_input keys are no longer needed: the
+  // internal-energy-to-pressure conversion is driven by what the file actually holds.
+  // Mesh::nblist is private to everything but MeshBlock, so the collective-read padding
+  // count is gathered here and handed over.
+  int max_blocks_per_rank = 0;
+  for (int r = 0; r < Globals::nranks; ++r)
+    max_blocks_per_rank = std::max(max_blocks_per_rank, pmy_mesh->nblist[r]);
+  MCReadSnapshotBlock(this, pin, max_blocks_per_rank);
 
   // Set index bounds
   int il = is - NGHOST;
@@ -660,66 +481,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
     kl -= NGHOST;
     ku += NGHOST;
   }
-  // for testing
-  //if (gid == 61) {
-  //for (int k=ks; k<=ke; ++k) {
-  //  for (int j=js; j<=je; ++j) {
-  //    for (int i=is; i<=ie; ++i) {
-  //	printf("%d %d %d %d %g %g\n",gid,k,j,i,phydro->w(IEN,k,j,i),phydro->w(IDN,k,j,i));
-  //    }
-  //  }
-  //}
-  //}
-  /*Real rho_const = pin->GetOrAddReal("problem", "rho_const", 0.);
-    if (rho_const > 0.) {
-    for (int k=ks; k<=ke; ++k) {
-    for (int j=js; j<=je; ++j) {
-    for (int i=is; i<=ie; ++i) {
-    //if (phydro->w(IDN,k,j,i) > rho_const)
-    phydro->w(IDN,k,j,i) = rho_const;
-    }
-    }
-    }
-    }
-    Real temp_const = pin->GetOrAddReal("problem", "temp_const", 0.);
-    if (temp_const > 0.) {
-    for (int k=ks; k<=ke; ++k) {
-    for (int j=js; j<=je; ++j) {
-    for (int i=is; i<=ie; ++i) {
-    //if (phydro->w(IPR,k,j,i)/phydro->w(IDN,k,j,i) > temp_const)
-    phydro->w(IPR,k,j,i) = phydro->w(IDN,k,j,i) * temp_const;
-    }
-    }
-    }
-    }*/
-
-  if (athenak_input) {
-    // primitive variable is internal energy rather than pressure
-    Real gamma = peos->GetGamma();
-    for (int k=ks; k<=ke; ++k) {
-      for (int j=js; j<=je; ++j) {
-        for (int i=is; i<=ie; ++i) {
-          phydro->w(IPR,k,j,i) *= (gamma-1.);
-        }
-      }
-    }
-  }
 
   // Initialize conserved
   peos->PrimitiveToConserved(phydro->w, pfield->bcc, phydro->u, pcoord, il, iu, jl, ju,
                              kl, ku);
-
-  if (gid == 61) {
-    printf("pgen: %d %d %d %d %g %g\n",gid,5,37,5,phydro->w(IEN,5,37,5),phydro->w(IDN,5,37,5));
-    /*for (int k=ks; k<=ke; ++k) {
-      for (int j=js; j<=je; ++j) {
-	for (int i=is; i<=ie; ++i) {
-	  printf("pgen: %d %d %d %d %g %g\n",gid,k,j,i,phydro->w(IEN,k,j,i),phydro->w(IDN,k,j,i));
-	}
-      }
-      }*/
-  }
-  
 }
 
 //========================================================================================

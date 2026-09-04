@@ -22,6 +22,8 @@
 #include "../inputs/hdf5_reader.hpp"  // HDF5ReadRealArray()
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"     // ParameterInput
+#include "../monte_carlo/mcgrid.hpp"
+#include "../monte_carlo/mcsnapshot.hpp"
 #include "../monte_carlo/montecarlo.hpp"
 #include "../monte_carlo/photon.hpp"
 #include "../monte_carlo/mcutils.hpp"
@@ -472,74 +474,15 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
       }//end j
     }// end k
   } else {
-    std::string dataset_cons = pin->GetString("problem", "dataset_cons");
-    int index_dens = pin->GetInteger("problem", "index_dens");
-    int index_mom1 = pin->GetInteger("problem", "index_mom1");
-    int index_mom2 = pin->GetInteger("problem", "index_mom2");
-    int index_mom3 = pin->GetInteger("problem", "index_mom3");
-    int index_etot = pin->GetInteger("problem", "index_etot");
-
-    // Set conserved array selections
-    int start_cons_file[5];
-    start_cons_file[1] = gid;
-    start_cons_file[2] = 0;
-    start_cons_file[3] = 0;
-    start_cons_file[4] = 0;
-    int start_cons_indices[5];
-    start_cons_indices[IDN] = index_dens;
-    start_cons_indices[IM1] = index_mom1;
-    start_cons_indices[IM2] = index_mom2;
-    start_cons_indices[IM3] = index_mom3;
-    start_cons_indices[IEN] = index_etot;
-    int count_cons_file[5];
-    count_cons_file[0] = 1;
-    count_cons_file[1] = 1;
-    count_cons_file[2] = block_size.nx3;
-    count_cons_file[3] = block_size.nx2;
-    count_cons_file[4] = block_size.nx1;
-    int start_cons_mem[4];
-    start_cons_mem[1] = ks;
-    start_cons_mem[2] = js;
-    start_cons_mem[3] = is;
-    int count_cons_mem[4];
-    count_cons_mem[0] = 1;
-    count_cons_mem[1] = block_size.nx3;
-    count_cons_mem[2] = block_size.nx2;
-    count_cons_mem[3] = block_size.nx1;
-
-    // Set conserved values from file
-    for (int n = 0; n < NHYDRO; ++n) {
-      start_cons_file[0] = start_cons_indices[n];
-      start_cons_mem[0] = n;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_cons.c_str(), 5, start_cons_file,
-                        count_cons_file, 4, start_cons_mem,
-                        count_cons_mem, phydro->w, collective);
-    }
-
-    // Make no-op collective reads if using MPI and ranks have unequal numbers of blocks
-#ifdef MPI_PARALLEL
-    {
-      int num_blocks_this_rank = pmy_mesh->nblist[Globals::my_rank];
-      if (lid == num_blocks_this_rank - 1) {
-        int block_shortage_this_rank = 0;
-        for (int rank = 0; rank < Globals::nranks; ++rank) {
-          block_shortage_this_rank =
-            std::max(block_shortage_this_rank,
-                     pmy_mesh->nblist[rank] - num_blocks_this_rank);
-        }
-        for (int block = 0; block < block_shortage_this_rank; ++block) {
-          for (int n = 0; n < NHYDRO; ++n) {
-            start_cons_file[0] = start_cons_indices[n];
-            start_cons_mem[0] = n;
-            HDF5ReadRealArray(input_filename.c_str(), dataset_cons.c_str(), 5,
-                              start_cons_file, count_cons_file, 4,
-                              start_cons_mem, count_cons_mem,
-                              phydro->w, collective, true);
-          }
-        }
-      }
-    }
-#endif
+    // The hyperslab bookkeeping lives in MCReadSnapshotBlock, which locates variables by
+    // name from the file, so an Athena++ dump (rho, press, vel1) and one converted from an
+    // AthenaK run (dens, eint, velx) are both read without describing the layout here.
+    // Mesh::nblist is private to everything but MeshBlock, so the collective-read padding
+    // count is gathered here and handed over.
+    int max_blocks_per_rank = 0;
+    for (int r = 0; r < Globals::nranks; ++r)
+      max_blocks_per_rank = std::max(max_blocks_per_rank, pmy_mesh->nblist[r]);
+    MCReadSnapshotBlock(this, pin, max_blocks_per_rank);
   } // end if (resampled) else
 
   // Set index bounds

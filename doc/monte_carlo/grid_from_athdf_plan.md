@@ -1,12 +1,19 @@
 # Reconstructing the Athena++ grid from an athdf snapshot: implementation plan
 
-Status: **phases A, B and C implemented** (`src/monte_carlo/mcgrid.{hpp,cpp}`, gated hooks
-in `main.cpp` and `mesh.cpp`, and the test in `tst/montecarlo/mcgrid/`). Uniform, SMR and
-AMR snapshots all set up their own grid; the block tree is replayed from the file. Phases
-D and E are not started, so the cell data is still read by `gid` rather than through
-`MCGridFile::FileIndex`, and photon transport across refinement boundaries is unverified.
-This note records the survey and the design so the rest can be picked up without
-re-deriving the context.
+Status: **phases A through D implemented** (`src/monte_carlo/mcgrid.{hpp,cpp}`, gated hooks
+in `main.cpp` and `mesh.cpp`, the `FileIndex` lookup in the three athdf-reading problem
+generators, and the test in `tst/montecarlo/mcgrid/`). Uniform, SMR and AMR snapshots all
+set up their own grid; the block tree is replayed from the file. **Phase E is not started,
+so photon transport across refinement boundaries is unverified — do not draw physics
+conclusions from a refined snapshot yet.** This note records the survey and the design so
+the rest can be picked up without re-deriving the context.
+
+On the gid/file-index question of section 2: measured on the real snapshot, the mapping is
+the identity for all 83231 blocks, as the argument there predicts. `MCGridFile::FileIndex`
+therefore changes no behaviour today. It is kept because the identity holds only as long
+as the writer and the reader both order blocks by `MeshBlockTree::GetMeshBlockList`, which
+no part of the athdf format guarantees, and because a silent mismatch would misattribute
+every cell in the run.
 
 Phase C was verified against a real 83231-block, 5-level spherical-polar AMR snapshot: the
 rebuilt tree reproduces the file's per-level block counts exactly (288 / 1075 / 2948 /

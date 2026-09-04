@@ -48,6 +48,33 @@ const char *kGridFileParam = "grid_from_file";
 // than multiplying iteratively, so the error does not grow with nx.
 const Real kFaceTol = 1.0e-6;
 
+// Grid topology implied by an Athena++ COORDINATE_SYSTEM name.  Deliberately local and
+// deliberately not MCTopology: that enum lives in mccoord.hpp, which pulls in
+// montecarlo.hpp, and this file is kept free of the rest of the module so it can be
+// compiled on its own by the test in tst/montecarlo/mcgrid.  It also answers a different
+// question than GetMCTopology, which maps this module's own metric enum -- that enum is
+// not resolved until MonteCarlo is constructed, well after a snapshot has to be checked,
+// and it has no member for names like schwarzschild or tilted.
+enum FileTopology {
+  FILETOPO_UNKNOWN = 0,
+  FILETOPO_CARTESIAN,
+  FILETOPO_CYLINDRICAL,
+  FILETOPO_SPHERICAL
+};
+
+//----------------------------------------------------------------------------------------
+//! \fn FileTopology TopologyOfCoordinateName(const std::string &name)
+//! \brief FILETOPO_UNKNOWN for a name that fixes no topology on its own, such as gr_user
+
+FileTopology TopologyOfCoordinateName(const std::string &name) {
+  if (name == "cartesian" || name == "minkowski"
+      || name == "tilted" || name == "sinusoidal") return FILETOPO_CARTESIAN;
+  if (name == "cylindrical") return FILETOPO_CYLINDRICAL;
+  if (name == "spherical_polar" || name == "schwarzschild"
+      || name == "kerr-schild") return FILETOPO_SPHERICAL;
+  return FILETOPO_UNKNOWN;
+}
+
 #ifdef HDF5OUTPUT
 
 //----------------------------------------------------------------------------------------
@@ -384,12 +411,25 @@ void MCGridFile::ValidateStructure() const {
     }
   }
 
+  // The file records the coordinate system its run was configured with.  That fixes the
+  // grid topology but not the spacetime, and the two names need not match: an
+  // AthenaK-derived snapshot of a Kerr-Schild Cartesian run is labelled "cartesian", with
+  // the spin recorded only in the embedded input deck, and this module reads it in a
+  // gr_user build.  So compare topologies rather than strings, and say nothing when
+  // either name implies no topology of its own.
   if (coordinates != std::string(COORDINATE_SYSTEM)) {
-    msg << "### FATAL ERROR in MCGridFile" << std::endl
-        << filename << " was written with coordinates '" << coordinates
-        << "' but this build is configured for '" << COORDINATE_SYSTEM << "'."
-        << std::endl << "Reconfigure with --coord=" << coordinates << "." << std::endl;
-    ATHENA_ERROR(msg);
+    const FileTopology file_topo = TopologyOfCoordinateName(coordinates);
+    const FileTopology build_topo =
+        TopologyOfCoordinateName(std::string(COORDINATE_SYSTEM));
+    if (file_topo != FILETOPO_UNKNOWN && build_topo != FILETOPO_UNKNOWN
+        && file_topo != build_topo) {
+      msg << "### FATAL ERROR in MCGridFile" << std::endl
+          << filename << " was written with coordinates '" << coordinates
+          << "' but this build is configured for '" << COORDINATE_SYSTEM << "',"
+          << std::endl << "which is a different grid topology." << std::endl
+          << "Reconfigure with --coord=" << coordinates << "." << std::endl;
+      ATHENA_ERROR(msg);
+    }
   }
 
   // logical locations must lie inside the root grid at their own level
