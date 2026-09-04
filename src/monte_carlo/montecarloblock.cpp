@@ -52,7 +52,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   // get seed and intitialize randon number generator
   int rank = Globals::my_rank;
   int iseed = pmy_mc->iseed+pmy_block->gid*10;  // temporary solution
- 
+
   pran = new MCRandom(iseed);
 
   next=nullptr;
@@ -916,8 +916,9 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
       // Only the comoving energy is needed so FrequencyShiftComoving
       // rebuilds the fluid four-velocity at the photon and contracts it with k locally,
       // in contrast to the cell-center projection used for other moments.
-      e_scat = pphot->ep[ip] * FrequencyShiftComoving(pphot, ip);
-      weight_scat = wp * e_scat * frames.Coordinate4Vector()[IMC0] * dl / c_cgs;
+      Real shift = FrequencyShiftComoving(pphot, ip);
+      e_scat = pphot->ep[ip] * shift;
+      weight_scat = wp * e_scat * dl * shift / c_cgs;
     } else {
       const PhotonFrameState &sl = frames.Get(MCFRAME_LAB);
       e_scat = pphot->ep[ip];
@@ -1226,7 +1227,7 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
               moments_scat_error(n,k,j,i) = std::sqrt(moments_scat_error(n,k,j,i))*norm;
             } else {
               Real mom2 = moments_scat_error(n,k,j,i)*norm;
-              moments_scat_error(n,k,j,i) = SQR(mom2); 
+              moments_scat_error(n,k,j,i) = SQR(mom2);
             }
           }
         }
@@ -1578,7 +1579,7 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
               area = pbcoord->GetFace3Area(k+1,j,i);
             area *= l_cgs*l_cgs; // convert area to cgs
             emission(k,j,i) = GetEmission(this,k,j,i,etype) * tint * area;
-            
+
             //printf("emission[%d %d %d %d]: %g %g %g %g\n",pmy_block->gid,i,j,k,tint,area,emission(k,j,i),pmy_mc->GetEmission[etype](this,k,j,i,etype));
             em_tot += emission(k,j,i);
             if (emission(k,j,i) > em_max) em_max = emission(k,j,i);
@@ -1906,7 +1907,7 @@ void MonteCarloBlock::FillBounds(int &il, int &iu, int &jl, int &ju,
 //! \brief four-velocity of cell (i3,i2,i1)'s frame, evaluated at the position x
 //
 // The normal uu^i carries no normalization constraint, so covariant velocities can
-// be obtained via the metric at specific x. The fluid state is assumed to be 
+// be obtained via the metric at specific x. The fluid state is assumed to be
 // piecewise constant.
 //
 // With boosts off uprim is zero and this returns the normal observer at x, which is both
@@ -2228,7 +2229,7 @@ void MonteCarloBlock::ComputeTransformations() {
           x[IMC2] = pmy_block->pcoord->x2v(j);
           x[IMC3] = pmy_block->pcoord->x3v(k);
           Real gcov[4][4];
-          pcoord->Metric(x, gcov); 
+          pcoord->Metric(x, gcov);
           Real econ[4][4], ecov[4][4];
           // gcov defined at x, g, gi defined at cell center
           // normal observer, n^mu = -alpha g^{mu t}
