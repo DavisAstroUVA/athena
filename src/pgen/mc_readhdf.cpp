@@ -443,10 +443,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
-  // Determine locations of initial values
-  std::string input_filename = pin->GetString("problem", "input_filename");
+  // <problem>/input_filename is not read here: the resampled branch works from
+  // ruser_mesh_data, which InitUserMeshData already filled, and the block-aligned branch
+  // lets MCReadSnapshotBlock resolve the file (falling back to <montecarlo>/grid_from_file
+  // when no <problem>/input_filename is given).  Requiring it here made a run that names
+  // its snapshot only in <montecarlo> fail with a confusing missing-parameter error.
   bool resampled = pin->GetOrAddBoolean("problem","resampled",false);
-  bool collective = pin->GetOrAddBoolean("problem","collective",false);
 
   if (resampled) {
     for (int k=ks; k<=ke; ++k) {
