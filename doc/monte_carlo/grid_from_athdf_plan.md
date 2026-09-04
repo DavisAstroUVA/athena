@@ -370,10 +370,41 @@ This constrains a systematic error in the moments on a refined mesh to roughly t
 of percent that two seeds can resolve.  It is not a precision validation, and it would not
 catch a sub-percent bias.
 
+### Ghost zones at fine/coarse interfaces
+
+This one matters because the opacity is evaluated at the photon's own cell
+(`opacity.cpp:48`), and `Photon::GetPositionIndices` allows that index to be `is-1` or
+`ie+1` -- a photon can sit in the first ghost cell, and at a level jump that cell's density
+came from prolongation or restriction.  For a snapshot-driven run it matters more still:
+the problem generator fills only active zones, so every ghost cell at a level jump is
+interpolated file data.
+
+Tested directly rather than through photon statistics: dump `prim` with
+`<output3> ghost_zones = 1` on a refined mesh carrying the stratified profile, which spans
+seven decades in density, and compare the ghost cells against `DensityProfile` evaluated
+analytically.  Deterministic, one run, no Monte Carlo noise.  Note that the earlier
+constant-density tests could not have caught anything here: prolongation of a uniform field
+is exact.
+
+| quantity | measured | expected |
+|---|---|---|
+| active cells | 8.9e-8 | exact, at float32 output precision |
+| restriction into coarse ghosts | 4.957e-4 | 4.955e-4, `(dz/4 l0)^2 / 2` |
+| prolongation into fine ghosts | 2.0e-3 | order `(dz/l0)^2 / 8` = 2.0e-3 |
+| convergence at 2x resolution | 3.90x, 4.01x | 4.00x, second order |
+
+The restriction figure agrees with the analytic prediction to four significant figures,
+which is what it should be: restriction produces a cell *average* and the analytic profile
+gives a point value at the cell centre, and the difference between them is exactly
+`(dz/4 l0)^2 / 2` for an exponential.  Both operators converge at second order.  There are
+no zeros, no uninitialized ghosts and no one-cell offsets.  **Prolongation and restriction
+at level jumps are correct.**
+
+Practically, the residual is a 0.2% density error in the single ghost layer a photon can
+occupy, at the coarsest resolution tested, and it converges away as `dz^2`.
+
 ### Still untested
 
-- Prolongation of hydro ghost zones at fine/coarse interfaces, which the opacity lookup
-  reads near block edges.
 - Anything at more than one level of refinement, or with MPI ranks split across a level
   jump.
 - The comoving and coordinate moment arrays, and `mcscat`.  Only `mclab` was compared.
