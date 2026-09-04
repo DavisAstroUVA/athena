@@ -280,6 +280,105 @@ parameters from the MC athinputs.
 
 ### Phase E — photon transport across refinement boundaries
 
+**Status: transport across level jumps tested and found correct.  Nothing else in this
+phase has been tested.**
+
+The machinery is level-aware: `Photon::SendToNeighbors` calls
+`Particles::FindTargetNeighbor`, which walks the neighbor list to pick the right fine
+child on a coarse-to-fine crossing, and `Photon::GetPositionIndices` recomputes cell
+indices from the photon's position against the *receiving* block, on both the local
+(`photon.cpp:380`) and the MPI (`photon.cpp:650`) path.
+
+`tst/montecarlo/amr_transport/run_tests.py` exercises it: a uniform medium of fixed
+optical depth on three meshes that differ only in refinement, where the escaping fraction
+cannot depend on the mesh.  200000 photons, sigma = 206:
+
+| mesh | nesc | delta |
+|---|---|---|
+| uniform, 8 blocks | 61628 | - |
+| one level refined **above** the interface | 61259 | -1.8 sigma |
+| one level refined **below** the interface | 61361 | -1.3 sigma |
+
+### The trap this test fell into first
+
+The same comparison run **without** `<montecarlo>/equal_weight = true` shows +15 and -16
+sigma deviations, and looks exactly like a transport bug at the interface: antisymmetric,
+reproducible, and surviving controls for resolution, for the problem generator, and for
+geometry (a transparent medium agrees to 0.6 sigma, so photons do cross level jumps and
+land in the right place).
+
+It is not a bug.  Under the default variable-weight sampling, `montecarlo.cpp:958` gives
+every active block an equal share of the photons, `1/nb_active`, whatever its volume.  The
+emitted *energy* per block is still right, because `ComputeEmissionArray` folds the cell
+volume into the per-cell emission array and the photon weight is drawn from it -- but a
+refined block emits as many photons as a coarse one while carrying an eighth of the
+energy.  So `nesc/ntot` is a photon-count fraction, not an energy fraction, and it is
+simply not mesh-invariant.  With `equal_weight = true` every photon carries `em_tot/ntot`,
+counts track energy, and the discrepancy vanishes.
+
+Two things follow.  Any mesh-convergence check on this code has to be energy-weighted or
+run at equal weight; comparing photon counts across different meshes measures the sampling
+scheme, not the physics.  And the variable-weight scheme deliberately spends photons per
+block rather than per unit energy, which is a variance-reduction choice, not an accident.
+
+### The variable-weight scheme checked directly, in energy
+
+The default scheme was then checked on its own terms, integrating the escaping spectrum
+rather than counting photons, on the stratified atmosphere.  1e6 photons:
+
+| mesh | E_escape vs uniform |
+|---|---|
+| SMR, fine below the interface | -0.46% (-0.2 sigma) |
+| SMR, fine above the interface | -0.89% (-0.2 sigma, mean of 3 seeds) |
+| uniform at 2x resolution | -1.64% (-0.7 sigma) |
+
+The photon counts for the same three runs are 238785, 374168 and 105138 -- a 57% spread
+that collapses to under a percent once measured in energy.
+
+**Refining costs precision where the emission is not.**  The `fine above` configuration
+scatters by 6.1% from seed to seed, against 1.3% for the uniform mesh: refining the upper
+half turns 4 coarse blocks and 32 fine ones, so the dense emitting base falls from half the
+photons to an eleventh, and the few photons it does get carry correspondingly large
+weights.  Rare deep photons that escape then dominate the variance.  For an atmosphere
+whose emission is dominated by its base, refining the optically thin region above it is
+statistically counterproductive under this sampling scheme.  That is a property of the
+scheme, not a bug, but it is worth knowing before refining a disk atmosphere and wondering
+why the spectrum got noisier.
+
+A methodological note, learned the hard way twice here.  Re-running with more photons but
+the **same seed** does not give an independent realization: the two runs share an RNG
+stream and are strongly correlated, so a deviation that fails to shrink with N proves
+nothing about whether it is a bias.  Only changing the seed does, and the code's own
+reported error bars were, if anything, optimistic compared with the seed-to-seed scatter.
+
+### Moment arrays on a refined mesh
+
+Checked with the lab-frame moments (`<output3> variable = mclab`) on the uniform medium,
+comparing the horizontally averaged `Ermc(z)` from an SMR run against a uniform one.  1e6
+photons, two seeds:
+
+- **`E_r` is continuous across the interface.**  The last coarse layer below z = 5e10 and
+  the first fine layer above it read 7088 and 7185, on a profile whose neighbouring layers
+  differ by about that much anyway.  A level-dependent error in the `1/(tint*vol)`
+  normalization would show as a factor of two or eight here, and there is none.
+- **The profiles agree within run-to-run noise.**  Two uniform runs that differ only in
+  seed already scatter by 2.6% layer to layer, and the SMR-versus-uniform offsets sit
+  inside that: coarse region 1.014 and 1.017 on the two seeds, fine region 0.973 and 1.036
+  -- the fine-region offset changes sign with the seed, so it is noise, not a bias.
+
+This constrains a systematic error in the moments on a refined mesh to roughly the couple
+of percent that two seeds can resolve.  It is not a precision validation, and it would not
+catch a sub-percent bias.
+
+### Still untested
+
+- Prolongation of hydro ghost zones at fine/coarse interfaces, which the opacity lookup
+  reads near block edges.
+- Anything at more than one level of refinement, or with MPI ranks split across a level
+  jump.
+- The comoving and coordinate moment arrays, and `mcscat`.  Only `mclab` was compared.
+
+
 **Budget most of the schedule here.** The grid reading is mechanical; this is the part that
 is genuinely unknown.
 
