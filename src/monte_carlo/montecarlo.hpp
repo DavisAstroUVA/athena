@@ -381,6 +381,9 @@ public:
   bool mom_flag_com; // Compute moments in comoving frame
   bool mom_flag_coord; // Compute moments in the coordinate basis
   bool accumulate_com; // accumulate comoving moments directly rather than deriving them
+  // The lab moments have to exist and be accumulated whenever the comoving ones are
+  // derived from them, even if the lab moments are not themselves being output.
+  bool need_lab_moments;
   bool mom_flag_src; // Compute source terms for output
   bool mom_flag_usr; // Compute user defined monte carlo moments
   bool mom_flag_scat; // Compute scattering source terms

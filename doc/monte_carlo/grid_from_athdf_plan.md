@@ -403,11 +403,80 @@ at level jumps are correct.**
 Practically, the residual is a 0.2% density error in the single ghost layer a photon can
 occupy, at the coarsest resolution tested, and it converges away as `dz^2`.
 
+### The scattering moments, and the J_nu / E_r identity
+
+`moments_scat` is meant to be a monochromatic mean intensity, so that
+`sum_n J_nu(n) dnu_n = c E_r / (4 pi)` in every cell.  Checked directly, cell by cell,
+with `mclab` and `mcscat` dumped from the same run of the uniform medium:
+
+| mesh | cells | ratio of the two sides |
+|---|---|---|
+| uniform | 524288 | 1.00000 +- 0.00000 |
+| refined, level 0 | 262144 | 1.000000 +- 4.7e-8 |
+| refined, level 1 | 2097152 | 1.000000 +- 5.6e-8 |
+
+The identity is exact to the single precision the athdf is written in, on coarse and fine
+blocks alike.  So the `c/(4 pi nu dloge ln10)` binning factor and the `1/(tint vol)`
+normalization are mutually consistent, and neither picks up a level dependence.
+
+**Integrate with the same dnu the estimator assumes.**  The code divides by
+`nu_mid * ln(10) * dloge`, not by the exact bin width, and
+`sourceterm_frequencies.txt` reports the exact edges `nu_lo` and `nu_hi`.  Using those
+edges instead gives a uniform +0.19% offset with *zero* scatter -- which is exactly
+`(ln10 * dloge)^2 / 24 = 1.94e-3` for the 128 bins over 12 decades used here.  It is the
+log-midpoint approximation, not an error, but it will show up in any hand-rolled
+integration of the output and it grows as `dloge^2`.
+
+Two limits on what this establishes.  It is an *internal consistency* check: both sides
+are accumulated from the same `w e dl / c` weight, so a common factor wrong in both would
+still pass.  And `mc_isoth` is Cartesian and non-relativistic, so this exercises the flat
+`else` branch of the estimator -- **not** the GR branch that carried the
+`Coordinate4Vector()[IMC0]` bug fixed in b69ebf3a.
+
+### The GR branch, after b69ebf3a
+
+Checked with `mc_isoth_gr` (Kerr-Schild, a = 0, a thin shell at r = 5.95 to 6 M,
+`general_pusher` and `boosts` on, so the `GRTetrad() && boosts` branch is the one taken),
+1e6 photons, 8192 cells:
+
+| `sum_n J_nu dnu_n` compared against | ratio |
+|---|---|
+| **comoving** `E_r` (`mccom`) | **1.00055 +- 0.00495** |
+| lab `E_r` (`mclab`) | 0.858 +- 0.039 |
+
+The fixed GR estimator satisfies the identity to 0.06%, inside the 0.5% cell-to-cell
+scatter.  The 14% miss against the lab moments is not an error: that branch bins and
+weights comoving quantities, so the identity is against `mccom` and only against `mccom`.
+Comparing scattering moments to `mclab` in a relativistic run will look wrong by roughly
+the shift factor, and at r = 6M with a = 0 that is about what is seen.
+
+### A crash found on the way: mccom output alone segfaults
+
+Requesting comoving moments **without also requesting the lab moments** dereferences an
+unallocated array:
+
+- `moments` (lab) is allocated only under `if (mom_flag_lab)`, `montecarloblock.cpp:383`,
+  and accumulated only under the same flag, `montecarloblock.cpp:891`.
+- `accumulate_comoving` defaults to false, `montecarloblock.cpp:74`.
+- so `montecarloblock.cpp:1118` calls `DeriveComovingMoments()`, which derives the comoving
+  moments *by transforming the lab ones* and reads `moments(...)` at
+  `photon_frames.cpp:246`.
+
+With `<output> variable = mccom` and no `mclab` output, that array does not exist.  The
+flat case fails earlier with a clean "comoving frame moments requested but boosts set to
+false", so the crash needs `boosts = true`, which every relativistic run has.  Workaround:
+request `mclab` alongside `mccom`.  Fix: derive a flag
+`need_lab = mom_flag_lab || (mom_flag_com && !accumulate_com)` and use it for both the
+allocation and the accumulation gate.  Not done here -- it is unrelated to the athdf work
+and touches a file outside `monte_carlo/`'s recent churn.
+
 ### Still untested
 
 - Anything at more than one level of refinement, or with MPI ranks split across a level
   jump.
-- The comoving and coordinate moment arrays, and `mcscat`.  Only `mclab` was compared.
+- The comoving and coordinate moment arrays compared *across meshes*.  Only `mclab` was.
+- `mcscat` on a refined mesh in GR.  The identity was checked on a refined mesh in flat
+  space and in GR on a uniform mesh, but not both at once.
 
 
 **Budget most of the schedule here.** The grid reading is mechanical; this is the part that
