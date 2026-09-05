@@ -53,6 +53,32 @@ public:
   void GetPositionIndices(int ibegin, int iend);
   static void Initialize(MonteCarlo *pmc, ParameterInput *pin);
 
+  //! reset the boundary state between transfer rounds
+  //!
+  //! Overrides Particles::ClearBoundary, which leaves every neighbor "waiting" so that
+  //! each one has to report in even when it has nothing to send.  A photon handed to a
+  //! same-rank neighbor is written straight into that block's receive buffer during the
+  //! send sweep, so for those neighbors there is nothing to wait for: they start
+  //! "completed" here and a sender marks one "arrived" only when it actually delivers.
+  //! Off-rank neighbors keep the waiting/poll protocol, which MPI still needs.
+  void ClearBoundary();
+
+  //! record, once, whether any neighbor of this block lives on another rank.  Such a
+  //! block has to take part in every round to keep the MPI protocol matched, whether or
+  //! not it holds photons.
+  void SetOffRankNeighborFlag();
+
+  //! does this block need the boundary sweeps this round?  A block with no photons, no
+  //! delivery from a same-rank neighbor and no off-rank neighbor cannot send, receive or
+  //! dirty any boundary state, so every sweep can skip it.
+  bool NeedsBoundaryWork() const {
+    return nphot > 0 || has_incoming_ || has_offrank_neighbor_;
+  }
+
+  //! set by a sender that has just deposited photons into this block's receive buffer
+  bool has_incoming_;
+  bool has_offrank_neighbor_;
+
   // public data
   // SWD: should be reorganized with tighter access control for some variables
   MonteCarloBlock* pmy_mcb; // ptr to MonteCarlo currently containing this Photon

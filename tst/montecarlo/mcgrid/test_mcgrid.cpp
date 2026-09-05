@@ -11,7 +11,9 @@
 //! by run_tests.py; not part of bin/athena.
 
 #include <exception>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string>
 
 #include "../../../src/athena.hpp"
@@ -35,6 +37,11 @@ int main(int argc, char *argv[]) {
               << " nrbx=" << grid.nrbx1 << "," << grid.nrbx2 << "," << grid.nrbx3
               << " multilevel=" << (grid.multilevel ? 1 : 0)
               << " coord=" << grid.coordinates
+              << std::setprecision(std::numeric_limits<Real>::max_digits10)
+              << " x2min=" << grid.mesh_size.x2min
+              << " x2max=" << grid.mesh_size.x2max
+              << " x3min=" << grid.mesh_size.x3min
+              << " x3max=" << grid.mesh_size.x3max
               << std::endl;
   } catch (std::exception const &ex) {
     std::cout << "REJECTED" << std::endl << ex.what() << std::endl;

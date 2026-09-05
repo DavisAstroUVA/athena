@@ -43,6 +43,7 @@ static int nmpi = 0;
 
 Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
   : Particles(pmcb->pmy_block, pin),
+    has_incoming_(false), has_offrank_neighbor_(false),
   // Allocate space for photon data via initialization list
     //user(new std::vector<Real> [pmcb->pmy_mc->nuser_var]),
     //polten(new std::vector<std::complex<Real>> [ncplx]),
@@ -421,15 +422,25 @@ void Photon::SendToNeighbors() {
     --k;
   }
 
+  // Nothing was handed off and no neighbor is on another rank, so there is nobody to
+  // notify: same-rank neighbors already sit at "completed" (see Photon::ClearBoundary),
+  // and walking the neighbor list to tell each of them "nothing for you" is exactly the
+  // per-block, per-round cost that dominates a run with many small blocks.
+  if (nbuf == 0 && !has_offrank_neighbor_) return;
+
   // Send to neighbor processes and update boundary status.
   for (int i = 0; i < pbval_->nneighbor; ++i) {
     NeighborBlock& nb = pbval_->neighbor[i];
     int dst = nb.snb.rank;
     if (dst == Globals::my_rank) {
-      Particles *ppar = pmy_mesh->FindMeshBlock(nb.snb.gid)->pmy_mcb->pphot;
-      ppar->bstatus_[nb.targetid] =
-          (ppar->recv_[nb.targetid].npar > 0) ? BoundaryStatus::arrived
-                                              : BoundaryStatus::completed;
+      Photon *ppar = pmy_mesh->FindMeshBlock(nb.snb.gid)->pmy_mcb->pphot;
+      if (ppar->recv_[nb.targetid].npar > 0) {
+        ppar->bstatus_[nb.targetid] = BoundaryStatus::arrived;
+        // tell the receive sweep this block has something waiting for it
+        ppar->has_incoming_ = true;
+      } else {
+        ppar->bstatus_[nb.targetid] = BoundaryStatus::completed;
+      }
     } else {
 #ifdef MPI_PARALLEL
       ParticleBuffer& send = send_[nb.bufid];
@@ -655,6 +666,54 @@ bool Photon::ReceiveFromNeighbors() {
   }
 
   return flag;
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::SetOffRankNeighborFlag()
+//! \brief record whether any neighbor of this block lives on another rank
+//!
+//! Fixed for the life of the mesh, so it is worked out once after LinkNeighbors rather
+//! than rediscovered every transfer round.
+
+void Photon::SetOffRankNeighborFlag() {
+  has_offrank_neighbor_ = false;
+#ifdef MPI_PARALLEL
+  for (int i = 0; i < pbval_->nneighbor; ++i) {
+    if (pbval_->neighbor[i].snb.rank != Globals::my_rank) {
+      has_offrank_neighbor_ = true;
+      return;
+    }
+  }
+#endif
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::ClearBoundary()
+//! \brief reset the boundary state between transfer rounds
+//!
+//! See the note in photon.hpp: same-rank neighbors start "completed" rather than
+//! "waiting", because a same-rank hand-off is a direct write during the send sweep and
+//! there is nothing to poll for.  That is what lets a block with no photons and no
+//! delivery be skipped entirely, instead of having to report "nothing for you" to each
+//! of its neighbors every round.
+
+void Photon::ClearBoundary() {
+  for (int i = 0; i < pbval_->nneighbor; ++i) {
+    NeighborBlock& nb = pbval_->neighbor[i];
+    if (nb.snb.rank == Globals::my_rank) {
+      bstatus_[nb.bufid] = BoundaryStatus::completed;
+    } else {
+      bstatus_[nb.bufid] = BoundaryStatus::waiting;
+#ifdef MPI_PARALLEL
+      ParticleBuffer& recv = recv_[nb.bufid];
+      recv.mpi_active = false;
+      recv.flagn = recv.flagi = recv.flagr = recv.flagc = 0;
+      recv.reqn = recv.reqi = recv.reqr = recv.reqc = MPI_REQUEST_NULL;
+      send_[nb.bufid].npar = 0;
+#endif
+    }
+  }
+  has_incoming_ = false;
 }
 
 //--------------------------------------------------------------------------------------

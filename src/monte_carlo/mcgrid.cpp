@@ -11,7 +11,9 @@
 // outside the Monte Carlo module needs
 
 // C++ headers
+#include <algorithm>  // max
 #include <cmath>      // pow, fabs
+#include <cstddef>    // size_t
 #include <cstring>    // strncmp
 #include <iomanip>    // setprecision
 #include <iostream>
@@ -66,6 +68,27 @@ enum FileTopology {
 //! \fn FileTopology TopologyOfCoordinateName(const std::string &name)
 //! \brief FILETOPO_UNKNOWN for a name that fixes no topology on its own, such as gr_user
 
+//----------------------------------------------------------------------------------------
+//! \fn bool SnapToBound(Real &v, Real target, Real tol)
+//! \brief pull a bound that is within the file's storage precision of an exact coordinate
+//!        limit onto that limit
+//!
+//! athdf stores the root grid extent at whatever precision the source run was dumping at,
+//! single by default.  pi in float32 is 3.14159274101257, which is *larger* than pi, so a
+//! spherical-polar snapshot covering the full polar range comes back with
+//! x2max > pi and the SphericalPolar constructor rejects it outright.  Two pi rounds up
+//! the same way, which does not trip a check but does leave the azimuthal wrap slightly
+//! inconsistent.  The rounding is a property of how the file was written, not of the
+//! simulation, so recovering the intended bound is a fix rather than a fudge.
+
+bool SnapToBound(Real &v, Real target, Real tol) {
+  if (v != target && std::fabs(v - target) <= tol) {
+    v = target;
+    return true;
+  }
+  return false;
+}
+
 FileTopology TopologyOfCoordinateName(const std::string &name) {
   if (name == "cartesian" || name == "minkowski"
       || name == "tilted" || name == "sinusoidal") return FILETOPO_CARTESIAN;
@@ -101,6 +124,24 @@ void ReadAttribute(hid_t file, const char *name, int count, double *out) {
   H5Aread(attr, H5T_NATIVE_DOUBLE, out);
   H5Aclose(attr);
   (void)count;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn std::size_t AttributePrecision(hid_t file, const char *name)
+//! \brief bytes per element the file stores this attribute at, 0 if it is absent
+//!
+//! Distinct from the type it is read back as: HDF5 converts on read, so the value arrives
+//! as a double whatever the file holds.  What matters here is how much precision was
+//! there to begin with.
+
+std::size_t AttributePrecision(hid_t file, const char *name) {
+  if (H5Aexists(file, name) <= 0) return 0;
+  hid_t attr = H5Aopen(file, name, H5P_DEFAULT);
+  hid_t type = H5Aget_type(attr);
+  std::size_t n = H5Tget_size(type);
+  H5Tclose(type);
+  H5Aclose(attr);
+  return n;
 }
 
 //----------------------------------------------------------------------------------------
@@ -313,11 +354,42 @@ void MCGridFile::ReadHeader() {
   ReadAttribute(file, "MeshBlockSize", 3, mbsize);
   ReadAttribute(file, "NumMeshBlocks", 1, &nbtotal);
   coordinates = ReadStringAttribute(file, "Coordinates");
+  const std::size_t coord_bytes = AttributePrecision(file, "RootGridX2");
 
   mesh_size.x1min = rgx1[0];  mesh_size.x1max = rgx1[1];  mesh_size.x1rat = rgx1[2];
   mesh_size.x2min = rgx2[0];  mesh_size.x2max = rgx2[1];  mesh_size.x2rat = rgx2[2];
   mesh_size.x3min = rgx3[0];  mesh_size.x3max = rgx3[1];  mesh_size.x3rat = rgx3[2];
   mesh_size.nx1 = rgsize[0];  mesh_size.nx2 = rgsize[1];  mesh_size.nx3 = rgsize[2];
+
+  // Undo the rounding the file's storage precision introduced in the angular bounds; see
+  // SnapToBound.  The tolerance comes from how the file was written, so a double
+  // precision dump is left essentially untouched.
+  {
+    const Real eps = (coord_bytes <= 4) ? std::numeric_limits<float>::epsilon()
+                                        : std::numeric_limits<double>::epsilon();
+    const FileTopology topo = TopologyOfCoordinateName(coordinates);
+    const Real pi = static_cast<Real>(M_PI), twopi = 2.0*static_cast<Real>(M_PI);
+    int nsnap = 0;
+    auto tol = [eps](Real target) {
+      return 4.0*eps*std::max(std::fabs(target), static_cast<Real>(1.0));
+    };
+    if (topo == FILETOPO_SPHERICAL) {
+      nsnap += SnapToBound(mesh_size.x2min, 0.0,   tol(pi));
+      nsnap += SnapToBound(mesh_size.x2max, pi,    tol(pi));
+      nsnap += SnapToBound(mesh_size.x3min, 0.0,   tol(twopi));
+      nsnap += SnapToBound(mesh_size.x3max, twopi, tol(twopi));
+    } else if (topo == FILETOPO_CYLINDRICAL) {
+      nsnap += SnapToBound(mesh_size.x2min, 0.0,   tol(twopi));
+      nsnap += SnapToBound(mesh_size.x2max, twopi, tol(twopi));
+    }
+    if (nsnap > 0 && Globals::my_rank == 0) {
+      std::cout << "  snapped " << nsnap << " angular bound(s) onto the exact limit; the"
+                << " file stores" << std::endl
+                << "  the root grid extent in " << coord_bytes << "-byte floats"
+                << std::endl;
+    }
+  }
+
   mesh_size.x1len = mesh_size.x1max - mesh_size.x1min;
   mesh_size.x2len = mesh_size.x2max - mesh_size.x2min;
   mesh_size.x3len = mesh_size.x3max - mesh_size.x3min;

@@ -17,6 +17,7 @@ Requires h5py and an MPI C++ compiler.
 """
 
 import argparse
+import math
 import os
 import re
 import shutil
@@ -150,6 +151,28 @@ def main():
             nfail += 1
         else:
             npass += 1
+
+    # A spherical-polar fixture needs a driver built at a matching topology, and it is
+    # checked for more than acceptance: the angular bounds must come back as exactly pi
+    # and 2 pi, not the float32 values just above them that the file actually stores.
+    print("building spherical driver for the float32-pi fixture")
+    exe_sph = build(args.path, os.path.join(args.workdir, "sph"), "spherical_polar")
+    rc, out = run(exe_sph, os.path.join(fixdir, "sph_float32_pi.athdf"))
+    ok = (rc == 0)
+    if ok:
+        got = dict(re.findall(r"(x[23]m(?:in|ax))=(\S+)", out))
+        for key, want in (("x2max", math.pi), ("x3max", 2.0*math.pi),
+                          ("x2min", 0.0), ("x3min", 0.0)):
+            if key not in got or float(got[key]) != want:
+                ok = False
+                print("    %s = %s, expected exactly %.17g"
+                      % (key, got.get(key, "<missing>"), want))
+    print("  %-22s %s" % ("sph_float32_pi.athdf", "PASS" if ok else "FAIL"))
+    if not ok:
+        for line in out.splitlines()[:6]:
+            print("    | " + line)
+    npass += int(ok)
+    nfail += int(not ok)
 
     if args.athdf:
         # a real snapshot need not share this build's coordinate system, so give it a

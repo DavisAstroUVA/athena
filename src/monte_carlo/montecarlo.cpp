@@ -13,6 +13,7 @@
 // C++ headers
 #include <cstring>  // strcmp
 #include <string>
+#include <vector>
 
 // Athena++ headers
 #include "montecarlo.hpp"
@@ -143,6 +144,10 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     int nrbx2 = pmy_mesh->mesh_size.nx2/pmb->block_size.nx2;
     int nrbx3 = pmy_mesh->mesh_size.nx3/pmb->block_size.nx3;
     my_blocks(i)->pphot->LinkNeighbors(pmy_mesh->tree, nrbx1, nrbx2, nrbx3, root_level);
+    // Which blocks straddle a rank boundary is fixed once the neighbors are linked, and
+    // the transfer round needs it every time, so record it here rather than rediscover
+    // it each round.
+    my_blocks(i)->pphot->SetOffRankNeighborFlag();
   }
 }
 
@@ -1116,29 +1121,49 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
 
 bool MonteCarlo::CheckAndBroadCastPhotonsRemaining() {
 
-  // Send photons from all blocks
-  for(int nb=0; nb<nblocal; ++nb){
-    my_blocks(nb)->pphot->SendToNeighbors();
+  // Only blocks that can take part in this round are swept.  A block with no photons,
+  // nothing delivered by a same-rank neighbor and no neighbor on another rank cannot
+  // send, cannot receive and cannot dirty any boundary state, so all three sweeps below
+  // may skip it.  Sweeping every block regardless costs O(nblocal * nneighbor) per round
+  // whatever the photon count, which is what makes a mesh of many small blocks slow:
+  // measured cost grows as nblocal^1.3 at fixed photon number.
+  // Send: a block can only hand photons over if it holds some.  One with an off-rank
+  // neighbor takes part regardless, because the receiving rank is waiting on a count
+  // message from it whether or not there is anything to report.
+  send_list_.clear();
+  for (int nb=0; nb<nblocal; ++nb) {
+    Photon *pp = my_blocks(nb)->pphot;
+    if (pp->nphot > 0 || pp->has_offrank_neighbor_) send_list_.push_back(nb);
+  }
+  for (std::size_t n=0; n<send_list_.size(); ++n)
+    my_blocks(send_list_[n])->pphot->SendToNeighbors();
+
+  // Receive: built after the sends, since a same-rank hand-off can have woken a block
+  // that was idle a moment ago.  has_incoming_ was set by whoever delivered to it.
+  recv_list_.clear();
+  for (int nb=0; nb<nblocal; ++nb) {
+    Photon *pp = my_blocks(nb)->pphot;
+    if (pp->has_incoming_ || pp->has_offrank_neighbor_) recv_list_.push_back(nb);
   }
 
-  // Receive photons from all blocks
-  bool complete = false;
-  //int count = 0;
-  while(!complete) {
-    complete = true;
-    for(int nb=0; nb<nblocal; ++nb) {
-      bool success = my_blocks(nb)->pphot->ReceiveFromNeighbors();
-      if (!success)
-        complete = false;
+  // Blocks that report themselves finished drop out rather than being rescanned on every
+  // later pass.  Serially the first pass finishes all of them, because a same-rank
+  // hand-off already completed during the send sweep and there is nothing to poll for.
+  std::vector<int> pending(recv_list_);
+  while (!pending.empty()) {
+    std::size_t keep = 0;
+    for (std::size_t n=0; n<pending.size(); ++n) {
+      if (!my_blocks(pending[n])->pphot->ReceiveFromNeighbors())
+        pending[keep++] = pending[n];
     }
-    //count++;
-    //if (count % 100000 == 0)
-    //printf("here %d %d \n",count, Globals::my_rank);
+    pending.resize(keep);
   }
 
-  // Clear Boundaries
-  for(int nb=0; nb<nblocal; ++nb)
-    my_blocks(nb)->pphot->ClearBoundary();
+  // Clear boundaries.  Only the receivers need it: a same-rank send writes into the
+  // target's buffer and leaves the sender's own boundary state untouched, so a block that
+  // merely sent has nothing to reset.  Off-rank blocks are in this list by construction.
+  for (std::size_t n=0; n<recv_list_.size(); ++n)
+    my_blocks(recv_list_[n])->pphot->ClearBoundary();
 
   // Check if photons have completed
   int nremain=0,nprop=0;

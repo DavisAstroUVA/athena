@@ -14,6 +14,7 @@ Requires h5py.
 """
 
 import argparse
+import math
 import os
 
 import h5py
@@ -154,6 +155,15 @@ def main():
     # AthenaK case: such a snapshot is labelled "cartesian" even when the run was
     # general-relativistic, because the name records the grid, not the spacetime.
     write(p("coord_compatible.athdf"), rgs, mbs, uni, flat_l, flat_o, "minkowski")
+
+    # A spherical-polar snapshot covering the full angular range, with the bounds stored
+    # in single precision as they are by default.  pi and 2 pi both round *up* in float32,
+    # so the recovered x2max exceeds pi and the SphericalPolar constructor rejects the
+    # mesh outright unless MCGridFile snaps the bound back.
+    sl, so = build_tree([4, 2, 4])
+    write(p("sph_float32_pi.athdf"), [32, 16, 32], [8, 8, 8],
+          [(1.0, 10.0, 1.0), (0.0, math.pi, 1.0), (0.0, 2.0 * math.pi, 1.0)],
+          sl, so, "spherical_polar")
     write(p("bad_tiling.athdf"), rgs, mbs, uni, flat_l, flat_o, args.coord,
           drop_block=True)
     write(p("bad_usergen.athdf"), rgs, mbs, uni, flat_l, flat_o, args.coord,

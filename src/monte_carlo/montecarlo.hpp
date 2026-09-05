@@ -15,6 +15,7 @@
 #include <sstream>
 #include <complex>
 #include <random>
+#include <vector>
 // Athena++ classes headers
 #include "../athena.hpp"
 #include "../coordinates/coordinates.hpp"
@@ -304,6 +305,10 @@ public:
   // SWD: some of these functions could/should be private
   void RunMonteCarlo(Outputs *pouts, Mesh *pmesh, ParameterInput *pinput);
   bool CheckAndBroadCastPhotonsRemaining();
+  // Blocks taking part in the current transfer round.  Held here rather than rebuilt as
+  // locals so the storage is reused across rounds; see CheckAndBroadCastPhotonsRemaining
+  // for what puts a block in each.
+  std::vector<int> send_list_, recv_list_;
   void InitUserMonteCarloData(ParameterInput *pin);
   // Enroll User functions
   void EnrollUserMCBoundaryFunction(enum BoundaryFace dir, MCBValFunc_t my_bc);
