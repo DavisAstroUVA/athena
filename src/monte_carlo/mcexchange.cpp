@@ -1,0 +1,202 @@
+//========================================================================================
+// Athena++ astrophysical MHD code
+// Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
+// Licensed under the 3-clause BSD License, see LICENSE file for details
+//========================================================================================
+//! \file mcexchange.cpp
+//! \brief rank-aggregated photon exchange between MeshBlocks on different processes
+
+// C++ headers
+#include <complex>
+#include <vector>
+
+// Athena++ headers
+#include "../athena.hpp"
+#include "../globals.hpp"
+#include "../mesh/mesh.hpp"
+#include "mcexchange.hpp"
+#include "montecarlo.hpp"
+#include "photon.hpp"
+
+#ifdef MPI_PARALLEL
+#include <mpi.h>
+#endif
+
+// Tags for the four streams.  The peer set is fixed and each pair of ranks exchanges at
+// most one message of each kind per round, so a constant tag per stream is enough to keep
+// them apart.
+namespace {
+const int kTagSizes = 900;
+const int kTagHdr   = 901;
+const int kTagInt   = 902;
+const int kTagReal  = 903;
+const int kTagCplx  = 904;
+const int kHdrWords = 3;   // (lid, bufid, npar) per contributing block
+}  // namespace
+
+//----------------------------------------------------------------------------------------
+//! \fn MCRankExchange::MCRankExchange(MonteCarlo *pmc)
+
+MCRankExchange::MCRankExchange(MonteCarlo *pmc) : pmy_mc_(pmc), active_(false) {}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCRankExchange::BuildPeerList()
+//! \brief collect the distinct ranks this one shares a block boundary with
+//!
+//! The relation is symmetric -- if a block here neighbors a block there, that block
+//! neighbors this one -- so the peer sets match up on both sides without any negotiation,
+//! which is what lets the exchange below be a simple paired Isend/Irecv per peer.
+
+void MCRankExchange::BuildPeerList() {
+  peers_.clear();
+  peer_of_rank_.assign(Globals::nranks, -1);
+  active_ = false;
+#ifdef MPI_PARALLEL
+  if (Globals::nranks < 2) return;
+  std::vector<bool> seen(Globals::nranks, false);
+  for (int nb = 0; nb < pmy_mc_->nblocal; ++nb)
+    pmy_mc_->my_blocks(nb)->pphot->CollectPeerRanks(seen);
+  for (int r = 0; r < Globals::nranks; ++r) {
+    if (seen[r] && r != Globals::my_rank) {
+      peer_of_rank_[r] = static_cast<int>(peers_.size());
+      peers_.push_back(r);
+    }
+  }
+  const std::size_t np = peers_.size();
+  shdr_.resize(np);  sint_.resize(np);  sreal_.resize(np);  scplx_.resize(np);
+  rhdr_.resize(np);  rint_.resize(np);  rreal_.resize(np);  rcplx_.resize(np);
+  active_ = !peers_.empty();
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCRankExchange::Reset()
+
+void MCRankExchange::Reset() {
+  for (std::size_t p = 0; p < peers_.size(); ++p) {
+    shdr_[p].clear();  sint_[p].clear();  sreal_[p].clear();  scplx_[p].clear();
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCRankExchange::Stage(...)
+//! \brief add one block's outgoing photons to the buffer for their destination rank
+
+void MCRankExchange::Stage(int dest_rank, int lid, int bufid, const int *ib,
+                           const Real *rb, const std::complex<Real> *cb, int npar) {
+  if (npar <= 0) return;
+  const int p = peer_of_rank_[dest_rank];
+  if (p < 0) return;   // not a peer: cannot happen, but do not corrupt memory if it does
+
+  shdr_[p].push_back(lid);
+  shdr_[p].push_back(bufid);
+  shdr_[p].push_back(npar);
+
+  const int ni = Photon::PropertyCountInt();
+  const int nr = Photon::PropertyCountReal();
+  const int nc = Photon::PropertyCountCplx();
+  sint_[p].insert(sint_[p].end(), ib, ib + npar*ni);
+  sreal_[p].insert(sreal_[p].end(), rb, rb + npar*nr);
+  if (nc > 0 && cb != nullptr)
+    scplx_[p].insert(scplx_[p].end(), cb, cb + npar*nc);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCRankExchange::ExchangeAndDeliver()
+//! \brief one exchange per peer, then hand the arrivals to the blocks they belong to
+//!
+//! Two phases.  The first tells each peer how much is coming, which every peer needs
+//! before it can post a receive of the right size; it is four ints, and it goes out even
+//! when nothing follows.  The second moves the payload only between peers that have one.
+//! That is at most five small messages per peer per round, against one per off-rank
+//! neighbor link in the per-block scheme.
+
+void MCRankExchange::ExchangeAndDeliver() {
+#ifdef MPI_PARALLEL
+  if (!active_) return;
+  const std::size_t np = peers_.size();
+  const int nc = Photon::PropertyCountCplx();
+
+  // ---- phase one: sizes ----
+  std::vector<int> ssz(4*np), rsz(4*np);
+  std::vector<MPI_Request> req;
+  req.reserve(4*np);
+  for (std::size_t p = 0; p < np; ++p) {
+    ssz[4*p+0] = static_cast<int>(shdr_[p].size());
+    ssz[4*p+1] = static_cast<int>(sint_[p].size());
+    ssz[4*p+2] = static_cast<int>(sreal_[p].size());
+    ssz[4*p+3] = static_cast<int>(scplx_[p].size());
+  }
+  for (std::size_t p = 0; p < np; ++p) {
+    MPI_Request r;
+    MPI_Irecv(&rsz[4*p], 4, MPI_INT, peers_[p], kTagSizes, MPI_COMM_WORLD, &r);
+    req.push_back(r);
+    MPI_Isend(&ssz[4*p], 4, MPI_INT, peers_[p], kTagSizes, MPI_COMM_WORLD, &r);
+    req.push_back(r);
+  }
+  MPI_Waitall(static_cast<int>(req.size()), req.data(), MPI_STATUSES_IGNORE);
+  req.clear();
+
+  // ---- phase two: payload, only where there is one ----
+  for (std::size_t p = 0; p < np; ++p) {
+    rhdr_[p].resize(rsz[4*p+0]);
+    rint_[p].resize(rsz[4*p+1]);
+    rreal_[p].resize(rsz[4*p+2]);
+    rcplx_[p].resize(rsz[4*p+3]);
+    MPI_Request r;
+    if (rsz[4*p+0] > 0) {
+      MPI_Irecv(rhdr_[p].data(), rsz[4*p+0], MPI_INT, peers_[p], kTagHdr,
+                MPI_COMM_WORLD, &r);
+      req.push_back(r);
+      MPI_Irecv(rint_[p].data(), rsz[4*p+1], MPI_INT, peers_[p], kTagInt,
+                MPI_COMM_WORLD, &r);
+      req.push_back(r);
+      MPI_Irecv(rreal_[p].data(), rsz[4*p+2], MPI_ATHENA_REAL, peers_[p], kTagReal,
+                MPI_COMM_WORLD, &r);
+      req.push_back(r);
+      if (rsz[4*p+3] > 0) {
+        MPI_Irecv(rcplx_[p].data(), rsz[4*p+3], MPI_ATHENA_COMPLEX, peers_[p], kTagCplx,
+                  MPI_COMM_WORLD, &r);
+        req.push_back(r);
+      }
+    }
+    if (!shdr_[p].empty()) {
+      MPI_Isend(shdr_[p].data(), static_cast<int>(shdr_[p].size()), MPI_INT,
+                peers_[p], kTagHdr, MPI_COMM_WORLD, &r);
+      req.push_back(r);
+      MPI_Isend(sint_[p].data(), static_cast<int>(sint_[p].size()), MPI_INT,
+                peers_[p], kTagInt, MPI_COMM_WORLD, &r);
+      req.push_back(r);
+      MPI_Isend(sreal_[p].data(), static_cast<int>(sreal_[p].size()), MPI_ATHENA_REAL,
+                peers_[p], kTagReal, MPI_COMM_WORLD, &r);
+      req.push_back(r);
+      if (!scplx_[p].empty()) {
+        MPI_Isend(scplx_[p].data(), static_cast<int>(scplx_[p].size()),
+                  MPI_ATHENA_COMPLEX, peers_[p], kTagCplx, MPI_COMM_WORLD, &r);
+        req.push_back(r);
+      }
+    }
+  }
+  if (!req.empty())
+    MPI_Waitall(static_cast<int>(req.size()), req.data(), MPI_STATUSES_IGNORE);
+
+  // ---- deliver ----
+  const int ni = Photon::PropertyCountInt();
+  const int nr = Photon::PropertyCountReal();
+  for (std::size_t p = 0; p < np; ++p) {
+    std::size_t oi = 0, orr = 0, oc = 0;
+    for (std::size_t h = 0; h + kHdrWords <= rhdr_[p].size(); h += kHdrWords) {
+      const int lid = rhdr_[p][h];
+      const int bufid = rhdr_[p][h+1];
+      const int npar = rhdr_[p][h+2];
+      Photon *pp = pmy_mc_->my_blocks(lid)->pphot;
+      pp->AcceptPhotons(bufid, &rint_[p][oi], &rreal_[p][orr],
+                        (nc > 0 && oc < rcplx_[p].size()) ? &rcplx_[p][oc] : nullptr,
+                        npar);
+      oi += npar*ni;
+      orr += npar*nr;
+      oc += npar*nc;
+    }
+  }
+#endif
+}

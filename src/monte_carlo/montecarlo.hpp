@@ -38,6 +38,7 @@
 class Mesh;
 class MeshBlock;
 class MonteCarloBlock;
+class MCRankExchange;
 class ParameterInput;
 class Photon;
 class PhotonPusher;
@@ -305,10 +306,22 @@ public:
   // SWD: some of these functions could/should be private
   void RunMonteCarlo(Outputs *pouts, Mesh *pmesh, ParameterInput *pinput);
   bool CheckAndBroadCastPhotonsRemaining();
+  //! move photons between blocks on this rank; true when something landed here
+  bool ExchangeLocal();
+  //! flush receive buffers into their blocks; true when any block received something
+  bool DrainArrivals();
+  //! send what was staged for other ranks, take delivery, and test for completion
+  bool FinishRound();
+  //! ceiling on consecutive same-rank transport sweeps before taking the global step,
+  //! so two blocks trading a photon cannot hold the other ranks at the barrier
+  int local_max_sweeps;
   // Blocks taking part in the current transfer round.  Held here rather than rebuilt as
   // locals so the storage is reused across rounds; see CheckAndBroadCastPhotonsRemaining
   // for what puts a block in each.
   std::vector<int> send_list_, recv_list_;
+  //! moves photons between ranks a rank at a time rather than a block-neighbor at a
+  //! time; null when <montecarlo>/rank_exchange is off, inactive on a single rank
+  MCRankExchange *pexch;
   void InitUserMonteCarloData(ParameterInput *pin);
   // Enroll User functions
   void EnrollUserMCBoundaryFunction(enum BoundaryFace dir, MCBValFunc_t my_bc);

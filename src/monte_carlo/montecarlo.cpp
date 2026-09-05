@@ -16,6 +16,7 @@
 #include <vector>
 
 // Athena++ headers
+#include "mcexchange.hpp"
 #include "montecarlo.hpp"
 #include "../globals.hpp"
 #include "../parameter_input.hpp"
@@ -149,6 +150,20 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     // it each round.
     my_blocks(i)->pphot->SetOffRankNeighborFlag();
   }
+
+  // Photons crossing a rank boundary move a rank at a time rather than a block-neighbor
+  // at a time.  Off by setting <montecarlo>/rank_exchange = false, which restores the
+  // per-block protocol; the two give identical results, the difference is message count.
+  local_max_sweeps = pin->GetOrAddInteger("montecarlo", "local_max_sweeps", 1000);
+  pexch = nullptr;
+  if (pin->GetOrAddBoolean("montecarlo", "rank_exchange", true)) {
+    pexch = new MCRankExchange(this);
+    pexch->BuildPeerList();
+    if (Globals::my_rank == 0 && pexch->Active() && verbose) {
+      std::cout << "Monte Carlo photon exchange: aggregated by rank, "
+                << pexch->NumPeers() << " peer(s) on rank 0" << std::endl;
+    }
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -157,6 +172,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 MonteCarlo::~MonteCarlo() {
 
   delete pmcout;
+  delete pexch;
   for (int i=0; i<nblocal; i++)
     delete my_blocks(i);
 }
@@ -1062,13 +1078,25 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // Run Monte Carlo until all photons have escaped/been absorbed
     bool photons_remain = true; // True if photons on any process
     while(photons_remain) {
-      for(int nb=0; nb<nblocal; ++nb){
-        if (raytrace_flag)
-          my_blocks(nb)->RayTracePhotonsOnBlock(etype);
-        else
-          my_blocks(nb)->TransferPhotonsOnBlock(etype);
+      // Keep transporting while photons are only moving between blocks on this rank.
+      // Every pass of the outer loop costs a barrier on every rank, so a photon that has
+      // to cross many blocks should not be buying one per crossing; see ExchangeLocal.
+      // Capped so that a pair of blocks passing a photon back and forth cannot hold the
+      // other ranks at the barrier indefinitely.
+      const bool local_loop = (pexch != nullptr && pexch->Active());
+      if (local_loop) pexch->Reset();
+      int sweeps = 0;
+      bool local_progress = true;
+      while (local_progress) {
+        for(int nb=0; nb<nblocal; ++nb){
+          if (raytrace_flag)
+            my_blocks(nb)->RayTracePhotonsOnBlock(etype);
+          else
+            my_blocks(nb)->TransferPhotonsOnBlock(etype);
+        }
+        local_progress = ExchangeLocal() && local_loop && (++sweeps < local_max_sweeps);
       }
-      photons_remain = CheckAndBroadCastPhotonsRemaining();
+      photons_remain = FinishRound();
     }
 
     // Report diagnostic results from all blocks
@@ -1120,35 +1148,68 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
 //!        process if none remaining.
 
 bool MonteCarlo::CheckAndBroadCastPhotonsRemaining() {
+  if (pexch != nullptr && pexch->Active()) pexch->Reset();
+  ExchangeLocal();
+  return FinishRound();
+}
 
-  // Only blocks that can take part in this round are swept.  A block with no photons,
-  // nothing delivered by a same-rank neighbor and no neighbor on another rank cannot
-  // send, cannot receive and cannot dirty any boundary state, so all three sweeps below
-  // may skip it.  Sweeping every block regardless costs O(nblocal * nneighbor) per round
-  // whatever the photon count, which is what makes a mesh of many small blocks slow:
-  // measured cost grows as nblocal^1.3 at fixed photon number.
-  // Send: a block can only hand photons over if it holds some.  One with an off-rank
-  // neighbor takes part regardless, because the receiving rank is waiting on a count
-  // message from it whether or not there is anything to report.
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::ExchangeLocal()
+//! \brief hand photons to blocks on this rank, and set the rest aside for later
+//!
+//! Returns true when something landed here, meaning there is more transport to do without
+//! talking to anyone else.  Photons bound elsewhere are staged in MCRankExchange and go
+//! out once, in FinishRound.
+//!
+//! Separating this from the global step is what lets a rank keep working instead of
+//! taking a barrier for every block a photon crosses.  A nearly horizontal photon in a
+//! domain with periodic sides crosses blocks essentially without end, and measured on a
+//! 32-rank test 99.6% of all rounds were transporting a single such photon while every
+//! rank went through the full round for it.
+//!
+//! Only blocks that can take part are swept.  One with no photons and nothing delivered
+//! cannot send, receive or dirty any boundary state.  Sweeping all of them regardless
+//! costs O(nblocal * nneighbor) whatever the photon count, which is what made a mesh of
+//! many small blocks slow: cost grew as nblocal^1.3 at fixed photon number.
+
+bool MonteCarlo::ExchangeLocal() {
+  const bool rank_exchange = (pexch != nullptr && pexch->Active());
+
+  // A block can only hand photons over if it holds some.  Without the rank exchange one
+  // with an off-rank neighbor takes part regardless, because the receiving rank is
+  // waiting on a per-link count message from it whether or not there is anything to
+  // report; with the exchange running, silence is the signal and it can be skipped.
   send_list_.clear();
   for (int nb=0; nb<nblocal; ++nb) {
     Photon *pp = my_blocks(nb)->pphot;
-    if (pp->nphot > 0 || pp->has_offrank_neighbor_) send_list_.push_back(nb);
+    if (pp->nphot > 0 || (!rank_exchange && pp->has_offrank_neighbor_))
+      send_list_.push_back(nb);
   }
   for (std::size_t n=0; n<send_list_.size(); ++n)
     my_blocks(send_list_[n])->pphot->SendToNeighbors();
 
-  // Receive: built after the sends, since a same-rank hand-off can have woken a block
-  // that was idle a moment ago.  has_incoming_ was set by whoever delivered to it.
+  return DrainArrivals();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::DrainArrivals()
+//! \brief flush whatever is sitting in receive buffers into the blocks that own them
+
+bool MonteCarlo::DrainArrivals() {
+  const bool rank_exchange = (pexch != nullptr && pexch->Active());
+
   recv_list_.clear();
   for (int nb=0; nb<nblocal; ++nb) {
     Photon *pp = my_blocks(nb)->pphot;
-    if (pp->has_incoming_ || pp->has_offrank_neighbor_) recv_list_.push_back(nb);
+    if (pp->has_incoming_ || (!rank_exchange && pp->has_offrank_neighbor_))
+      recv_list_.push_back(nb);
   }
+  const bool landed = !recv_list_.empty();
 
   // Blocks that report themselves finished drop out rather than being rescanned on every
-  // later pass.  Serially the first pass finishes all of them, because a same-rank
-  // hand-off already completed during the send sweep and there is nothing to poll for.
+  // later pass.  With the rank exchange the first pass finishes all of them: a same-rank
+  // hand-off already happened during the send sweep, and anything from another rank was
+  // delivered before this was called, so there is nothing to poll for.
   std::vector<int> pending(recv_list_);
   while (!pending.empty()) {
     std::size_t keep = 0;
@@ -1159,11 +1220,25 @@ bool MonteCarlo::CheckAndBroadCastPhotonsRemaining() {
     pending.resize(keep);
   }
 
-  // Clear boundaries.  Only the receivers need it: a same-rank send writes into the
-  // target's buffer and leaves the sender's own boundary state untouched, so a block that
-  // merely sent has nothing to reset.  Off-rank blocks are in this list by construction.
+  // Only the receivers need clearing: a same-rank send writes into the target's buffer
+  // and leaves the sender's own boundary state untouched.
   for (std::size_t n=0; n<recv_list_.size(); ++n)
     my_blocks(recv_list_[n])->pphot->ClearBoundary();
+
+  return landed;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::FinishRound()
+//! \brief send what was staged for other ranks, take delivery, and test for completion
+
+bool MonteCarlo::FinishRound() {
+  // Collective over the peer set, so it runs on every rank whether or not this one had
+  // anything to contribute.
+  if (pexch != nullptr && pexch->Active()) {
+    pexch->ExchangeAndDeliver();
+    DrainArrivals();
+  }
 
   // Check if photons have completed
   int nremain=0,nprop=0;
@@ -1171,14 +1246,15 @@ bool MonteCarlo::CheckAndBroadCastPhotonsRemaining() {
     MonteCarloBlock *pmcb = my_blocks(nb);
     nremain += pmcb->nphremain;
     nprop += pmcb->pphot->nphot;
-    //if (pmcb->nphremain > 0)
-    //  printf("rem: %d %d \n",pmcb->pmy_block->gid,pmcb->nphremain);
-    //if (pmcb->pphot->nphot > 0)
-    //  printf("prop: %d %d \n",pmcb->pmy_block->gid,pmcb->pphot->nphot);
   }
 #ifdef MPI_PARALLEL
-  MPI_Allreduce(MPI_IN_PLACE,&nprop,1,MPI_INT,MPI_MAX,MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE,&nremain,1,MPI_INT,MPI_MAX,MPI_COMM_WORLD);
+  // One reduction, not two.  Nearly every round of a long run is an idle one -- 99.6% of
+  // them transported a single photon in a 32-rank test -- so the fixed cost of the round
+  // is what the run is made of, and a collective is the most expensive part of it.
+  int counts[2] = {nprop, nremain};
+  MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  nprop = counts[0];
+  nremain = counts[1];
 #endif
 
   bool active;
@@ -1187,9 +1263,6 @@ bool MonteCarlo::CheckAndBroadCastPhotonsRemaining() {
   } else {
     active = false;
   }
-  //if (Globals::my_rank == 0) {
-  //  printf("nremain: %d nprop: %d active: %d\n",nremain,nprop,active);
-  //}
   return active;
 }
 

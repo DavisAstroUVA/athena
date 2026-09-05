@@ -75,6 +75,20 @@ public:
     return nphot > 0 || has_incoming_ || has_offrank_neighbor_;
   }
 
+  //! add every rank this block has a neighbor on to `seen`, for the peer list
+  void CollectPeerRanks(std::vector<bool> &seen) const;
+
+  //! copy photons that arrived through the rank exchange into one receive slot, exactly
+  //! as an off-rank MPI receive used to fill it
+  void AcceptPhotons(int bufid, const int *ib, const Real *rb,
+                     const std::complex<Real> *cb, int npar);
+
+  //! per-photon property counts, so the exchange can size its buffers without reaching
+  //! into ParticleBuffer, which it is not a friend of
+  static int PropertyCountInt();
+  static int PropertyCountReal();
+  static int PropertyCountCplx();
+
   //! set by a sender that has just deposited photons into this block's receive buffer
   bool has_incoming_;
   bool has_offrank_neighbor_;
