@@ -201,12 +201,21 @@ Real DustScatteringOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 //! \fn void GenerateComptonTable(int io)
 //! \brief Generates lookup table used by ComptonOpacity()
 //
-// Computes look up table for integrated cross section of a Maxwellian
-// distribution of electrons. Current version uses direct integration as
-// in GRMONTY rather than approximate method of PSS.  Values are chosen to
-// match GRMONTY (Dolence et al. 2009) defaults
+// Computes look up table for integrated cross section of a Maxwellian distribution of
+// electrons. Current version uses direct integration asin GRMONTY rather than
+// approximate method of PSS.  Values are chosen to match GRMONTY (Dolence+ 2009) defaults
+//
+// Builds at most once per process.  xsect and the four scale factors are file-scope
+// globals derived from compile-time constants and, for io == 0, from a file that does not
+// change during a run, so a second call can only write the same numbers into the same
+// memory.
+//
+// io == 2 writes the table to disk, and that side effect likewise happens only on the
+// first call.  The caller passes the same io for every block, so this is what is wanted.
 
 void GenerateComptonTable(int io) {
+  static bool table_built = false;
+  if (table_built) return;
 
   if (io > 0) {
     // generate table from scratch
@@ -274,6 +283,9 @@ void GenerateComptonTable(int io) {
     fclose(pfile);
   }
 
+  // Only after the table is actually populated: both branches above throw on a file they
+  // cannot open, and a failure must not be remembered as a success by the next block.
+  table_built = true;
 }
 //----------------------------------------------------------------------------------------
 //! \fn Real ComptonCrossSection(Real energy, Real theta)

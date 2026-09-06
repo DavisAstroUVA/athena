@@ -206,7 +206,12 @@ never had it.
 
 Take the range seriously rather than the best figure. The synchronous path is
 bit-reproducible, repeating its counts and its time to better than 0.2%, which makes it a
-clean baseline. The asynchronous path varied by 20% between two runs of the same input,
+clean baseline -- but only against a fixed Compton table. Generating the table rather than
+reading the same file changes 622 of its 17901 entries at the level of one part in 1e14,
+which is a compiler and libm difference in the numerical integration, not a defect. With
+1.3e4 scatterings per photon that is ample to diverge the random walks: it moved `nesc`
+from 14580 to 14617, or 0.6 sigma. Reproducing a run bit for bit therefore needs the same
+`comptontable.out`, not merely the same source. The asynchronous path varied by 20% between two runs of the same input,
 because both the order photons arrive in and the moment the termination reductions complete
 are nondeterministic. Two runs bound it loosely; they do not pin it down.
 
@@ -249,10 +254,16 @@ not active, which includes every serial run.
   compiled only under `MPI_PARALLEL` and dispatched only when the rank exchange is active,
   so the synchronous loop is the transport loop for every non-MPI build and every serial
   run. Retiring it means first giving those cases an async-equivalent path.
-- `GenerateComptonTable` is called from the `MonteCarloBlock` constructor, so it runs once
-  per block -- about 2600 times per rank on the 83231-block snapshot -- while `xsect` is a
-  single file-scope global. Every call recomputes (`comptonio > 0`) or re-reads
-  (`comptonio = 0`) the identical table into the identical memory. It should happen once
-  per rank. This is a setup cost, not a transport one, but it is large enough to swamp any
-  setup measurement and was found while timing one. **Agreed to fix after the
-  communication work.**
+- ~~`GenerateComptonTable` runs once per block~~ **Fixed.** It was called from the
+  `MonteCarloBlock` constructor, so it ran about 2600 times per rank on the 83231-block
+  snapshot, while `xsect` is a single file-scope global -- every call rebuilt the identical
+  table in the identical memory. It now builds at most once per process. On that snapshot:
+
+  | | before | after |
+  |---|---|---|
+  | `comptonio = 0` (read file) | 11.5 s | 11.2 s |
+  | `comptonio = 1` (generate, the default) | >966 s, never finished | 19.2 s |
+
+  One generation costs about 8 s, so the default was spending roughly six hours per rank in
+  setup. Reading a table hid the problem, a 143 kB page-cached file being cheap to reread.
+  Escape and absorption counts are unchanged to every digit against the pre-fix baseline.

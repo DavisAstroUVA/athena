@@ -181,6 +181,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       else
         std::cout << "Reading in table for Compton cross section." << std::endl;
     }
+    // Builds at most once per process, not once per block; see the note on the function.
     GenerateComptonTable(comptonio);
     ScatteringOpacity = ComptonOpacity;
     if (IsPolarized(pmy_mc->polarized)) {
