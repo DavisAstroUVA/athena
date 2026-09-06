@@ -105,7 +105,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   max_phots_init = pin->GetOrAddInteger("montecarlo","max_phots_init",10000);
   list_size_init = pin->GetOrAddInteger("montecarlo","list_size_init",10000);
   checkscat = pin->GetOrAddInteger("montecarlo","checkscat",10000);
-  checkmove = pin->GetOrAddInteger("montecarlo","checkmove",10000);
+  capmove = pin->GetOrAddInteger("montecarlo","capmove",0);
 
   // Initialize user MonteCarlo data before initializing MonteCarloBlocks
   // Should be caleld before Output constuctor
@@ -155,6 +155,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   // at a time.  Off by setting <montecarlo>/rank_exchange = false, which restores the
   // per-block protocol; the two give identical results, the difference is message count.
   local_max_sweeps = pin->GetOrAddInteger("montecarlo", "local_max_sweeps", 1000);
+  async_term = pin->GetOrAddBoolean("montecarlo", "async_term", true);
   pexch = nullptr;
   if (pin->GetOrAddBoolean("montecarlo", "rank_exchange", true)) {
     pexch = new MCRankExchange(this);
@@ -1076,27 +1077,32 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     emission_method = etype;
 
     // Run Monte Carlo until all photons have escaped/been absorbed
-    bool photons_remain = true; // True if photons on any process
-    while(photons_remain) {
-      // Keep transporting while photons are only moving between blocks on this rank.
-      // Every pass of the outer loop costs a barrier on every rank, so a photon that has
-      // to cross many blocks should not be buying one per crossing; see ExchangeLocal.
-      // Capped so that a pair of blocks passing a photon back and forth cannot hold the
-      // other ranks at the barrier indefinitely.
-      const bool local_loop = (pexch != nullptr && pexch->Active());
-      if (local_loop) pexch->Reset();
-      int sweeps = 0;
-      bool local_progress = true;
-      while (local_progress) {
-        for(int nb=0; nb<nblocal; ++nb){
-          if (raytrace_flag)
-            my_blocks(nb)->RayTracePhotonsOnBlock(etype);
-          else
-            my_blocks(nb)->TransferPhotonsOnBlock(etype);
+    if (async_term && pexch != nullptr && pexch->Active()) {
+      TransportAsync(etype);
+    } else {
+      bool photons_remain = true; // True if photons on any process
+      while(photons_remain) {
+        // Keep transporting while photons are only moving between blocks on this rank.
+        // Every pass of the outer loop costs a barrier on every rank, so a photon that
+        // has to cross many blocks should not be buying one per crossing; see
+        // ExchangeLocal.  Capped so that a pair of blocks passing a photon back and forth
+        // cannot hold the other ranks at the barrier indefinitely.
+        const bool local_loop = (pexch != nullptr && pexch->Active());
+        if (local_loop) pexch->Reset();
+        int sweeps = 0;
+        bool local_progress = true;
+        while (local_progress) {
+          for(int nb=0; nb<nblocal; ++nb){
+            if (raytrace_flag)
+              my_blocks(nb)->RayTracePhotonsOnBlock(etype);
+            else
+              my_blocks(nb)->TransferPhotonsOnBlock(etype);
+          }
+          local_progress = ExchangeLocal() && local_loop
+                           && (++sweeps < local_max_sweeps);
         }
-        local_progress = ExchangeLocal() && local_loop && (++sweeps < local_max_sweeps);
+        photons_remain = FinishRound();
       }
-      photons_remain = FinishRound();
     }
 
     // Report diagnostic results from all blocks
@@ -1248,9 +1254,7 @@ bool MonteCarlo::FinishRound() {
     nprop += pmcb->pphot->nphot;
   }
 #ifdef MPI_PARALLEL
-  // One reduction, not two.  Nearly every round of a long run is an idle one -- 99.6% of
-  // them transported a single photon in a 32-rank test -- so the fixed cost of the round
-  // is what the run is made of, and a collective is the most expensive part of it.
+  // One reduction, blocking over all ranks
   int counts[2] = {nprop, nremain};
   MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
   nprop = counts[0];
@@ -1264,6 +1268,132 @@ bool MonteCarlo::FinishRound() {
     active = false;
   }
   return active;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::TransportAsync(int etype)
+//! \brief transport to completion, deciding the end from photon counters, not a barrier
+//!
+//! FinishRound settles every round with a blocking Allreduce, so the whole run advances
+//! in lockstep at the pace of whichever rank still has a photon.  That is the wrong shape
+//! for this problem: a single straggler -- one photon on a long flight, or one that
+//! scatters far more than the rest -- makes every other rank pay a collective per block
+//! it crosses, and 99.6% of rounds in a 32-rank test were transporting one photon.
+//!
+//! So no rank waits on any other here.  A rank transports what it holds, posts what is
+//! leaving without waiting for it to be taken, and picks up whatever has arrived.  The
+//! only question left is when everyone is finished, and that is answered from two running
+//! counters: photons handed to other ranks, and photons taken from them.  Their global
+//! sums differ by exactly the number of photons in flight, so the mesh is done when no
+//! rank holds a photon and the two sums agree.
+//!
+//! That test is taken with a nonblocking reduction, and a single one of them is not
+//! enough to trust.  Its inputs are read at different instants on different ranks, so a
+//! photon can be counted as received before the rank that sent it counted it as sent, and
+//! a lone reduction can report a quiet mesh that is not quiet.  Two consecutive ones are
+//! enough: this rank posts the second only after the first has completed, so if both
+//! report no photons anywhere and the identical pair of totals, then nothing was sent
+//! anywhere between them and nothing was in flight.
+
+void MonteCarlo::TransportAsync(int etype) {
+#ifdef MPI_PARALLEL
+  int64_t sbuf[3] = {0, 0, 0}, rbuf[3] = {0, 0, 0};
+  int64_t prev_sent = -1, prev_recv = -1;
+  int quiet_streak = 0;
+  bool pending = false;
+  MPI_Request treq = MPI_REQUEST_NULL;
+
+  while (true) {
+    // Retire the previous round's sends before anything can overwrite their buffers.  It
+    // has to come before taking delivery rather than after posting, because it receives
+    // while it waits and a rank that posted nothing must still reach the drain below.
+    //
+    // Both of the calls below can deliver photons -- CompleteSends receives while it
+    // waits -- so what landed is read from the counter across the pair rather than from
+    // the return of the second.  Taking only the latter loses every photon the first one
+    // took: the flush below is skipped, they sit in the receive buffers where the
+    // activity test cannot see them, and the run terminates with photons still in hand.
+    const int64_t recv_before = pexch->NumRecv();
+    pexch->CompleteSends();
+    pexch->DrainIncoming();
+    const bool landed = (pexch->NumRecv() != recv_before);
+
+    // Flushing the receive buffers is only needed when something actually landed: the
+    // sub-loop below already drains what it hands between blocks on this rank, and
+    // ClearBoundary leaves has_incoming_ false behind it, so with nothing delivered here
+    // there is nothing waiting anywhere.  This matters because it is the whole idle path:
+    // a rank waiting on a straggler goes round this loop as fast as it can, and a scan of
+    // every block on each pass would cost more than the barrier it replaced.
+    if (landed) DrainArrivals();
+
+    // Anything to push forward?  A rank with nothing skips the transport sweep entirely
+    // rather than walking every block to find that out.
+    bool have_work = false;
+    for (int nb = 0; nb < nblocal; ++nb) {
+      MonteCarloBlock *pmcb = my_blocks(nb);
+      if (pmcb->pphot->nphot > 0 || pmcb->nphremain > 0) { have_work = true; break; }
+    }
+
+    if (have_work) {
+      pexch->Reset();
+      int sweeps = 0;
+      bool local_progress = true;
+      while (local_progress) {
+        for (int nb = 0; nb < nblocal; ++nb) {
+          if (raytrace_flag)
+            my_blocks(nb)->RayTracePhotonsOnBlock(etype);
+          else
+            my_blocks(nb)->TransferPhotonsOnBlock(etype);
+        }
+        local_progress = ExchangeLocal() && (++sweeps < local_max_sweeps);
+      }
+      pexch->SendStaged();
+    }
+
+    // Local contribution to the termination test.  has_incoming_ has to count: a photon
+    // that has been delivered into a block's receive buffer but not yet flushed into the
+    // block is neither in flight nor visible in nphot, and would otherwise vanish from
+    // both sides of the test at once.  A rank that neither had work nor took delivery has
+    // none of the three and does not need to look.
+    int64_t act = 0;
+    if (have_work || landed) {
+      for (int nb = 0; nb < nblocal; ++nb) {
+        MonteCarloBlock *pmcb = my_blocks(nb);
+        act += pmcb->pphot->nphot;
+        act += pmcb->nphremain;
+        if (pmcb->pphot->has_incoming_) ++act;
+      }
+    }
+
+    if (!pending) {
+      sbuf[0] = act;
+      sbuf[1] = pexch->NumSent();
+      sbuf[2] = pexch->NumRecv();
+      MPI_Iallreduce(sbuf, rbuf, 3, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD, &treq);
+      pending = true;
+    } else {
+      int done = 0;
+      MPI_Test(&treq, &done, MPI_STATUS_IGNORE);
+      if (done) {
+        pending = false;
+        const bool quiet = (rbuf[0] == 0 && rbuf[1] == rbuf[2]);
+        if (quiet && rbuf[1] == prev_sent && rbuf[2] == prev_recv) {
+          ++quiet_streak;
+        } else {
+          quiet_streak = quiet ? 1 : 0;
+        }
+        prev_sent = rbuf[1];
+        prev_recv = rbuf[2];
+        if (quiet_streak >= 2) break;
+      }
+    }
+  }
+
+  if (pending) MPI_Wait(&treq, MPI_STATUS_IGNORE);
+  // Termination means every photon this rank sent has been taken, so nothing is left to
+  // wait on here; this just releases the request handles.
+  pexch->CompleteSends();
+#endif
 }
 
 //----------------------------------------------------------------------------------------

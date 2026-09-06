@@ -665,6 +665,8 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       if (IsPolarized(pmy_mc->polarized)) ScatteringStokesToCoherency(this, pphot, ip);
       nscat++;
       pphot->nscp[ip]++;
+      // Scattering starts a new free flight, so the capmove counter resets
+      pphot->nmvp[ip] = 0;
       if (pphot->nscp[ip] % pmy_mc->checkscat == 0) {
         //pphot->PrintPhoton("check scat",ip);
         // Check for possible infinite loop due to NaN in photon

@@ -63,6 +63,33 @@ class MCRankExchange {
   //! they belong to.  Collective over the peer set, so every rank calls it every round.
   void ExchangeAndDeliver();
 
+  //! Post what is staged, without waiting for anyone.  A peer with nothing to receive is
+  //! sent nothing at all, so a rank that is idle this round puts no message on the wire.
+  //! That is what the size handshake in ExchangeAndDeliver cannot do: it has to tell
+  //! every peer "nothing for you", which makes an idle round cost 2*npeers messages on
+  //! every rank and couples the whole domain to the slowest one.
+  void SendStaged();
+
+  //! Take delivery of whatever has arrived, from anyone, and hand it to the blocks that
+  //! own it.  Returns the number of photons delivered.  Never blocks: it drains what is
+  //! there and returns, so a rank with no work spins cheaply instead of waiting on peers
+  //! that may have nothing to say this round.
+  int DrainIncoming();
+
+  //! Wait for the posted sends to release their buffers, so Reset can reuse them, taking
+  //! delivery of anything that arrives while waiting.  A large send completes only once
+  //! the peer has matched it, so this has to keep receiving or two ranks each waiting on
+  //! their own sends would wait on each other forever.  It is still not a synchronization
+  //! point: termination is decided from the counters below, never from send completion.
+  void CompleteSends();
+
+  //! Cumulative photons handed to other ranks and taken from them.  Termination needs a
+  //! quantity that accounts for what is in flight, and these are it: a photon staged here
+  //! is counted out at once and counted in only when it lands in a block, so the global
+  //! sums differ by exactly the number of photons on the wire.
+  int64_t NumSent() const { return nsent_; }
+  int64_t NumRecv() const { return nrecv_; }
+
   //! true when the mesh actually spans more than one rank and there is anything to do
   bool Active() const { return active_; }
 
@@ -74,6 +101,16 @@ class MCRankExchange {
   bool active_;
   std::vector<int> peers_;        //!> distinct ranks sharing a boundary with this one
   std::vector<int> peer_of_rank_; //!> rank -> index into peers_, -1 if not a peer
+
+  int64_t nsent_, nrecv_;         //!> cumulative photons out of and into this rank
+
+  // Buffers for the probe-driven path.  The int stream is sent as one message that leads
+  // with the header, so a receiver that has probed it can work out the length of every
+  // other stream from its contents and post exact receives for them.
+  std::vector<std::vector<int> > smsg_;
+#ifdef MPI_PARALLEL
+  std::vector<MPI_Request> sreq_;
+#endif
 
   // Staging, one entry per peer.  The header holds (lid, bufid, npar) per contributing
   // block; the three streams hold the photon properties back to back in that order.

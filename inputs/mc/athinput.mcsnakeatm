@@ -86,7 +86,6 @@ absorption     = freefree
 polarized      = linear
 # drives the comoving-to-coordinate conversion at emission
 boosts         = true
-checkmove      = 10000000
 stepsize       = 1.0e-2
 varystep       = true
 

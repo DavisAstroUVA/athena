@@ -243,7 +243,7 @@ public:
   int list_size_init; // maximum number of photons run per output on any process
   int max_phots_init; // maximum number of photon elements
   int nuser_var, nuser_mom;
-  int checkmove,checkscat;
+  int checkscat,capmove;
   int emission_method;
   int *emission_geometry;
   BoundaryFace *emission_face;
@@ -310,17 +310,20 @@ public:
   bool ExchangeLocal();
   //! flush receive buffers into their blocks; true when any block received something
   bool DrainArrivals();
-  //! send what was staged for other ranks, take delivery, and test for completion
+  // send what was staged for other ranks, take delivery, and test for completion
   bool FinishRound();
-  //! ceiling on consecutive same-rank transport sweeps before taking the global step,
-  //! so two blocks trading a photon cannot hold the other ranks at the barrier
+  // transport every photon of this emission type to completion using photon counters
+  void TransportAsync(int etype);
+  //! use the counter-based termination test instead of a collective every round
+  bool async_term;
+  // ceiling on consecutive same-rank transport sweeps before taking the global step,
+  // so two blocks trading a photon cannot hold the other ranks at the barrier
   int local_max_sweeps;
-  // Blocks taking part in the current transfer round.  Held here rather than rebuilt as
-  // locals so the storage is reused across rounds; see CheckAndBroadCastPhotonsRemaining
+  // Blocks taking part in the current transfer round. see CheckAndBroadCastPhotonsRemaining
   // for what puts a block in each.
   std::vector<int> send_list_, recv_list_;
-  //! moves photons between ranks a rank at a time rather than a block-neighbor at a
-  //! time; null when <montecarlo>/rank_exchange is off, inactive on a single rank
+  // moves photons between ranks a rank at a time; null when <montecarlo>/rank_exchange is off,
+  // inactive on a single rank
   MCRankExchange *pexch;
   void InitUserMonteCarloData(ParameterInput *pin);
   // Enroll User functions

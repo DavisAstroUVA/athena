@@ -101,7 +101,7 @@ public:
   int nphot_limit;
   int &nphot;
 
-  static int istatp, inscp, ityp;
+  static int istatp, inscp, ityp, inmvp;
   static int ii1p, ii2p, ii3p;
   static int ix0p, ix1p, ix2p, ix3p;
   static int ik0p, ik1p, ik2p, ik3p;
@@ -113,6 +113,11 @@ public:
   static int idtp;
 
   std::vector<int> &statp, &nscp, &type;
+  //! count of pusher steps taken since this photon last scattered, accumulated across
+  //! every Move call and every block it has crossed in that free flight.  Registered as a
+  //! photon property so that it rides along in the MPI buffers and survives a transfer to
+  //! another block; `capmove` retires a photon whose free flight runs past the cap.
+  std::vector<int> &nmvp;
   std::vector<int> &i1p, &i2p, &i3p;
   std::vector<Real> &x0p, &x1p, &x2p, &x3p;
   std::vector<Real> &k0p, &k1p, &k2p, &k3p;

@@ -128,7 +128,6 @@ def write_athinput(iseed,nphot,vel,dens,tgas,emin,emax,absmeth='weight',
     outfile.write("emission   = freefree\n")
     outfile.write("absorption = freefree\n")
     outfile.write("polarized  = none\n")
-    outfile.write("checkmove  = 1000000\n")
     outfile.write("stepsize   = 1.0e-2\n")
     outfile.write("varystep   = true\n")
     outfile.write("abs_method = "+absmeth+"\n")

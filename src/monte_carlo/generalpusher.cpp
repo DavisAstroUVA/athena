@@ -63,6 +63,10 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
     //printf("step %g\n",step);
     Real path_length;
     Real k1, k2, k3;
+    // Steps already taken in this free flight, plus the ones taken here.  Counted in a
+    // local so it stays in a register across a body that calls out to AdvanceStep,
+    // UpdateMoments and UserWorkInMove.
+    const int nmv0 = pphot->nmvp[ip];
     int iter = 0;
 
     // set total extinction coefficient
@@ -73,7 +77,12 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
     // always refreshes; see the shift_unity comment below.
     int oi1 = -1, oi2 = -1, oi3 = -1;
     while ( (pphot->statp[ip] == EVOLVING) && (tauremaining > TINY_NUMBER) &&
-            (iter < checkmove) && (pphot->dtp[ip] > 0.) ) {
+            (pphot->dtp[ip] > 0.) ) {
+      // Tested before the step is counted, so nmvp only ever counts steps actually taken.
+      if (capmove > 0 && nmv0 + iter >= capmove) {
+        pphot->statp[ip] = REMOVED;
+        break;
+      }
       iter++;
 
       // Update opacities at the beginning of each step.  Two regimes:
@@ -183,13 +192,22 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
       //pphot->PrintPhoton(ip);
       }*/
 
-    if (iter >= checkmove) {
-      std::cout << "Warning: iter exceeded " << checkmove << " in photon pusher."
-                << std::endl;
-      pphot->PrintPhoton(ip);
-      std::cout << "tau remaining, chi: " << tauremaining << " " << chi << std::endl;
-      pphot->statp[ip] = DESTROYED;
-    }
+    // Retire a photon whose free flight has run past the cap.  nmvp carries across Move
+    // calls and blocks, which is what it takes to bound a flight; it is reset at each
+    // scattering, in TransferPhotonsOnBlock.  Here the unit is an integration substep
+    // rather than a cell crossing, so a meaningful cap is larger than for the two
+    // coordinate pushers.
+    //
+    // This repeats the loop's test because the loop cannot make it on the step that
+    // matters: a photon leaving the block ends that step BUFFERED, so the loop exits on
+    // its own condition and never sees the final count.  Without this the photon goes
+    // on to the next block, possibly through an MPI message, only to be retired on its
+    // first step there.  Any other status is already terminal, REMOVED included, so this
+    // cannot fire twice.
+    pphot->nmvp[ip] = nmv0 + iter;
+    if (capmove > 0 && pphot->nmvp[ip] >= capmove &&
+        (pphot->statp[ip] == EVOLVING || pphot->statp[ip] == BUFFERED))
+      pphot->statp[ip] = REMOVED;
   } // end loop over ip
 }
 

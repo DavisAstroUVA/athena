@@ -21,7 +21,7 @@ bool Photon::initialized = false;
 MCPolarization Photon::polarized = MCPOL_NONE;
 bool Photon::general_pusher_flag = false;
 
-int Photon::inscp = -1, Photon::istatp = -1, Photon::ityp = -1;
+int Photon::inscp = -1, Photon::istatp = -1, Photon::ityp = -1, Photon::inmvp = -1;
 int Photon::ii1p = -1, Photon::ii2p = -1, Photon::ii3p = -1;
 int Photon::ix0p = -1, Photon::ix1p = -1, Photon::ix2p = -1, Photon::ix3p = -1;
 int Photon::ik0p = -1, Photon::ik1p = -1, Photon::ik2p = -1, Photon::ik3p = -1;
@@ -49,7 +49,8 @@ Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
     //user(new std::vector<Real> [pmcb->pmy_mc->nuser_var]),
     //polten(new std::vector<std::complex<Real>> [ncplx]),
     nphot(npar),nscp(intprop[inscp]), statp(intprop[istatp]),
-    type(intprop[ityp]), i1p(intprop[ii1p]), i2p(intprop[ii2p]), i3p(intprop[ii3p]),
+    type(intprop[ityp]), nmvp(intprop[inmvp]),
+    i1p(intprop[ii1p]), i2p(intprop[ii2p]), i3p(intprop[ii3p]),
     x0p(rp[ix0p]), x1p(rp[ix1p]), x2p(rp[ix2p]), x3p(rp[ix3p]),
     k0p(rp[ik0p]), k1p(rp[ik1p]), k2p(rp[ik2p]), k3p(rp[ik3p]),
     dk0p(rp[idk0p]), dk1p(rp[idk1p]), dk2p(rp[idk2p]),
@@ -176,8 +177,17 @@ bool Photon::IsNanPhoton(int ip) {
 
 // SWD: Temporary --> converts protected function to public :(
 void Photon::AllocatePhotons(int nphot) {
+  const int nold = npar;
   // Call Resize function
   Resize(nphot);
+
+  // Zero the free-flight step counter on the slots just claimed for new photons.  Resize
+  // only value-initializes when the underlying vector actually grows, and it does not:
+  // RemoveOneParticle swaps the last photon down into the freed slot and decrements the
+  // count without shrinking the storage, so a slot handed out here has usually held a
+  // photon before and still carries its count.  Left alone, a new photon would inherit
+  // it and could be retired by capmove before travelling anywhere.
+  for (int ip = nold; ip < npar; ++ip) nmvp[ip] = 0;
 }
 
 //----------------------------------------------------------------------------------------
@@ -240,6 +250,7 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
   inscp = AddIntProperty("nscp");
   istatp = AddIntProperty("statp");
   ityp = AddIntProperty("type");
+  inmvp = AddIntProperty("nmv");
 
   // Add photon position.
   ix0p = AddRealProperty("x0");

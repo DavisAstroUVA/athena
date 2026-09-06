@@ -116,7 +116,6 @@ def write_athinput(iseed, nphot, nen, emin, emax, beta, stepsize,
           # boosts drives the comoving-to-coordinate conversion at emission, without which
           # the wavevector never becomes a coordinate four-vector
           "boosts     = true",
-          "checkmove  = 10000000",
           "stepsize   = {0!r}".format(stepsize),
           "varystep   = true", "",
           "<problem>",

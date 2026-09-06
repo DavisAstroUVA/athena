@@ -97,7 +97,6 @@ def write_athinput(iseed, nphot, stepsize, spin, rmin, rmax, nmu, nphi,
     outfile.write("polarized      = none\n")
     outfile.write("stepsize       = {:e}\n".format(stepsize))
     outfile.write("varystep       = true\n")
-    outfile.write("checkmove      = 2000000\n")
     outfile.write("tmax           = 1.0e36\n")
     outfile.write("\n")
     outfile.write("<problem>\n")
