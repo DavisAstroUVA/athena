@@ -1,0 +1,314 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{Photon communication in the Monte Carlo module}
+\author{Athena++ Monte Carlo radiation transport}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note records how photons move between MeshBlocks and between MPI ranks, and how the
+transport loop decides that every photon has finished. It is written to be read alongside
+\texttt{src/monte\_carlo/mcexchange.cpp}, \texttt{src/monte\_carlo/photon.cpp} and the
+transport driver in \texttt{src/monte\_carlo/montecarlo.cpp}. The emphasis is on the
+invariants each layer maintains, because the failure mode of this subsystem is not a crash
+but the silent loss of photons: every defect found while building it was invisible except
+through the conservation identity of Sec.~\ref{sec:conservation}. Measured costs and the
+history of how the scheme arrived at its present form are recorded separately, in
+\texttt{doc/monte\_carlo/transport\_loop\_performance.md}.
+\end{abstract}
+
+\section{The problem}
+
+Photon transport is a sweep over MeshBlocks. A photon is pushed until it reaches an
+interaction point, leaves the domain, or leaves its block; in the last case it must be
+handed to the neighbouring block, which may live on another rank. Transport is therefore a
+sequence of \emph{rounds}, each round pushing every photon that is currently resident and
+then moving those that crossed a block face.
+
+Two properties of the physics set the shape of the problem.
+
+First, a photon's block-to-block path is unbounded. In an optically thin region with
+periodic sides a nearly horizontal photon crosses block after block without reaching an
+interaction point, so the number of rounds is set not by the number of photons but by the
+longest single trajectory. On a $4096$-block test problem, $99.6\%$ of rounds transported a
+single photon.
+
+Second, the work is not spread evenly. Most photons finish quickly and a few do not, so
+after the first few rounds almost every rank is idle and waiting on one straggler.
+
+Together these mean the per-round fixed cost, not the per-photon cost, is what the run is
+made of. The scheme described here is built to make an idle round as close to free as
+possible.
+
+\section{Layers}
+
+Three layers sit between a photon leaving a block and arriving in the next.
+
+\begin{description}
+\item[Block to block, same rank.] A direct write into the target block's receive buffer
+during the send sweep. No message, no handshake.
+
+\item[Rank to rank.] Everything leaving this rank for a given peer, from every block, is
+collected into one buffer per peer by \texttt{MCRankExchange} and sent as one message set.
+A block no longer talks to a neighbouring block across a rank boundary; a rank talks to a
+rank.
+
+\item[Termination.] A decision, taken by all ranks, that no photon remains anywhere.
+\end{description}
+
+The first two are always in force. The third has two implementations, selected by
+\texttt{<montecarlo>/async\_term}, described in Secs.~\ref{sec:sync} and \ref{sec:async}.
+
+\section{Buffer layout and the aggregation}
+\label{sec:layout}
+
+A photon's state is stored as a struct of arrays: \texttt{nint} integer properties,
+\texttt{nreal} real properties and \texttt{ncplx} complex properties per photon, the last
+being the polarization tensor and present only in polarized runs. Packing a photon for
+transfer copies these into the three streams of a \texttt{ParticleBuffer}.
+
+\texttt{MCRankExchange::Stage} appends one block's outgoing photons to the buffers for
+their destination rank, recording a header triple
+\begin{equation}
+  (\,\texttt{lid},\ \texttt{bufid},\ \texttt{npar}\,)
+  \label{eq:triple}
+\end{equation}
+where \texttt{lid} is the local block index on the \emph{receiving} rank and \texttt{bufid}
+the boundary slot that block expects them in. The three property streams are appended back
+to back in the same block order. A message is therefore self-describing: given the headers,
+a receiver can walk the streams by advancing three offsets, each by
+\texttt{npar} times the corresponding per-photon property count.
+
+That walk is the one piece of arithmetic both transports share, and it is written once, in
+\texttt{MCRankExchange::Deliver}. This is deliberate. Its offsets are trivially wrong in
+ways that produce no error, only photons delivered with another photon's properties.
+
+\subsection{Peer set}
+
+The set of ranks this one shares a block boundary with is computed once, after the
+neighbour lists are linked. The relation is symmetric --- if a block here neighbours a
+block there, that block neighbours this one --- so both sides agree on the peer set without
+negotiating it, which is what allows a paired exchange with no discovery step.
+
+The "once" is an assumption that holds only because the module runs as static
+post-processing on a mesh that never remeshes. Anything that moves blocks between ranks
+invalidates both the peer list and every \texttt{lid} in a staged header.
+
+\section{Synchronous termination}
+\label{sec:sync}
+
+The original scheme, retained as \texttt{async\_term = false}.
+
+Each round ends with \texttt{FinishRound}, which performs the rank exchange and then a
+blocking \texttt{MPI\_Allreduce} over two counts: photons resident on this rank, and
+photons still to be emitted. The run continues while either is nonzero anywhere.
+
+The rank exchange here is a two-phase collective over the peer set. Each peer is first told
+how much is coming, as four integers, because it cannot post receives of the right size
+otherwise; the payload follows only between peers that have one. The size message goes out
+even when nothing follows, so an idle round still costs $2 N_{\rm peer}$ messages on every
+rank, plus the reduction.
+
+This is correct and simple, and its cost is a constant per round. Given that the round
+count is set by the longest trajectory, a constant per round is precisely the wrong thing
+to be paying.
+
+\section{Counter-based asynchronous termination}
+\label{sec:async}
+
+The default, \texttt{async\_term = true}. No rank waits on any other. A rank transports
+what it holds, posts what is leaving without waiting for it to be taken, and picks up
+whatever has arrived.
+
+\subsection{Sending and receiving without a handshake}
+
+The size handshake exists only so a receiver knows how much to expect. That information is
+already in the header, so the int stream is sent as a single message that leads with its
+own triple count:
+\begin{equation}
+  [\,n_{\rm trip},\ (\texttt{lid},\texttt{bufid},\texttt{npar})^{n_{\rm trip}},\
+  \text{int payload}\,] .
+  \label{eq:msg}
+\end{equation}
+A receiver probes for this one message, reads $n_{\rm trip}$, sums the \texttt{npar} to get
+the total photon count, and from that computes the exact lengths of the real and complex
+streams waiting behind it. MPI preserves message order between a given pair of ranks on a
+tag, so those streams belong to the header just read.
+
+The consequence is the point of the exercise: a rank with nothing to send sends nothing at
+all. Silence is the signal, and an idle round costs no messages.
+
+\subsection{The termination question}
+
+What remains is deciding when everyone has finished. Two counters answer it. Let $S$ be the
+cumulative number of photons this rank has handed to other ranks, incremented at
+\texttt{Stage}, and $R$ the number it has taken from them, incremented on delivery. Summing
+over ranks,
+\begin{equation}
+  \sum_r S_r - \sum_r R_r = \text{photons in flight} \ \geq 0 ,
+  \label{eq:inflight}
+\end{equation}
+so the mesh is finished when no rank holds a photon and the two global sums agree.
+
+Local activity must count three things, not one:
+\begin{equation}
+  A_r = \sum_{\rm blocks} \big( \texttt{nphot} + \texttt{nphremain} \big)
+        + \#\{\text{blocks with } \texttt{has\_incoming\_}\} .
+  \label{eq:active}
+\end{equation}
+The third term is not redundant. A photon that has been delivered into a block's receive
+buffer but not yet flushed into the block is neither in flight, by
+Eq.~\eqref{eq:inflight}, nor visible in \texttt{nphot}. Omitting it lets a photon vanish
+from both sides of the test at once, and the run terminates holding it.
+
+\subsection{Why one reduction is not enough}
+
+The test is taken with a nonblocking reduction of $(A, S, R)$, so a rank keeps working
+while it is in flight. A single reduction cannot be trusted, because its inputs are read at
+different instants on different ranks: rank $b$ may contribute after receiving a photon
+that rank $a$ contributed before sending, and the sum then reports $\sum S = \sum R$ with a
+photon still on the wire.
+
+Two consecutive reductions settle it. A rank posts the second only after the first has
+completed, so every rank's contribution to the second is taken after every rank had
+contributed to the first. If both report $A = 0$ globally and the \emph{identical} pair of
+totals $(S, R)$ with $S = R$, then no rank sent anything between them and nothing was in
+flight. Comparing the totals across the two is essential and not merely defensive: a rank
+that received a photon, finished it and fell idle again would otherwise show $A = 0$ twice
+in a row while the counters moved underneath. This is Mattern's four-counter argument in
+its usual practical form.
+
+\subsection{Ordering constraints}
+
+Three orderings in the loop are load-bearing, each corresponding to a way the scheme
+deadlocks or loses photons if written the obvious way.
+
+\begin{enumerate}
+\item \textbf{Completing sends must drain.} A message large enough to go by rendezvous does
+not complete until the receiver has matched it. A rank that waits on its own sends without
+receiving is waiting on a peer doing the same thing. This is not a rare race: it is the
+first round, when every rank has a full complement of photons to hand over and all of them
+wait at once.
+
+\item \textbf{The wait belongs before the next reset, not after posting.} The send buffers
+cannot be reused until the sends release them, but a rank that posted nothing must still
+reach the drain, so the wait sits at the top of the following pass rather than at the
+bottom of this one.
+
+\item \textbf{"What landed" must be read from the counter.} Because completing sends also
+delivers photons, the number that arrived is the change in $R$ across both calls, not the
+return value of the second. Taking only the latter skips the flush, leaves those photons in
+receive buffers where Eq.~\eqref{eq:active} cannot see them, and terminates the run holding
+them.
+\end{enumerate}
+
+\subsection{The idle path}
+
+A rank waiting on someone else's straggler goes round the loop as fast as the probe
+returns. Two things keep that cheap. It skips both the transport sweep and the activity
+scan of Eq.~\eqref{eq:active}, which are $O(N_{\rm block})$ and provably zero when nothing
+is resident and nothing arrived. And after a short spin it yields the core, since holding
+one at full tilt costs exactly the cycles the rank still working needs.
+
+\section{The conservation identity}
+\label{sec:conservation}
+
+Every photon ends in exactly one terminal state, so at the end of a run
+\begin{equation}
+  n_{\rm esc} + n_{\rm abs} + n_{\rm des} + n_{\rm rem} = n_{\rm tot} ,
+  \label{eq:conservation}
+\end{equation}
+with $n_{\rm rem}$ counting photons retired by the path cap of
+Sec.~\ref{sec:capmove}. All five are reported in the run summary.
+
+This identity is the whole test suite for this subsystem. A photon dropped in transfer, or
+delivered twice, or left in a buffer at termination, changes nothing that any physics test
+would notice --- the spectrum is still a spectrum, drawn from slightly fewer samples --- and
+shows up here and nowhere else. Every bug found while building the scheme was caught by it:
+a receive that overwrote instead of appending, losing $64\%$ of photons at $16$ ranks; and a
+premature termination that left $75\%$ of them sitting undelivered. It should be checked
+whenever this code is touched, at more than one rank count, since the failures are
+sensitive to how work happens to be distributed.
+
+\section{Bounding a trajectory}
+\label{sec:capmove}
+
+The round count is set by the longest single flight, so a cap on that flight is a cap on
+the run. \texttt{<montecarlo>/capmove} bounds the number of pusher steps in one free
+flight, counting in a photon property so the count survives both the end of a \texttt{Move}
+and a transfer to another block, and resetting at each scattering, since a scattering
+begins a new flight.
+
+Two details decide whether it works at all. The status test must accept \texttt{BUFFERED}
+as well as \texttt{EVOLVING}: a \texttt{Move} ending \texttt{EVOLVING} is one that reached
+an interaction point inside the block, whereas the flight this exists to stop leaves the
+block on every call and ends every one of them \texttt{BUFFERED}. And the count must be
+zeroed for reused photon slots, which are not value-initialised, or a new photon inherits
+its predecessor's count.
+
+The cap is checked inside the pusher loop, which bounds that loop, and again after it,
+which catches the step where the photon left the block and the loop exited on its own
+condition. Without the second check such a photon is shipped to the next block, possibly
+through an MPI message, only to be retired on its first step there.
+
+\paragraph{This is a biased estimator.} It discards photons, and not at random: it discards
+exactly the longest-path ones. In a scattering-dominated test with $\tau = 3$ and roughly
+ten scatterings per photon, a cap of $200$ steps still discarded $8.7\%$ of photons,
+because free paths are long \emph{horizontally} even when the vertical depth is not ---
+periodic directions have no bounding depth. It is a safety valve for genuinely unbounded
+flights, not a general speed control, and wants to sit well above the longest physical free
+flight. The default is $0$, meaning off, and $n_{\rm rem}$ reports how much was discarded.
+
+\section{Parameters}
+
+All in the \texttt{<montecarlo>} block.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Name & Default & Meaning \\
+\midrule
+\texttt{rank\_exchange}   & on  & aggregate off-rank photons per rank, not per block link \\
+\texttt{async\_term}      & on  & counter-based termination instead of a collective per round \\
+\texttt{local\_max\_sweeps} & 1000 & consecutive same-rank transport sweeps per round \\
+\texttt{capmove}          & 0 (off) & cap on steps in one free flight; see Sec.~\ref{sec:capmove} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\texttt{async\_term} falls back to the synchronous loop whenever the rank exchange is
+inactive, which includes every serial run. \texttt{local\_max\_sweeps} bounds a same-rank
+ping-pong; in the asynchronous loop it also ensures a return to the drain, so photons
+arriving from other ranks do not wait behind an unbounded local sweep.
+
+\section{Known gaps}
+
+\begin{enumerate}
+\item \textbf{Two transports.} Secs.~\ref{sec:sync} and \ref{sec:async} are independent
+implementations. They now share the delivery walk of Sec.~\ref{sec:layout}, which is the
+part that silently corrupts, but not the message structure. The synchronous path is worth
+keeping only until the asynchronous one has enough mileage to retire it.
+
+\item \textbf{Results are not bit-identical between the two.} Photons arrive in a different
+order, so each block consumes its random stream differently. Escaping fractions agree
+within Poisson noise, which is the most that can be asked.
+
+\item \textbf{Load balance.} Blocks are distributed by cell count, and photons by emission,
+but transport cost follows where photons travel and how much they scatter. Neither is
+balanced by the current decomposition, and no improvement to the exchange addresses it.
+Making the Athena++ load balancer aware of Monte Carlo work is the next task.
+
+\item \textbf{Static peer set.} As in Sec.~\ref{sec:layout}, and a direct constraint on the
+previous item: a load balancer that moves blocks mid-transport must rebuild the peer list
+and the staged headers.
+\end{enumerate}
+
+\end{document}

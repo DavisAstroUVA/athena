@@ -321,8 +321,8 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
         } // end loop over i
       } // end loop over j
     } // end loop over k
-    if (nff > 0)
-      printf("Number of cells using free-free opacity on block %d: %d\n",pmy_block->gid,nff);
+    //if (nff > 0)
+    //  printf("Number of cells using free-free opacity on block %d: %d\n",pmy_block->gid,nff);
 
     // Compute emissivity table for each cell and frequncy
     AthenaArray<Real> eta_nu_tab;

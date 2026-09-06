@@ -184,11 +184,39 @@ are enough ranks for the barrier to be the cost, and it is slightly negative at 
 mixed case. That is the honest shape of it on this benchmark, which after the earlier
 stages is no longer barrier-dominated.
 
-**It has not been measured on the case that motivated it.** The tdestream snapshot at 32
-ranks was set up and started here -- the grid reconstruction succeeds and reports its 83231
-blocks on 5 levels -- but the runs were stopped by hand before finishing, so there are no
-timings for it. Whether async termination is worth anything on the real snapshots is an
-open question, and the switch exists partly so it can be answered by running it both ways.
+### On the case that motivated it
+
+The tdestream snapshot, 83231 blocks on 5 levels, 32 ranks, 20000 photons, Compton
+scattering. Setup is excluded: the timer below runs from "Setup complete" to the summary
+line, so it is transport only.
+
+| run | | setup | transport | nesc | nabs |
+|---|---|---|---|---|---|
+| 1 | sync  | 11.57 s | 327.4 s | 14580 | 5420 |
+| 1 | async | 11.55 s | 157.7 s | 14584 | 5416 |
+| 2 | sync  | 11.44 s | 327.0 s | 14580 | 5420 |
+| 2 | async | 11.27 s | 189.3 s | 14626 | 5374 |
+
+**1.7x to 2.1x on transport**, far more than the 1.0-1.2x the synthetic benchmarks showed,
+and the reason is visible in the run: `nscat/ntot` is about 1.3e4. Photons scatter roughly
+thirteen thousand times each, with a long tail, so the run really is a handful of
+stragglers holding everyone else at the barrier. That is precisely the case counter-based
+termination was built for, and the synthetic benchmarks -- with `nscat/ntot` under 0.01 --
+never had it.
+
+Take the range seriously rather than the best figure. The synchronous path is
+bit-reproducible, repeating its counts and its time to better than 0.2%, which makes it a
+clean baseline. The asynchronous path varied by 20% between two runs of the same input,
+because both the order photons arrive in and the moment the termination reductions complete
+are nondeterministic. Two runs bound it loosely; they do not pin it down.
+
+Both repeats conserve exactly (`14580 + 5420` and `14626 + 5374`), which is the first time
+the async path has met a mesh of this size. Escaping fractions sit 0.06 and 0.73 Poisson
+sigma from the deterministic baseline.
+
+Note that `cpu time used` as printed by the code is `clock()`, i.e. process CPU time on
+rank 0, and is the wrong metric for this comparison: a rank spinning in the async
+termination loop burns CPU where one blocked in `MPI_Allreduce` may not. Measure wall time.
 
 **Results are not bit-identical to the synchronous path.** Photons arrive in a different
 order, so each block consumes its random stream differently. Escaping fractions agree
@@ -215,12 +243,16 @@ not active, which includes every serial run.
 
 - Stage 3 as originally sketched, an `MPI_Ibarrier`-based NBX for the sizes handshake, is
   superseded by §5 for the async path but the synchronous path still has the handshake.
-- The synchronous path is a second, independent implementation of the same exchange.
-  `ExchangeAndDeliver` and `SendStaged`/`DrainIncoming` use different message layouts and
-  each has its own copy of the unpack offset arithmetic, so a fix to one does not reach the
-  other. Worth collapsing to one once the async path has more mileage.
-- The idle wait in `TransportAsync` is a busy loop. It is cheap per pass -- a probe, a
-  test, and no block scan -- but a rank waiting on a long straggler still holds a core at
-  100%, which costs the ranks that are working when the node is oversubscribed.
-- The idle spin in `TransportAsync` is a busy wait. It is cheap per pass -- a probe, a
-  test, and no block scan -- but a rank waiting on a long straggler still burns a core.
+- The synchronous path is a second implementation of the same exchange. The two now share
+  the delivery walk (`MCRankExchange::Deliver`), which is the part that fails silently, but
+  not the message structure. Note that it is not merely a fallback: `TransportAsync` is
+  compiled only under `MPI_PARALLEL` and dispatched only when the rank exchange is active,
+  so the synchronous loop is the transport loop for every non-MPI build and every serial
+  run. Retiring it means first giving those cases an async-equivalent path.
+- `GenerateComptonTable` is called from the `MonteCarloBlock` constructor, so it runs once
+  per block -- about 2600 times per rank on the 83231-block snapshot -- while `xsect` is a
+  single file-scope global. Every call recomputes (`comptonio > 0`) or re-reads
+  (`comptonio = 0`) the identical table into the identical memory. It should happen once
+  per rank. This is a setup cost, not a transport one, but it is large enough to swamp any
+  setup measurement and was found while timing one. **Agreed to fix after the
+  communication work.**

@@ -8,6 +8,8 @@
 
 // C++ headers
 #include <complex>
+#include <sstream>
+#include <stdexcept>
 #include <vector>
 
 // Athena++ headers
@@ -38,7 +40,7 @@ const int kHdrWords = 3;   // (lid, bufid, npar) per contributing block
 //! \fn MCRankExchange::MCRankExchange(MonteCarlo *pmc)
 
 MCRankExchange::MCRankExchange(MonteCarlo *pmc)
-    : pmy_mc_(pmc), active_(false), nsent_(0), nrecv_(0) {}
+    : pmy_mc_(pmc), active_(false), nsent_(0), nrecv_(0), nbtotal_at_build_(-1) {}
 
 //----------------------------------------------------------------------------------------
 //! \fn void MCRankExchange::BuildPeerList()
@@ -69,6 +71,39 @@ void MCRankExchange::BuildPeerList() {
   smsg_.resize(np);
   active_ = !peers_.empty();
 #endif
+
+  // Record the layout this peer list describes, so a later redistribution is caught rather
+  // than silently misdelivering.  Kept outside the MPI guard so the fields are consistent
+  // in every build.
+  nbtotal_at_build_ = pmy_mc_->pmy_mesh->nbtotal;
+  gid_at_build_.resize(pmy_mc_->nblocal);
+  for (int nb = 0; nb < pmy_mc_->nblocal; ++nb)
+    gid_at_build_[nb] = pmy_mc_->my_blocks(nb)->pmy_block->gid;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCRankExchange::CheckLayoutUnchanged()
+//! \brief stop the run if blocks have moved between ranks since the peer list was built
+
+void MCRankExchange::CheckLayoutUnchanged() const {
+  bool moved = (pmy_mc_->pmy_mesh->nbtotal != nbtotal_at_build_)
+               || (static_cast<int>(gid_at_build_.size()) != pmy_mc_->nblocal);
+  for (int nb = 0; !moved && nb < pmy_mc_->nblocal; ++nb)
+    moved = (gid_at_build_[nb] != pmy_mc_->my_blocks(nb)->pmy_block->gid);
+
+  if (moved) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MCRankExchange::CheckLayoutUnchanged" << std::endl
+        << "MeshBlocks have moved between ranks since the photon exchange peer list was"
+        << " built, so that list and every lid staged against it are stale." << std::endl
+        << "Reached through adaptive mesh refinement, or through"
+        << " <loadbalancing>/balancer = automatic or manual, which redistributes blocks"
+        << " even when the mesh itself never changes." << std::endl
+        << "Supporting this needs BuildPeerList rerun and the staged headers remapped"
+        << " after every redistribution; until then, transport and redistribution cannot"
+        << " be combined." << std::endl;
+    ATHENA_ERROR(msg);
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -184,25 +219,36 @@ void MCRankExchange::ExchangeAndDeliver() {
     MPI_Waitall(static_cast<int>(req.size()), req.data(), MPI_STATUSES_IGNORE);
 
   // ---- deliver ----
-  const int ni = Photon::PropertyCountInt();
-  const int nr = Photon::PropertyCountReal();
   for (std::size_t p = 0; p < np; ++p) {
-    std::size_t oi = 0, orr = 0, oc = 0;
-    for (std::size_t h = 0; h + kHdrWords <= rhdr_[p].size(); h += kHdrWords) {
-      const int lid = rhdr_[p][h];
-      const int bufid = rhdr_[p][h+1];
-      const int npar = rhdr_[p][h+2];
-      Photon *pp = pmy_mc_->my_blocks(lid)->pphot;
-      pp->AcceptPhotons(bufid, &rint_[p][oi], &rreal_[p][orr],
-                        (nc > 0 && oc < rcplx_[p].size()) ? &rcplx_[p][oc] : nullptr,
-                        npar);
-      nrecv_ += npar;
-      oi += npar*ni;
-      orr += npar*nr;
-      oc += npar*nc;
-    }
+    if (rhdr_[p].empty()) continue;
+    Deliver(rhdr_[p].data(), static_cast<int>(rhdr_[p].size()/kHdrWords),
+            rint_[p].data(), rreal_[p].data(),
+            (nc > 0 && !rcplx_[p].empty()) ? rcplx_[p].data() : nullptr);
   }
 #endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCRankExchange::Deliver(...)
+//! \brief hand one peer's arrivals to the blocks they belong to
+
+void MCRankExchange::Deliver(const int *hdr, int ntrip, const int *ib, const Real *rb,
+                             const std::complex<Real> *cb) {
+  const int ni = Photon::PropertyCountInt();
+  const int nr = Photon::PropertyCountReal();
+  const int nc = Photon::PropertyCountCplx();
+  std::size_t oi = 0, orr = 0, oc = 0;
+  for (int t = 0; t < ntrip; ++t) {
+    const int lid = hdr[kHdrWords*t + 0];
+    const int bufid = hdr[kHdrWords*t + 1];
+    const int npar = hdr[kHdrWords*t + 2];
+    Photon *pp = pmy_mc_->my_blocks(lid)->pphot;
+    pp->AcceptPhotons(bufid, &ib[oi], &rb[orr], (cb != nullptr) ? &cb[oc] : nullptr, npar);
+    nrecv_ += npar;
+    oi += static_cast<std::size_t>(npar)*ni;
+    orr += static_cast<std::size_t>(npar)*nr;
+    oc += static_cast<std::size_t>(npar)*nc;
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -260,7 +306,6 @@ int MCRankExchange::DrainIncoming() {
   int ndeliv = 0;
 #ifdef MPI_PARALLEL
   if (!active_) return 0;
-  const int ni = Photon::PropertyCountInt();
   const int nr = Photon::PropertyCountReal();
   const int nc = Photon::PropertyCountCplx();
 
@@ -292,22 +337,10 @@ int MCRankExchange::DrainIncoming() {
                MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
 
-    // The int payload starts after the count word and the header triples.
+    // The header triples sit behind the count word, and the int payload behind them.
     const std::size_t ibase = 1 + static_cast<std::size_t>(kHdrWords)*ntrip;
-    std::size_t oi = 0, orr = 0, oc = 0;
-    for (int t = 0; t < ntrip; ++t) {
-      const int lid = msg[1 + kHdrWords*t + 0];
-      const int bufid = msg[1 + kHdrWords*t + 1];
-      const int npar = msg[1 + kHdrWords*t + 2];
-      Photon *pp = pmy_mc_->my_blocks(lid)->pphot;
-      pp->AcceptPhotons(bufid, &msg[ibase + oi], &rb[orr],
-                        (nc > 0) ? &cb[oc] : nullptr, npar);
-      nrecv_ += npar;
-      ndeliv += npar;
-      oi += static_cast<std::size_t>(npar)*ni;
-      orr += static_cast<std::size_t>(npar)*nr;
-      oc += static_cast<std::size_t>(npar)*nc;
-    }
+    Deliver(&msg[1], ntrip, &msg[ibase], rb.data(), (nc > 0) ? cb.data() : nullptr);
+    ndeliv += npar_tot;
   }
 #endif
   return ndeliv;

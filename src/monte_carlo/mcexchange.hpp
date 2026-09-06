@@ -48,7 +48,26 @@ class MCRankExchange {
 
   //! Work out which ranks this one shares a boundary with.  Fixed for the life of the
   //! mesh, so it is done once after the neighbor lists are linked.
+  //!
+  //! That "once" is an assumption, not a guarantee: it holds because the MC module runs as
+  //! static post-processing on a mesh that never remeshes.  Anything that moves blocks
+  //! between ranks -- dynamic AMR, or a load balancer rerun mid-transport, which is the
+  //! shape of the planned MC-aware cost function -- invalidates the peer list and every
+  //! lid in a staged header, and both must be rebuilt before the next round.
   void BuildPeerList();
+
+  //! Fatal-error if blocks have moved between ranks since BuildPeerList ran.
+  //!
+  //! Two things staged for a peer go stale when that happens, and they fail differently.
+  //! A destination that is no longer a peer is dropped by Stage, which the photon
+  //! conservation check at the end of a run does catch.  But the lid in each header triple
+  //! is the receiving rank's *local* block index, and those renumber on redistribution, so
+  //! a photon can be delivered to the right rank and the wrong block: the count is
+  //! preserved and only the position is wrong, which no existing check would notice.
+  //!
+  //! Cheap enough to call once per transport, which is the right granularity: blocks can
+  //! only move between hydro steps, never within one round.
+  void CheckLayoutUnchanged() const;
 
   //! Empty the staging buffers at the start of a transfer round.
   void Reset();
@@ -97,12 +116,25 @@ class MCRankExchange {
   int NumPeers() const { return static_cast<int>(peers_.size()); }
 
  private:
+  //! Hand one peer's arrivals to the blocks they belong to and count them in.  The two
+  //! transports above differ in how a message reaches this point but not in what it
+  //! contains, and the walk over it -- three interleaved stream offsets advancing by a
+  //! per-block photon count -- is the part that is easy to get wrong, so both share this
+  //! one copy.  hdr holds ntrip (lid, bufid, npar) triples; ib, rb and cb are the three
+  //! streams, packed back to back in that block order.
+  void Deliver(const int *hdr, int ntrip, const int *ib, const Real *rb,
+               const std::complex<Real> *cb);
+
   MonteCarlo *pmy_mc_;
   bool active_;
   std::vector<int> peers_;        //!> distinct ranks sharing a boundary with this one
   std::vector<int> peer_of_rank_; //!> rank -> index into peers_, -1 if not a peer
 
   int64_t nsent_, nrecv_;         //!> cumulative photons out of and into this rank
+
+  // Mesh layout the peer list was built for, for CheckLayoutUnchanged.
+  int nbtotal_at_build_;          //!> global block count
+  std::vector<int> gid_at_build_; //!> gid of each local block, in lid order
 
   // Buffers for the probe-driven path.  The int stream is sent as one message that leads
   // with the header, so a receiver that has probed it can work out the length of every

@@ -15,6 +15,10 @@
 #include <string>
 #include <vector>
 
+#ifdef MPI_PARALLEL
+#include <sched.h>  // sched_yield, for the idle wait in TransportAsync
+#endif
+
 // Athena++ headers
 #include "mcexchange.hpp"
 #include "montecarlo.hpp"
@@ -1076,6 +1080,12 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     DistributeSamples(etype);
     emission_method = etype;
 
+    // The peer list and the lids staged against it were fixed when the mesh was built, so
+    // check here, before any photon moves, that nothing has since redistributed blocks
+    // across ranks.  Once per transport is the right place: blocks can only move between
+    // hydro steps, and a per-round check would cost a scan of every block.
+    if (pexch != nullptr && pexch->Active()) pexch->CheckLayoutUnchanged();
+
     // Run Monte Carlo until all photons have escaped/been absorbed
     if (async_term && pexch != nullptr && pexch->Active()) {
       TransportAsync(etype);
@@ -1275,10 +1285,7 @@ bool MonteCarlo::FinishRound() {
 //! \brief transport to completion, deciding the end from photon counters, not a barrier
 //!
 //! FinishRound settles every round with a blocking Allreduce, so the whole run advances
-//! in lockstep at the pace of whichever rank still has a photon.  That is the wrong shape
-//! for this problem: a single straggler -- one photon on a long flight, or one that
-//! scatters far more than the rest -- makes every other rank pay a collective per block
-//! it crosses, and 99.6% of rounds in a 32-rank test were transporting one photon.
+//! in lockstep at the pace of whichever rank still has a photon.
 //!
 //! So no rank waits on any other here.  A rank transports what it holds, posts what is
 //! leaving without waiting for it to be taken, and picks up whatever has arrived.  The
@@ -1302,6 +1309,11 @@ void MonteCarlo::TransportAsync(int etype) {
   int quiet_streak = 0;
   bool pending = false;
   MPI_Request treq = MPI_REQUEST_NULL;
+  // Passes spent with neither work nor an arrival, and how many to spin through before
+  // handing the core back.  Small enough that a rank stays responsive to a peer, large
+  // enough that a busy rank alternating between work and short waits never yields.
+  int idle_passes = 0;
+  const int kSpinBeforeYield = 64;
 
   while (true) {
     // Retire the previous round's sends before anything can overwrite their buffers.  It
@@ -1336,6 +1348,11 @@ void MonteCarlo::TransportAsync(int etype) {
 
     if (have_work) {
       pexch->Reset();
+      // local_max_sweeps bounds a same-rank ping-pong here.  Its other job in the
+      // synchronous loop -- keeping two blocks trading a photon from holding every other
+      // rank at the barrier -- does not apply, because there is no barrier to hold them
+      // at.  What it still buys is a return to the drain above, so photons arriving from
+      // other ranks are not left waiting behind an unbounded local sweep.
       int sweeps = 0;
       bool local_progress = true;
       while (local_progress) {
@@ -1348,6 +1365,15 @@ void MonteCarlo::TransportAsync(int etype) {
         local_progress = ExchangeLocal() && (++sweeps < local_max_sweeps);
       }
       pexch->SendStaged();
+      idle_passes = 0;
+    } else if (!landed) {
+      // Nothing to do and nothing arrived.  This rank is waiting on someone else's
+      // straggler and will go round this loop as fast as the probe returns, holding a core
+      // at full tilt for as long as that takes -- which is exactly the cycles the rank
+      // still working needs, once a node is oversubscribed.  Yield after a short spin, so
+      // a peer that is about to send still gets an immediate response but a long wait
+      // costs the scheduler rather than the run.
+      if (++idle_passes > kSpinBeforeYield) sched_yield();
     }
 
     // Local contribution to the termination test.  has_incoming_ has to count: a photon
