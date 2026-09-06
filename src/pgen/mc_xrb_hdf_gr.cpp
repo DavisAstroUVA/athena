@@ -3,7 +3,9 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file from_array.cpp//! \brief Problem generator for initializing with preexisting array from HDF5 input
+//! \file mc_xrb_hdf_gr.cpp
+//! \brief Monte Carlo problem generator for an X-ray binary in Kerr-Schild coordinates,
+//! initialized from an athdf snapshot.
 
 // C headers
 
@@ -18,7 +20,6 @@
 #include "../globals.hpp"             // Globals
 #include "../hydro/hydro.hpp"         // Hydro
 #include "../eos/eos.hpp"                  // EquationOfState
-#include "../inputs/hdf5_reader.hpp"  // HDF5ReadRealArray()
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"     // ParameterInput
 #include "../monte_carlo/mcgrid.hpp"
@@ -40,7 +41,6 @@ namespace {
   AthenaArray<Real> fre_grid;
   AthenaArray<Real> temp_grid;
   AthenaArray<Real> rho_grid;
-  AthenaArray<Real> ross_tab;
   AthenaArray<Real> ross_gray_tab;
   AthenaArray<Real> plan_tab;
   AthenaArray<Real> emis_cum;
@@ -57,20 +57,10 @@ namespace {
   Real FreeFreeOpacity(Real tgas, Real rho, Real energy);
   void GetNel(MonteCarloBlock *pmcb);
   void GetNelFloor(MonteCarloBlock *pmcb);
-  Real UserScatteringOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
+  void UserGetDensity(MonteCarloBlock *pmcb);
   void CartesianKerrSchild(Real x1, Real x2, Real x3, ParameterInput *pin,
     AthenaArray<Real> &g, AthenaArray<Real> &g_inv, AthenaArray<Real> &dg_dx1,
     AthenaArray<Real> &dg_dx2, AthenaArray<Real> &dg_dx3);
-}
-
-std::vector<float> x1coord;
-std::vector<float> x2coord;
-std::vector<float> x3coord;
-
-int getindex(std::vector<float> vec, float val){
-  std::vector<float>::iterator it = std::find(vec.begin(), vec.end(), val);
-  int index = std::distance(vec.begin(), it);
-  return index;
 }
 
 void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
@@ -105,7 +95,6 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   temp_grid.NewAthenaArray(ntem);
   rho_grid.NewAthenaArray(nrho);
   ross_gray_tab.NewAthenaArray(ntem,nrho);
-  ross_tab.NewAthenaArray(nfre,ntem,nrho);
   plan_tab.NewAthenaArray(nfre,ntem,nrho);
 
   for(int i=0; i<nfre; ++i){
@@ -148,8 +137,8 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     printf("Max/min/num densities in table: %g %g %d\n",
            rho_grid(0),rho_grid(nrho-1),nrho);
   }
-  // frequency integrated rosseland mean
-  // Read in but not used
+  // frequency integrated rosseland mean, read by GetNel to decide whether a cell is
+  // cold enough to treat as neutral
   Real buf;
   for(int j=0; j<ntem; ++j) {
     for(int i=0; i<nrho; ++i) {
@@ -165,12 +154,13 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     }
   }
 
-  // ross mean for each frequency group
+  // rosseland mean for each frequency group
+  // Read in but not used.  The values are still consumed rather than skipped, because
+  // that is what leaves the file positioned at the Planck means below.
   for(int k=0; k<nfre; ++k) {
     for(int j=0; j<ntem; ++j) {
       for(int i=0; i<nrho; ++i) {
-        fscanf(opac_file,"%lf",&(ross_tab(k,j,i)));
-        ross_tab(k,j,i) *= rho_grid(i);
+        fscanf(opac_file,"%lf",&buf);
       }
     }
   }
@@ -188,7 +178,6 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   bool user_ff = pin->GetOrAddBoolean("problem", "userff", false);
   if (user_ff) {
     // Replaces plan_tab with free-free values (for testing purposes)
-    Real dummy;
     for(int k=0; k<nfre; ++k) {
       for(int j=0; j<ntem; ++j) {
         for(int i=0; i<nrho; ++i) {
@@ -207,8 +196,10 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
         min = (min > plan_tab(k,j,i)) ? plan_tab(k,j,i) : min;
         max = (max < plan_tab(k,j,i)) ? plan_tab(k,j,i) : max;
       }
-      // Identify table values using gray opacity and replace with free-free
-      if (max/min < 1.1) {
+      // Identify table values using gray opacity and replace with free-free.  A row
+      // holding a zero cannot be tested by this ratio, so leave it as the file gives it
+      // rather than relying on inf and NaN comparing false.
+      if ((min > 0.) && (max/min < 1.1)) {
         for(int k=0; k<nfre; ++k) {
           plan_tab(k,j,i) = FreeFreeOpacity(temp_grid(j),rho_grid(i),fre_grid(k));
         }
@@ -301,21 +292,20 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
           while ((jj>0) && (temp_grid(jj) > temp)){
             jj--;
           }
-          if(jj > ntem-2) {
-            jj = ntem-2;
-            printf("Warning: %g exceeds largest temp in grid: %g.",
-                   temp,temp_grid(ntem-1));
-            on_grid = false;
-          }
-          if(jj < 0) {
-            jj = 00;
-            printf("Warning: %g is less than smallest temp in grid: %g.",
-                   temp,temp_grid(0));
-            on_grid = false;
-          }
+          // Test the interpolation weights, not the bracket index.  jj was clamped into
+          // [0, ntem-2] above and neither while loop can take it back out, so a test on
+          // jj alone can never fire; a cell off either end of the temperature grid shows
+          // up here instead, as a weight outside [0,1].  Extrapolating on it can drive
+          // plan_tab negative, which makes emis_cum non-monotonic and the bisection in
+          // SampleEmissivity meaningless.  Same for the density weight.
           xj = (temp-temp_grid(jj))/(temp_grid(jj+1)-temp_grid(jj));
-          if (xj > 1.)
-            xj = 1.;
+          if ((xj < 0.) || (xj > 1.)) {
+            printf("Warning: %g is outside the temperature grid: %g to %g.\n",
+                   temp,temp_grid(0),temp_grid(ntem-1));
+            on_grid = false;
+          }
+          // xi can only leave [0,1] when ii was clamped, which already warned above.
+          if ((xi < 0.) || (xi > 1.)) on_grid = false;
           if (on_grid) {
             for(int l=0; l<nfre; ++l) {
               opact(lid,k,j,i,l) = (1.-xi)*( (1.-xj)*plan_tab(l,jj,ii)
@@ -352,7 +342,7 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     for(int k=ks; k<=ke; ++k) {
       for(int j=js; j<=je; ++j) {
         for(int i=is; i<=ie; ++i) {
-          emis_cum(k,j,i,0) = 0.;
+          emis_cum(lid,k,j,i,0) = 0.;
           for(int l=1; l<nfre; ++l) {
             Real nup = fre_grid(l)/h_cgs;
             Real num = fre_grid(l-1)/h_cgs;
@@ -361,8 +351,15 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
             emis_cum(lid,k,j,i,l) = emis_cum(lid,k,j,i,l-1) + 4.*PI/h_cgs*eta_ave*dlnu;
           }
           emis_tot(lid,k,j,i) = emis_cum(lid,k,j,i,nfre-1);
-          for(int l=1; l<nfre; ++l) {
-            emis_cum(lid,k,j,i,l) /= emis_tot(lid,k,j,i);
+          // A cell with no emission leaves the cumulative array at zero rather than
+          // dividing by it.  Cells are drawn uniformly in SetEmissionCellWeight and only
+          // then weighted by the emission array, so a non-emitting cell is still handed
+          // to SampleEmissivity; normalizing here would give it a table of NaNs, which
+          // the zero weight would not stop from reaching the opacities.
+          if (emis_tot(lid,k,j,i) > 0.) {
+            for(int l=1; l<nfre; ++l) {
+              emis_cum(lid,k,j,i,l) /= emis_tot(lid,k,j,i);
+            }
           }
         }
       }
@@ -376,66 +373,6 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   EnrollUserMetric(CartesianKerrSchild);
-
-  bool resampled = pin->GetOrAddBoolean("problem","resampled",false);
-  bool collective = pin->GetOrAddBoolean("problem","collective",false);
-
-  if (resampled) {
-    // Read in hdf5 file to initialize pgen
-    std::string input_filename = pin->GetString("problem", "input_filename");
-    int mesh_nx1 = pin->GetInteger("mesh", "nx1");
-    Real mesh_x1min = pin->GetReal("mesh", "x1min");
-    Real mesh_x1max = pin->GetReal("mesh", "x1max");
-    int mesh_nx2 = pin->GetInteger("mesh", "nx2");
-    Real mesh_x2min = pin->GetReal("mesh", "x2min");
-    Real mesh_x2max = pin->GetReal("mesh", "x2max");
-    int mesh_nx3 = pin->GetInteger("mesh", "nx3");
-    Real mesh_x3min = pin->GetReal("mesh", "x3min");
-    Real mesh_x3max = pin->GetReal("mesh", "x3max");
-    Real x1ratio = pin->GetReal("mesh", "x1rat");
-
-    //load data file
-    int start_file[3] = {0,0,0};
-    int count_file[3] = {mesh_nx3, mesh_nx2, mesh_nx1};
-    int start_mem[3] = {0,0,0};
-    int count_mem[3] = {mesh_nx3, mesh_nx2, mesh_nx1};
-
-    //load data to user mesh data for later use
-    AllocateRealUserMeshDataField(5);
-    ruser_mesh_data[0].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    ruser_mesh_data[1].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    ruser_mesh_data[2].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    ruser_mesh_data[3].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    ruser_mesh_data[4].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/rho", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[0], collective);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/vel1", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[1], collective);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/vel2", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[2], collective);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/vel3", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[3], collective);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/press", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[4], collective);
-
-    //Real dx1 = (mesh_x1max - mesh_x1min)/mesh_nx1;
-    Real dx2 = (mesh_x2max - mesh_x2min)/mesh_nx2;
-    Real dx3 = (mesh_x3max - mesh_x3min)/mesh_nx3;
-
-    //prepare three vectors for index finding of x1 x2 x3 coordinates
-    //the vector are equivalent to pcoord->x1v, x2v, x3v
-    for(int i=0; i<mesh_nx1; i++){
-      Real x1coord_now = (pow(x1ratio, i)-1.0)/(pow(x1ratio, mesh_nx1)-1.0) *
-        (mesh_x1max - mesh_x1min) + mesh_x1min;
-      x1coord.push_back(x1coord_now);
-    }
-    for(int j=0; j<mesh_nx2; j++){
-      x2coord.push_back(mesh_x2min+j*dx2);
-    }
-    for(int k=0; k<mesh_nx3; k++){
-      x3coord.push_back(mesh_x3min+k*dx3);
-    }
-  } //end if (resampled)
 }
 
 //========================================================================================
@@ -445,12 +382,10 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 //! - pin: parameters
 //! Outputs: (none)
 //! Notes:
-//! - reads in array using a slightly modified verions of from_array.cpp
-//!   - NHYDRO
-//!   - total number of MeshBlocks
-//!   - MeshBlock/nx3
-//!   - MeshBlock/nx2
-//!   - MeshBlock/nx1
+//! - the primitives and the cell-centred field come from the athdf snapshot named by
+//!   <problem>/input_filename, or by <montecarlo>/grid_from_file when the grid was built
+//!   from that snapshot.  MCReadSnapshotBlock locates the variables by name, so the
+//!   layout does not have to be described here.
 
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
@@ -603,12 +538,12 @@ void InsideHorizon(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher, 
   Real r = sqrt((SQR(rad)-SQR(abh)+sqrt(SQR(SQR(rad)-SQR(abh))+4.0*SQR(abh)*SQR(x3)))/2.);
 
   if (r < r_hor) {
-    pphot->statp[ip] = ABSORBED;
+    pphot->statp[ip] = REMOVED;
     //printf("Photon absorbed inside horizon at r=%g\n",r);
   }
-  Real keverg = 1.602176634e-9;
-  if (pphot->ep[ip] > 2.e3*keverg)
-    pphot->statp[ip] = REMOVED;
+  //Real keverg = 1.602176634e-9;
+  //if (pphot->ep[ip] > 2.e3*keverg)
+  //  pphot->statp[ip] = DESTROYED;
   return;
 }
 
@@ -633,7 +568,7 @@ Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
     k = nfre-2;
     xk = 1.;
   }
-  Real lid = pmcb->pmy_block->lid;
+  int lid = pmcb->pmy_block->lid;
   return (1.-xk) * opact(lid,i3,i2,i1,k) + xk * opact(lid,i3,i2,i1,k+1);
 
 }
@@ -646,7 +581,9 @@ Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap) {
   Real dadnu = (ap-am)/(nup-num);
   Real lnu = std::log(num);
   Real sum = Planck(temp,num)*am*dlnu/h_cgs/2.;
-  for(int i=1; i<n-1; ++i) {
+  // Interior nodes run to n-1: the composite trapezoid rule over n intervals weights
+  // nodes 1..n-1 fully and the two endpoints by a half.
+  for(int i=1; i<n; ++i) {
     lnu += dlnu;
     Real nu = std::exp(lnu);
     Real alpha = dadnu*(nu-num)+am;
@@ -692,13 +629,18 @@ Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   int lid = pmcb->pmy_block->lid;
 
   Real *prob = &(emis_cum(lid,i3,i2,i1,0));
+  // A non-emitting cell has an unnormalized (all-zero) cumulative array; it can still be
+  // drawn, since cells are picked uniformly and only then weighted.  There is no spectrum
+  // to sample, and the photon carries zero weight, so return the lowest tabulated energy
+  // rather than dividing by a zero bin width.
+  if (prob[nfre-1] <= 0.) return fre_grid(0);
   int i = mcbisect(dev,prob,nfre);
   Real a = (dev-prob[i])/(prob[i+1]-prob[i]);
   Real a1 = 1.-a;
   //printf("%d %g %g\n",i,a,a1);
   if ((a < 0.) || (a > 1.)) {
     printf("%d %d %d\n",i3,i2,i1);
-    for (int j=0; j< nfre+1; ++j)
+    for (int j=0; j< nfre; ++j)
       printf("%d %e\n",j,1-prob[j]);
     printf("%d %g %g %g %g\n",i,dev,fre_grid(i),a,a1);
   }
@@ -759,7 +701,11 @@ void GetNel(MonteCarloBlock *pmcb) {
         Real rho = pmcb->rho(k,j,i);
         Real nh = rho / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
-        //nion(k,j,i) = nh + 4. * nhe;
+        // species(1) is the ion density read by the free-free opacity and emission in
+        // opacity.cpp and emission.cpp.  Set it here as GetNelFloor and the default in
+        // MonteCarloBlock do, so this hook does not depend on the table functions fully
+        // displacing those paths.
+        pmcb->species(1,k,j,i) = nh + 4. * nhe;
         pmcb->species(0,k,j,i) = nh + 2. * nhe;
 
         Real tgas = pmcb->tgas(k,j,i);
@@ -807,7 +753,7 @@ void GetNel(MonteCarloBlock *pmcb) {
   }
 }
 
-Real UserGetDensity(MonteCarloBlock *pmcb) {
+void UserGetDensity(MonteCarloBlock *pmcb) {
 
   Real l_cgs = pmcb->l_cgs;
   Real rho_cgs = pmcb->rho_cgs;
@@ -827,8 +773,8 @@ Real UserGetDensity(MonteCarloBlock *pmcb) {
 	Real wdn_opacity = fmax(wdn-dfloor, dfloor_op);
 	
 	Real dx1 = pmcb->pmy_block->pcoord->dx1f(i);
-	Real dx2 = pmcb->pmy_block->pcoord->dx2f(k);
-	Real dx3 = pmcb->pmy_block->pcoord->dx3f(j);
+	Real dx2 = pmcb->pmy_block->pcoord->dx2f(j);
+	Real dx3 = pmcb->pmy_block->pcoord->dx3f(k);
 	Real delta_l = fmax(fmax(dx1, dx2), dx3);
 	Real dtrunc = fmax(0.0, sigma_cold)*tau_trunc / (kappa_s*delta_l);
 	dtrunc = fmin(dtrunc_max, fmax(dfloor, dtrunc)); // dfloor <= dtrunc <= dtrunc_max
@@ -918,7 +864,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
   g(I12) = f * l_1 * l_2;
   g(I13) = f * l_1 * l_3;
   g(I22) = f * l_2 * l_2 + 1.0;
-  g(I23) = f * l_3 * l_3;
+  g(I23) = f * l_2 * l_3;
   g(I33) = f * l_3 * l_3 + 1.0;
 
   // Calculate contravariant components
@@ -930,7 +876,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
   g_inv(I12) = -f * l1 * l2;
   g_inv(I13) = -f * l1 * l3;
   g_inv(I22) = -f * l2 * l2 + 1.0;
-  g_inv(I23) = -f * l3 * l3;
+  g_inv(I23) = -f * l2 * l3;
   g_inv(I33) = -f * l3 * l3 + 1.0;
 
   // Calculate covariant x-derivatives

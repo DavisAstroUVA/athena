@@ -1100,7 +1100,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
   g(I12) = f * l_1 * l_2;
   g(I13) = f * l_1 * l_3;
   g(I22) = f * l_2 * l_2 + 1.0;
-  g(I23) = f * l_3 * l_3;
+  g(I23) = f * l_2 * l_3;
   g(I33) = f * l_3 * l_3 + 1.0;
 
   // Calculate contravariant components
@@ -1112,7 +1112,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
   g_inv(I12) = -f * l1 * l2;
   g_inv(I13) = -f * l1 * l3;
   g_inv(I22) = -f * l2 * l2 + 1.0;
-  g_inv(I23) = -f * l3 * l3;
+  g_inv(I23) = -f * l2 * l3;
   g_inv(I33) = -f * l3 * l3 + 1.0;
 
   // Calculate covariant x-derivatives

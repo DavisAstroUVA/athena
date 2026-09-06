@@ -344,7 +344,7 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     for(int k=ks; k<=ke; ++k) {
       for(int j=js; j<=je; ++j) {
         for(int i=is; i<=ie; ++i) {
-          emis_cum(k,j,i,0) = 0.;
+          emis_cum(lid,k,j,i,0) = 0.;
           for(int l=1; l<nfre; ++l) {
             Real nup = fre_grid(l)/h_cgs;
             Real num = fre_grid(l-1)/h_cgs;
@@ -353,8 +353,15 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
             emis_cum(lid,k,j,i,l) = emis_cum(lid,k,j,i,l-1) + 4.*PI/h_cgs*eta_ave*dlnu;
           }
           emis_tot(lid,k,j,i) = emis_cum(lid,k,j,i,nfre-1);
-          for(int l=1; l<nfre; ++l) {
-            emis_cum(lid,k,j,i,l) /= emis_tot(lid,k,j,i);
+          // A cell with no emission leaves the cumulative array at zero rather than
+          // dividing by it.  Cells are drawn uniformly in SetEmissionCellWeight and only
+          // then weighted by the emission array, so a non-emitting cell is still handed
+          // to SampleEmissivity; normalizing here would give it a table of NaNs, which
+          // the zero weight would not stop from reaching the opacities.
+          if (emis_tot(lid,k,j,i) > 0.) {
+            for(int l=1; l<nfre; ++l) {
+              emis_cum(lid,k,j,i,l) /= emis_tot(lid,k,j,i);
+            }
           }
         }
       }
@@ -657,7 +664,7 @@ Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
     k = nfre-2;
     xk = 1.;
   }
-  Real lid = pmcb->pmy_block->lid;
+  int lid = pmcb->pmy_block->lid;
   Real opac = (1.-xk) * opact(lid,i3,i2,i1,k) + xk * opact(lid,i3,i2,i1,k+1);
   return opac * pmcb->l_cgs;
 }
@@ -670,7 +677,9 @@ Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap) {
   Real dadnu = (ap-am)/(nup-num);
   Real lnu = std::log(num);
   Real sum = Planck(temp,num)*am*dlnu/h_cgs/2.;
-  for(int i=1; i<n-1; ++i) {
+  // Interior nodes run to n-1: the composite trapezoid rule over n intervals weights
+  // nodes 1..n-1 fully and the two endpoints by a half.
+  for(int i=1; i<n; ++i) {
     lnu += dlnu;
     Real nu = std::exp(lnu);
     Real alpha = dadnu*(nu-num)+am;
@@ -716,13 +725,18 @@ Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   int lid = pmcb->pmy_block->lid;
 
   Real *prob = &(emis_cum(lid,i3,i2,i1,0));
+  // A non-emitting cell has an unnormalized (all-zero) cumulative array; it can still be
+  // drawn, since cells are picked uniformly and only then weighted.  There is no spectrum
+  // to sample, and the photon carries zero weight, so return the lowest tabulated energy
+  // rather than dividing by a zero bin width.
+  if (prob[nfre-1] <= 0.) return fre_grid(0);
   int i = mcbisect(dev,prob,nfre);
   Real a = (dev-prob[i])/(prob[i+1]-prob[i]);
   Real a1 = 1.-a;
   //printf("%d %g %g\n",i,a,a1);
   if ((a < 0.) || (a > 1.)) {
     printf("%d %d %d\n",i3,i2,i1);
-    for (int j=0; j< nfre+1; ++j)
+    for (int j=0; j< nfre; ++j)
       printf("%d %e\n",j,1-prob[j]);
     printf("%d %g %g %g %g\n",i,dev,fre_grid(i),a,a1);
   }
@@ -759,7 +773,10 @@ void GetNel(MonteCarloBlock *pmcb) {
         Real rho = pmcb->rho(k,j,i);
         Real nh = rho / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
-        //nion(k,j,i) = nh + 4. * nhe;
+        // species(1) is the ion density read by the free-free opacity and emission in
+        // opacity.cpp and emission.cpp.  This is the only number-density hook this
+        // problem generator enrolls, so leaving it unset zeroed those paths outright.
+        pmcb->species(1,k,j,i) = nh + 4. * nhe;
         pmcb->species(0,k,j,i) = nh + 2. * nhe;
 
         Real tgas = pmcb->tgas(k,j,i);
