@@ -706,6 +706,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       if (pphot->statp[ip] != BUFFERED) {
         // Bring the Stokes parameters up to date with the transported coherency tensor
         // before finalizing the photon, writing outputs
+        if (IsPolarized(pmy_mc->polarized)) CoherencyToObserverStokes(this, pphot, ip);
         FinalizePhoton(pphot,ip);
       }
 
