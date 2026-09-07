@@ -415,10 +415,10 @@ void Photon::SendToNeighbors() {
     for (int j = 0; j < nint; ++j)
       *pi++ = intprop[j][k];
     Real *pr(ppb->rbuf + ParticleBuffer::nreal * ppb->npar);
-    for (int j = 0; j < nreal; ++j) {
+    // rp1 deliberately not sent: it is the dust integrator's second register and no
+    // Monte Carlo code path reads it.  See Particles::Resize.
+    for (int j = 0; j < nreal; ++j)
       *pr++ = rp[j][k];
-      *pr++ = rp1[j][k];
-    }
     for (int j = 0; j < naux; ++j)
       *pr++ = aux[j][k];
     // copy complex properties
