@@ -691,13 +691,15 @@ int main(int argc, char *argv[]) {
   }
 
   delete pinput;
-  delete pmesh;
-  delete ptlist;
-  delete pouts;
+  // Before the Mesh: MonteCarloBlock holds a MeshBlock pointer, so tearing the Mesh down
+  // first leaves ~MonteCarlo walking blocks whose MeshBlocks are already gone.
   if (MONTE_CARLO_ENABLED) {
     delete pmc;
     MCGridFile::Free();
   }
+  delete pmesh;
+  delete ptlist;
+  delete pouts;
 
 #ifdef MPI_PARALLEL
   MPI_Finalize();

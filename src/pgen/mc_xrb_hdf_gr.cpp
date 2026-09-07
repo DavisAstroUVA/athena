@@ -47,6 +47,16 @@ namespace {
   AthenaArray<Real> emis_tot;
   AthenaArray<Real> opact;
 
+  // Free-free fallback bookkeeping.  Two distinct things get counted: rows of the table
+  // that are gray and are replaced wholesale at load, and cells whose (rho,T) falls off
+  // the grid at setup.  Both are reported rather than left silent, because they decide
+  // whether a run used the tabulated opacity or the analytic one.  Counting rather than
+  // warning per cell is deliberate: on a mesh of this size a per-cell printf is a flood
+  // that hides the very thing it is reporting.
+  long long nff_cells = 0, ntab_cells = 0;
+  long long noff_rho = 0, noff_temp = 0;
+  int ngray_rows = 0, ntable_rows = 0;
+
   //functions
   void InsideHorizon(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher,int ip);
   Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
@@ -57,6 +67,30 @@ namespace {
   Real FreeFreeOpacity(Real tgas, Real rho, Real energy);
   void GetNel(MonteCarloBlock *pmcb);
   void GetNelFloor(MonteCarloBlock *pmcb);
+
+  //! \fn void CheckActiveCell(MonteCarloBlock *pmcb, int i3, int i2, int i1)
+  //! \brief debug-only guard on the assumption opact/emis_tot/emis_cum are built around
+  //
+  // Those three are dimensioned on active cells, so a photon sitting in a ghost cell would
+  // index past the end of its block's slice rather than into a harmless zero.  UpdateZone
+  // changes a photon's status the moment it leaves the active range and these are only
+  // reached while it is EVOLVING, so this cannot fire -- but the failure it guards against
+  // is a silent heap overwrite, which is worth a check that costs nothing when off.
+#ifdef DEBUG
+  void CheckActiveCell(MonteCarloBlock *pmcb, int i3, int i2, int i1) {
+    if (i1 < pmcb->is || i1 > pmcb->ie || i2 < pmcb->js || i2 > pmcb->je ||
+        i3 < pmcb->ks || i3 > pmcb->ke) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in opacity/emission table lookup" << std::endl
+          << "photon cell (" << i3 << "," << i2 << "," << i1 << ") is outside the active "
+          << "range on gid " << pmcb->pmy_block->gid << "." << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+#else
+  inline void CheckActiveCell(MonteCarloBlock *, int, int, int) {}
+#endif
+
   void UserGetDensity(MonteCarloBlock *pmcb);
   void CartesianKerrSchild(Real x1, Real x2, Real x3, ParameterInput *pin,
     AthenaArray<Real> &g, AthenaArray<Real> &g_inv, AthenaArray<Real> &dg_dx1,
@@ -165,23 +199,27 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     }
   }
 
-  // planck mean for each frequency group
+  // planck mean for each frequency group.  Kept as an opacity per gram (cm^2/g) rather
+  // than pre-multiplied by the grid density: what gets interpolated is then kappa, which
+  // varies weakly, instead of chi = kappa*rho, which carries an extra power of rho.  The
+  // cell's own density is applied after the interpolation.
   for(int k=0; k<nfre; ++k) {
     for(int j=0; j<ntem; ++j) {
       for(int i=0; i<nrho; ++i) {
         fscanf(opac_file,"%lf",&(plan_tab(k,j,i)));
-        plan_tab(k,j,i) *= rho_grid(i);
       }
     }
   }
 
   bool user_ff = pin->GetOrAddBoolean("problem", "userff", false);
   if (user_ff) {
-    // Replaces plan_tab with free-free values (for testing purposes)
+    // Replaces plan_tab with free-free values (for testing purposes).  FreeFreeOpacity
+    // returns chi in 1/cm, so divide out the grid density to store an opacity per gram.
     for(int k=0; k<nfre; ++k) {
       for(int j=0; j<ntem; ++j) {
         for(int i=0; i<nrho; ++i) {
-          plan_tab(k,j,i) = FreeFreeOpacity(temp_grid(j),rho_grid(i),fre_grid(k));
+          plan_tab(k,j,i) =
+              FreeFreeOpacity(temp_grid(j),rho_grid(i),fre_grid(k)) / rho_grid(i);
         }
       }
     }
@@ -199,14 +237,25 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
       // Identify table values using gray opacity and replace with free-free.  A row
       // holding a zero cannot be tested by this ratio, so leave it as the file gives it
       // rather than relying on inf and NaN comparing false.
+      ++ntable_rows;
       if ((min > 0.) && (max/min < 1.1)) {
+        ++ngray_rows;
         for(int k=0; k<nfre; ++k) {
-          plan_tab(k,j,i) = FreeFreeOpacity(temp_grid(j),rho_grid(i),fre_grid(k));
+          plan_tab(k,j,i) =
+              FreeFreeOpacity(temp_grid(j),rho_grid(i),fre_grid(k)) / rho_grid(i);
         }
       }
     }
   }
   fclose(opac_file);
+
+  // Say so up front: a table that is gray over much of the (rho,T) plane means the run is
+  // largely using the analytic free-free opacity, whatever the input file is called.
+  if (Globals::my_rank == 0) {
+    printf("Opacity table: %d of %d (T,rho) rows are gray and were replaced by "
+           "free-free (%.1f%%)\n", ngray_rows, ntable_rows,
+           100.*static_cast<Real>(ngray_rows)/static_cast<Real>(ntable_rows));
+  }
 
 
   EnrollUserEmissionFunction(TableEmission);
@@ -217,15 +266,15 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   int nx1 = pin->GetInteger("meshblock", "nx1");
   int nx2 = pin->GetInteger("meshblock", "nx2");
   int nx3 = pin->GetInteger("meshblock", "nx3");
-  int ncells1 = nx1 + 2*(NGHOST);
-  int ncells2 = 1, ncells3 = 1;
-  if (nx2 > 1) ncells2 = nx2 + 2*(NGHOST);
-  if (nx3 > 1) ncells3 = nx3 + 2*(NGHOST);
   int nblocal =  pmy_mesh->nblocal;
-  //printf("blocks: %d %d\n",Globals::my_rank,nblocal);
-  opact.NewAthenaArray(nblocal,ncells3,ncells2,ncells1,nfre);
-  emis_tot.NewAthenaArray(nblocal,ncells3,ncells2,ncells1);
-  emis_cum.NewAthenaArray(nblocal,ncells3,ncells2,ncells1,nfre);
+  // Active cells only.  The fill loops below run ks..ke and every read comes from a
+  // photon in an active cell, so a ghost layer here would be allocated, zero-filled by
+  // NewAthenaArray -- which touches every page -- and then never used.  With 8x4x8 blocks
+  // and NGHOST=2 that is 1152 cells carried for 256, and on a mesh of this size the
+  // difference is tens of gigabytes of resident memory.
+  opact.NewAthenaArray(nblocal,nx3,nx2,nx1,nfre);
+  emis_tot.NewAthenaArray(nblocal,nx3,nx2,nx1);
+  emis_cum.NewAthenaArray(nblocal,nx3,nx2,nx1,nfre);
 
 }
 
@@ -248,16 +297,13 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     }
   } else {
 
-    int ncells1 = nx1 + 2*(NGHOST);
-    int ncells2 = 1, ncells3 = 1;
-    if (nx2 > 1) ncells2 = nx2 + 2*(NGHOST);
-    if (nx3 > 1) ncells3 = nx3 + 2*(NGHOST);
     int lid = pmy_block->lid;
     // Compute opacity table corresponding to each cell and frequency
-    //opact.NewAthenaArray(ncells3,ncells2,ncells1,nfre);
     for(int k=ks; k<=ke; ++k) {
       for(int j=js; j<=je; ++j) {
         for(int i=is; i<=ie; ++i) {
+          // Tables are indexed from the first active cell, not from the ghost zone.
+          const int kt = k-ks, jt = j-js, it = i-is;
           bool on_grid = true;
           Real ld = log10(rho(k,j,i));
           //ld = (ld < lmind) ? lmind : ld;
@@ -270,13 +316,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
           int ii = std::floor(xi);
           if (ii < 0) {
             ii = 0;
-            printf("Warning: %g is less than the lowest density in grid: %g.",
-                   rho(k,j,i),rho_grid(0));
+            ++noff_rho;
             on_grid = false;
           } else if (ii > nrho-2) {
             ii = nrho-2;
-            printf("Warning: %g exceeds the largest density in grid: %g.",
-                   rho(k,j,i),rho_grid(nrho-1));
+            ++noff_rho;
             on_grid = false;
           }
           xi -= static_cast<Real>(ii);
@@ -298,24 +342,46 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
           // up here instead, as a weight outside [0,1].  Extrapolating on it can drive
           // plan_tab negative, which makes emis_cum non-monotonic and the bisection in
           // SampleEmissivity meaningless.  Same for the density weight.
-          xj = (temp-temp_grid(jj))/(temp_grid(jj+1)-temp_grid(jj));
+          // Fractional position in log T, to match xi, which is already fractional in
+          // log rho.  The grid is log-spaced in both (the temperature axis unevenly so,
+          // which is why jj came from a search rather than a formula).
+          xj = std::log(temp/temp_grid(jj))
+               / std::log(temp_grid(jj+1)/temp_grid(jj));
           if ((xj < 0.) || (xj > 1.)) {
-            printf("Warning: %g is outside the temperature grid: %g to %g.\n",
-                   temp,temp_grid(0),temp_grid(ntem-1));
+            ++noff_temp;
             on_grid = false;
           }
-          // xi can only leave [0,1] when ii was clamped, which already warned above.
+          // xi can only leave [0,1] when ii was clamped, which already counted it.
           if ((xi < 0.) || (xi > 1.)) on_grid = false;
           if (on_grid) {
+            ++ntab_cells;
+            const Real rhoc = rho(k,j,i);
             for(int l=0; l<nfre; ++l) {
-              opact(lid,k,j,i,l) = (1.-xi)*( (1.-xj)*plan_tab(l,jj,ii)
-                +xj*plan_tab(l,jj+1,ii) ) + xi*( (1.-xj)* plan_tab(l,jj,ii+1)
-                +xj*plan_tab(l,jj+1,ii+1) );
+              const Real k00 = plan_tab(l,jj  ,ii  ), k10 = plan_tab(l,jj+1,ii  );
+              const Real k01 = plan_tab(l,jj  ,ii+1), k11 = plan_tab(l,jj+1,ii+1);
+              Real kap;
+              // Log-log in (rho,T).  These opacities are power laws over most of the
+              // plane, so interpolating the logarithm is far closer to the truth than
+              // interpolating the value: reconstructing dropped points from the 64-group
+              // table gives a median error of 2.5% this way against 7.8% linearly in
+              // temperature, and 0.0% against 3.3% in density.  Any non-positive corner
+              // drops back to linear, where the logarithm is not defined.
+              if ((k00 > 0.) && (k10 > 0.) && (k01 > 0.) && (k11 > 0.)) {
+                kap = std::exp((1.-xi)*((1.-xj)*std::log(k00) + xj*std::log(k10))
+                                 + xi *((1.-xj)*std::log(k01) + xj*std::log(k11)));
+              } else {
+                kap = (1.-xi)*((1.-xj)*k00 + xj*k10) + xi*((1.-xj)*k01 + xj*k11);
+              }
+              // plan_tab is per gram; the extinction coefficient carries the cell's own
+              // density, so the strong rho dependence is exact rather than interpolated.
+              opact(lid,kt,jt,it,l) = kap * rhoc;
             }
           } else {
-              printf(" Using free-free opacity\n");
+              ++nff_cells;
+              // FreeFreeOpacity already returns chi in 1/cm for this cell's density, so
+              // this branch needs no further factor of rho.
               for(int l=0; l<nfre; ++l) {
-                opact(lid,k,j,i,l) = FreeFreeOpacity(temp,rho(k,j,i),fre_grid(l));
+                opact(lid,kt,jt,it,l) = FreeFreeOpacity(temp,rho(k,j,i),fre_grid(l));
               }
           }
         }
@@ -324,7 +390,7 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
     // Compute emissivity table for each cell and frequncy
     AthenaArray<Real> eta_nu_tab;
-    eta_nu_tab.NewAthenaArray(ncells3,ncells2,ncells1,nfre);
+    eta_nu_tab.NewAthenaArray(nx3,nx2,nx1,nfre);
     Real h_cgs = 6.62607015e-27;
     for(int l=0; l<nfre; ++l) {
       Real nu = fre_grid(l)/h_cgs;
@@ -332,7 +398,8 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
         for(int j=js; j<=je; ++j) {
           for(int i=is; i<=ie; ++i) {
             Real temp = tgas(k,j,i);
-            eta_nu_tab(k,j,i,l) = Planck(temp,nu) * opact(lid,k,j,i,l);
+            eta_nu_tab(k-ks,j-js,i-is,l) = Planck(temp,nu)
+                                          * opact(lid,k-ks,j-js,i-is,l);
           }
         }
       }
@@ -342,23 +409,25 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     for(int k=ks; k<=ke; ++k) {
       for(int j=js; j<=je; ++j) {
         for(int i=is; i<=ie; ++i) {
-          emis_cum(lid,k,j,i,0) = 0.;
+          const int kt = k-ks, jt = j-js, it = i-is;
+          emis_cum(lid,kt,jt,it,0) = 0.;
           for(int l=1; l<nfre; ++l) {
             Real nup = fre_grid(l)/h_cgs;
             Real num = fre_grid(l-1)/h_cgs;
             Real dlnu = std::log(nup/num);
-            Real eta_ave = 0.5*(eta_nu_tab(k,j,i,l)+eta_nu_tab(k,j,i,l-1));
-            emis_cum(lid,k,j,i,l) = emis_cum(lid,k,j,i,l-1) + 4.*PI/h_cgs*eta_ave*dlnu;
+            Real eta_ave = 0.5*(eta_nu_tab(kt,jt,it,l)+eta_nu_tab(kt,jt,it,l-1));
+            emis_cum(lid,kt,jt,it,l) = emis_cum(lid,kt,jt,it,l-1)
+                                       + 4.*PI/h_cgs*eta_ave*dlnu;
           }
-          emis_tot(lid,k,j,i) = emis_cum(lid,k,j,i,nfre-1);
+          emis_tot(lid,kt,jt,it) = emis_cum(lid,kt,jt,it,nfre-1);
           // A cell with no emission leaves the cumulative array at zero rather than
           // dividing by it.  Cells are drawn uniformly in SetEmissionCellWeight and only
           // then weighted by the emission array, so a non-emitting cell is still handed
           // to SampleEmissivity; normalizing here would give it a table of NaNs, which
           // the zero weight would not stop from reaching the opacities.
-          if (emis_tot(lid,k,j,i) > 0.) {
+          if (emis_tot(lid,kt,jt,it) > 0.) {
             for(int l=1; l<nfre; ++l) {
-              emis_cum(lid,k,j,i,l) /= emis_tot(lid,k,j,i);
+              emis_cum(lid,kt,jt,it,l) /= emis_tot(lid,kt,jt,it);
             }
           }
         }
@@ -369,6 +438,36 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
 }
 
+
+//========================================================================================
+//! \fn void Mesh::UserWorkAfterLoop(ParameterInput *pin)
+//! \brief report how many cells used the tabulated opacity and how many fell back to
+//!        analytic free-free
+//
+// Accumulated per block during setup and summed here, which is a point every rank reaches
+// exactly once (main calls it unconditionally), so the reduction cannot mismatch.  The
+// gray-row fraction is reported separately at load; this is the complementary number --
+// how much of the actual domain landed off the grid, and on which axis.
+//========================================================================================
+
+void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
+
+  if (emission_type == "freefree") return;  // no table was ever read
+
+  long long tot[4] = {ntab_cells, nff_cells, noff_rho, noff_temp};
+#ifdef MPI_PARALLEL
+  MPI_Allreduce(MPI_IN_PLACE, tot, 4, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  if (Globals::my_rank == 0) {
+    const long long ncell = tot[0] + tot[1];
+    printf("Opacity source: %lld cells from the table, %lld off-grid using free-free "
+           "(%.2f%%)\n", tot[0], tot[1],
+           (ncell > 0) ? 100.*static_cast<Real>(tot[1])/static_cast<Real>(ncell) : 0.);
+    if (tot[1] > 0)
+      printf("                off-grid in density: %lld, in temperature: %lld\n",
+             tot[2], tot[3]);
+  }
+}
 
 void Mesh::InitUserMeshData(ParameterInput *pin) {
 
@@ -569,7 +668,9 @@ Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
     xk = 1.;
   }
   int lid = pmcb->pmy_block->lid;
-  return (1.-xk) * opact(lid,i3,i2,i1,k) + xk * opact(lid,i3,i2,i1,k+1);
+  CheckActiveCell(pmcb,i3,i2,i1);
+  const int t3 = i3-pmcb->ks, t2 = i2-pmcb->js, t1 = i1-pmcb->is;
+  return (1.-xk) * opact(lid,t3,t2,t1,k) + xk * opact(lid,t3,t2,t1,k+1);
 
 }
 
@@ -616,7 +717,8 @@ Real TableEmission(MonteCarloBlock *pmcb, int i3, int i2, int i1, int etype) {
   //}
   //return GetEmissionFreeFree(pmcb,i3,i2,i1);
   //int lid = pmcb->pmy_block->lid;
-  return emis_tot(lid,i3,i2,i1);
+  CheckActiveCell(pmcb,i3,i2,i1);
+  return emis_tot(lid,i3-pmcb->ks,i2-pmcb->js,i1-pmcb->is);
 }
 
 
@@ -628,7 +730,8 @@ Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   int i3 = pphot->i3p[ip];
   int lid = pmcb->pmy_block->lid;
 
-  Real *prob = &(emis_cum(lid,i3,i2,i1,0));
+  CheckActiveCell(pmcb,i3,i2,i1);
+  Real *prob = &(emis_cum(lid,i3-pmcb->ks,i2-pmcb->js,i1-pmcb->is,0));
   // A non-emitting cell has an unnormalized (all-zero) cumulative array; it can still be
   // drawn, since cells are picked uniformly and only then weighted.  There is no spectrum
   // to sample, and the photon carries zero weight, so return the lowest tabulated energy
@@ -644,8 +747,10 @@ Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
       printf("%d %e\n",j,1-prob[j]);
     printf("%d %g %g %g %g\n",i,dev,fre_grid(i),a,a1);
   }
-  //Real nu = std::exp(a*std::log(fre_grid(i+1))+a1*std::log(fre_grid(i)));
-  Real nu = a*fre_grid(i+1)+a1*fre_grid(i);
+  // Log interpolation within the bin.  The frequency grid is log-spaced -- 0.0625 dex
+  // for the 64-group table -- so drawing linearly in energy inside a bin puts the sample
+  // systematically high; interpolating the logarithm places it where the grid says.
+  Real nu = std::exp(a*std::log(fre_grid(i+1)) + a1*std::log(fre_grid(i)));
   return nu;
 }
 

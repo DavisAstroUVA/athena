@@ -9,6 +9,7 @@
 // C++ headers
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstdint>    // int64_t
 #include <stdexcept>  // runtime_error
 #include <iomanip>    // setfill(), setw()
 #include <errno.h>
@@ -851,18 +852,19 @@ void PhotonList::WriteList(std::string filename, Real tint_out) {
   if (!pmy_mc->metric_params.empty())
     fprintf(pfile,"metric_params=%s\n",pmy_mc->metric_params.c_str());
   fprintf(pfile,"frame=%s\n",pmy_mc->frame_tag.c_str());
-  // write data
-  int ndata = length*nparams;
+  // write data.  64-bit: a long run puts enough photons on one rank that length*nparams
+  // overflows a 32-bit int, and the negative that comes out is passed straight to new[].
+  std::int64_t ndata = static_cast<std::int64_t>(length)*nparams;
   double *data;
   data = new double[ndata];
-  int n=0;
+  std::int64_t n=0;
   for (int i=0; i<length; ++i) {
     for (int j=0; j<nparams; ++j) {
       data[n++] = static_cast<double>(photons(i,j));
     }}
   // write data in big endian order
   if (!(mcoutput::IsBigEndian())) {
-    for (int i=0; i<ndata; ++i)
+    for (std::int64_t i=0; i<ndata; ++i)
       mcoutput::Swap8Bytes(&data[i]);
   }
   fwrite(data,sizeof(double),static_cast<size_t>(ndata),pfile);
@@ -1012,14 +1014,15 @@ void PhotonTrajectoryList::WriteList(std::string filename) {
   if (!(mcoutput::IsBigEndian()))
     for (int i=0; i<length; ++i) mcoutput::Swap4Bytes(&idata[i]);
   fwrite(idata,sizeof(int),static_cast<size_t>(length),pfile);
-  // Get total length of array
-  int ndata = 0;
+  // Get total length of array.  64-bit for the same reason as PhotonList::WriteList:
+  // steps summed over trajectories, times nparams, outgrows a 32-bit int.
+  std::int64_t ndata = 0;
   for (int i=0; i<length; ++i)
     ndata += nsteps[i];
   ndata *= nparams;
   double *data = new double[ndata];
   // write data
-  int n=0;
+  std::int64_t n=0;
   for (int i=0; i<length; ++i) {
     for (int j=0; j<nsteps[i]; ++j) {
       for (int k=0; k<nparams; ++k) {
@@ -1027,7 +1030,7 @@ void PhotonTrajectoryList::WriteList(std::string filename) {
       }}}
   // write data in big endian order
   if (!(mcoutput::IsBigEndian()))
-    for (int i=0; i<ndata; ++i) mcoutput::Swap8Bytes(&data[i]);
+    for (std::int64_t i=0; i<ndata; ++i) mcoutput::Swap8Bytes(&data[i]);
   fwrite(data,sizeof(double),static_cast<size_t>(ndata),pfile);
   fclose(pfile);
   delete [] data;
@@ -1400,7 +1403,9 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
   Real norms;
   if (nsrun != pmy_mc->nsamp) {
     norms = static_cast<Real>(nsrun)/static_cast<Real>(pmy_mc->nsamp);
-    printf("nsrun != nsamp: %d %d\n",nsrun,pmy_mc->nsamp);
+    // nsamp is 64-bit; %d on it is undefined and prints garbage.
+    printf("nsrun != nsamp: %d %lld\n",nsrun,
+           static_cast<long long>(pmy_mc->nsamp));
   } else {
     norms = 1.;
   }
@@ -1581,15 +1586,20 @@ void MCOutput::ReceiveMonteCarloSpectrum(Spectrum *pspect, bool add) {
 
   Real *recv_buf;
   recv_buf = new Real[size];
-  MPI_Request recv_rq;
   unsigned int tag = 100; // temporary
 
   ne--; ncth--; nphi--;
   int nsrun;
-  MPI_Irecv(&nsrun,size,MPI_INT,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&recv_rq);
-  MPI_Wait(&recv_rq, MPI_STATUS_IGNORE);
-  MPI_Irecv(recv_buf,size,MPI_ATHENA_REAL,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&recv_rq);
-  MPI_Wait(&recv_rq, MPI_STATUS_IGNORE);
+  MPI_Status st;
+  // Two corrections to what this used to do.  The count is 1, not size: nsrun is a single
+  // int, and posting a receive for size of them into it overruns the stack the moment any
+  // sender puts more than one on this tag.  And the source is taken from the first
+  // message rather than left as MPI_ANY_SOURCE on both, so the sample count and the
+  // spectrum that follows it come from the same rank; with ANY_SOURCE twice, one rank's
+  // count could be paired with another's spectrum.
+  MPI_Recv(&nsrun,1,MPI_INT,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&st);
+  MPI_Recv(recv_buf,size,MPI_ATHENA_REAL,st.MPI_SOURCE,tag++,MPI_COMM_WORLD,
+           MPI_STATUS_IGNORE);
   Spectrum *ptemp;
   if (add) {
     // Make temporary spectrum for copying, initalized empty

@@ -1115,8 +1115,10 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       }
     }
 
-    // Report diagnostic results from all blocks
-    int ntot = 0;
+    // Report diagnostic results from all blocks.  All six are reduced as MPI_INT64_T
+    // below, so all six have to be 64 bits wide: reducing into a 32-bit ntot writes four
+    // bytes past it.
+    int64_t ntot = 0;
     int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0;
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
@@ -1127,15 +1129,17 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       nscat += pmcb->nscat;
       ntot += pmcb->nphrun;
     }
-    pmcout->UpdateOutputCount(ntot);
+    // Local count only -- this runs before the reduction, so it is bounded by the photons
+    // this rank ran and fits the int the output counters use.
+    pmcout->UpdateOutputCount(static_cast<int>(ntot));
 
   #ifdef MPI_PARALLEL
-    MPI_Allreduce(MPI_IN_PLACE,&nesc,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&nabs,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&ndes,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&nscat,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&ntot,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nesc,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nabs,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&ndes,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nscat,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&ntot,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
   #endif
     if (Globals::my_rank == 0) {
       std::cout  << "ntot: " << ntot
