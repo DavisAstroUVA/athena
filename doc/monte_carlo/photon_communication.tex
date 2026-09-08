@@ -75,6 +75,15 @@ A photon's state is stored as a struct of arrays: \texttt{nint} integer properti
 being the polarization tensor and present only in polarized runs. Packing a photon for
 transfer copies these into the three streams of a \texttt{ParticleBuffer}.
 
+The real stream carries \texttt{nreal} values per photon, not the $2\,\texttt{nreal}$ the
+underlying \texttt{Particles} class provides for. The second copy, \texttt{rp1}, is the
+other register of the dust-particle time integrator. A photon is pushed by
+\texttt{PhotonPusher} and never reads it: filling \texttt{rp1} with NaN on every resize left
+the \texttt{amr\_transport} results bit-identical, which is what established this rather
+than an argument from inspection. Carrying it regardless cost half the real payload of every
+photon message and half the real storage of every resident photon, so in a Monte Carlo build
+it is neither sized nor sent.
+
 \texttt{MCRankExchange::Stage} appends one block's outgoing photons to the buffers for
 their destination rank, recording a header triple
 \begin{equation}
@@ -267,6 +276,34 @@ periodic directions have no bounding depth. It is a safety valve for genuinely u
 flights, not a general speed control, and wants to sit well above the longest physical free
 flight. The default is $0$, meaning off, and $n_{\rm rem}$ reports how much was discarded.
 
+\section{Resident photons}
+\label{sec:resident}
+
+A round pushes the photons currently resident, and how many that is sets both the working
+set and the size the exchange buffers grow to. \texttt{loop\_max\_size} caps the photons
+resident on one \emph{block}, so the memory it authorises is that figure multiplied by the
+number of blocks a rank holds. On a mesh of a few large blocks this is invisible. On a mesh
+of many small ones it is not: $10^{4}$ photons on each of $2601$ blocks is
+$2.6\times10^{7}$ resident photons, several gigabytes, on blocks holding $256$ cells
+apiece.
+
+\texttt{max\_resident\_photons} bounds the product instead --- which is the quantity that
+has to fit in memory --- by sharing a per-rank budget among that rank's blocks,
+\begin{equation}
+  \texttt{loop\_max\_size} \leftarrow
+    \min\left(\texttt{loop\_max\_size},\;
+      \max\left(1,\;
+        \frac{\texttt{max\_resident\_photons}}{N^{\rm rank}_{\rm block}}\right)\right),
+  \label{eq:budget}
+\end{equation}
+the per-block cap still applying on top, so a rank holding few blocks keeps exactly the
+behaviour it had and existing results do not move. Neither figure changes any physics:
+\texttt{loop\_max\_size} sets only how many photons a block emits per pass, the remainder
+staying in \texttt{nphremain} for later ones. Measured on \texttt{mc\_isoth} with $512$
+blocks and $10^{7}$ photons, where the $10^{4}$ cap does bind, the budget cut the peak
+resident set from $2.06$ to $1.17$\,GB with the escaping fraction unchanged to $0.1\%$. The
+reduction is reported at setup whenever it applies, so the choice is not silent.
+
 \section{Parameters}
 
 All in the \texttt{<montecarlo>} block.
@@ -280,9 +317,17 @@ Name & Default & Meaning \\
 \texttt{async\_term}      & on  & counter-based termination instead of a collective per round \\
 \texttt{local\_max\_sweeps} & 1000 & consecutive same-rank transport sweeps per round \\
 \texttt{capmove}          & 0 (off) & cap on steps in one free flight; see Sec.~\ref{sec:capmove} \\
+\texttt{loop\_max\_size}  & 10000 & photons resident on one block; see Sec.~\ref{sec:resident} \\
+\texttt{max\_resident\_photons} & $10^{6}$ & per-rank budget shared among that rank's blocks \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+One further cap sits on the output side rather than in this block:
+\texttt{<outputN>/max\_resident} (default $2\times10^{6}$) is how many escaped photons a
+photon list holds before spilling to its file. Without it the list grows with the number of
+photons that escape, which is unbounded in \texttt{nphot}, and is then copied whole in order
+to be byte-swapped.
 
 \texttt{async\_term} falls back to the synchronous loop whenever the rank exchange is
 inactive, which includes every serial run. Setting it off is also how bit-reproducible

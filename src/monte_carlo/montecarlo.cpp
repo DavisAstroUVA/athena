@@ -7,7 +7,9 @@
 //! \brief implementation of functions in class MonteCarlo, MCRandom
 
 // C++ headers
+#include <algorithm>  // min, max
 #include <cstdio>
+#include <iostream>
 #include <random>
 #include <stdexcept>  // runtime_error
 // C++ headers
@@ -547,6 +549,37 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
   tmax *= time_cgs;
 
   // Initialize monte carlo blocks
+ 
+  // loop_max_size caps the photons resident on ONE block, so the memory it authorizes is
+  // multiplied by however many blocks land on a rank. max_resident_photons bounds that
+  // product instead, which is the quantity that has to fit in memory. The per-block cap
+  // still applies on top.
+  const int per_block_cap = pin->GetOrAddInteger("montecarlo","loop_max_size",10000);
+  const int photon_budget =
+      pin->GetOrAddInteger("montecarlo","max_resident_photons",1000000);
+  int loop_max = per_block_cap;
+  if (photon_budget > 0 && nblocal > 0)
+    loop_max = std::min(per_block_cap, std::max(1, photon_budget/nblocal));
+
+  // Report only when the budget actually binds; otherwise this is noise.  The range is
+  // taken across ranks because an unbalanced mesh gives them different block counts and so
+  // different shares.
+  {
+    int lo = loop_max, hi = loop_max, nbmax = nblocal;
+#ifdef MPI_PARALLEL
+    MPI_Allreduce(MPI_IN_PLACE, &lo, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &hi, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &nbmax, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+#endif
+    if (Globals::my_rank == 0 && lo < per_block_cap) {
+      std::cout << "Monte Carlo: loop_max_size cut from " << per_block_cap << " to ";
+      if (lo == hi) std::cout << lo;
+      else std::cout << lo << "-" << hi;
+      std::cout << " by <montecarlo>/max_resident_photons = " << photon_budget
+                << " (up to " << nbmax << " blocks per rank)" << std::endl;
+    }
+  }
+
   for (int i=0; i<nblocal; i++) {
     MonteCarloBlock *pmcb = my_blocks(i);
     // Initialize variables over all blocks
@@ -566,7 +599,7 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
 
     // initialize counters to zero
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
-    pmcb->loop_max_size = pin->GetOrAddInteger("montecarlo","loop_max_size",10000);
+    pmcb->loop_max_size = loop_max;
 
     // Call problem generators for Monte Carlo
     pmcb->MonteCarloProblemGenerator(pin);
