@@ -285,7 +285,8 @@ Name & Default & Meaning \\
 \end{center}
 
 \texttt{async\_term} falls back to the synchronous loop whenever the rank exchange is
-inactive, which includes every serial run. \texttt{local\_max\_sweeps} bounds a same-rank
+inactive, which includes every serial run. Setting it off is also how bit-reproducible
+output is recovered when one is bisecting a change; see gap~2. \texttt{local\_max\_sweeps} bounds a same-rank
 ping-pong; in the asynchronous loop it also ensures a return to the drain, so photons
 arriving from other ranks do not wait behind an unbounded local sweep.
 
@@ -297,9 +298,24 @@ implementations. They now share the delivery walk of Sec.~\ref{sec:layout}, whic
 part that silently corrupts, but not the message structure. The synchronous path is worth
 keeping only until the asynchronous one has enough mileage to retire it.
 
-\item \textbf{Results are not bit-identical between the two.} Photons arrive in a different
-order, so each block consumes its random stream differently. Escaping fractions agree
-within Poisson noise, which is the most that can be asked.
+\item \textbf{Results are not reproducible.} Photons arrive in a different order, so each
+block consumes its random stream differently. This holds between the two transports, and
+it also holds for the asynchronous transport against itself: nothing pins the order in
+which messages are taken, so two identical runs diverge. Measured on \texttt{mc\_isoth} at
+four ranks with $4\times10^{5}$ photons, three repeats of one configuration gave
+$n_{\rm esc} = 95898$, $95893$, $95898$, with the photon lists differing byte for byte ---
+including one rank whose file was the same size both times but held different values, so
+it is individual photons that move, not just how many escape. The same three repeats under
+\texttt{async\_term = false} gave $95903$ every time, with files identical on all four
+ranks.
+
+Escaping fractions agree within Poisson noise, which is the most that can be asked of the
+asynchronous path, and the conservation identity of Sec.~\ref{sec:conservation} is exact
+either way. The practical consequence is for debugging rather than for physics: an MPI
+regression cannot be found by diffing outputs unless the synchronous path is selected
+first, and a run-to-run spread of a few tens of photons is easily mistaken for a real
+change in behaviour. Any regression test over MPI must therefore either pin
+\texttt{async\_term = false} or compare statistically.
 
 \item \textbf{Load balance.} Blocks are distributed by cell count, and photons by emission,
 but transport cost follows where photons travel and how much they scatter. Neither is
