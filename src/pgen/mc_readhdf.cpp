@@ -3,8 +3,9 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file from_array.cpp
-//! \brief Problem generator for initializing with preexisting array from HDF5 input
+//! \file mc_readhdf.cpp
+//! \brief Monte Carlo problem generator initialized from an athdf snapshot, either block
+//! aligned with the snapshot's own grid or resampled onto a uniform mesh.
 
 // C headers
 
@@ -39,7 +40,6 @@ namespace {
   AthenaArray<Real> fre_grid;
   AthenaArray<Real> temp_grid;
   AthenaArray<Real> rho_grid;
-  AthenaArray<Real> ross_tab;
   AthenaArray<Real> ross_gray_tab;
   AthenaArray<Real> plan_tab;
   AthenaArray<Real> emis_cum;
@@ -124,7 +124,6 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   temp_grid.NewAthenaArray(ntem);
   rho_grid.NewAthenaArray(nrho);
   ross_gray_tab.NewAthenaArray(ntem,nrho);
-  ross_tab.NewAthenaArray(nfre,ntem,nrho);
   plan_tab.NewAthenaArray(nfre,ntem,nrho);
 
   for(int i=0; i<nfre; ++i){
@@ -167,8 +166,8 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     printf("Max/min/num densities in table: %g %g %d\n",
            rho_grid(0),rho_grid(nrho-1),nrho);
   }
-  // frequency integrated rosseland mean
-  // Read in but not used
+  // frequency integrated rosseland mean, read by GetNel to decide whether a cell is
+  // cold enough to treat as neutral
   Real buf;
   for(int j=0; j<ntem; ++j) {
     for(int i=0; i<nrho; ++i) {
@@ -184,12 +183,13 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     }
   }
 
-  // ross mean for each frequency group
+  // rosseland mean for each frequency group
+  // Read in but not used.  The values are still consumed rather than skipped, because
+  // that is what leaves the file positioned at the Planck means below.
   for(int k=0; k<nfre; ++k) {
     for(int j=0; j<ntem; ++j) {
       for(int i=0; i<nrho; ++i) {
-        fscanf(opac_file,"%lf",&(ross_tab(k,j,i)));
-        ross_tab(k,j,i) *= rho_grid(i);
+        fscanf(opac_file,"%lf",&buf);
       }
     }
   }
@@ -528,12 +528,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 //! - pin: parameters
 //! Outputs: (none)
 //! Notes:
-//! - reads in array using a slightly modified verions of from_array.cpp
-//!   - NHYDRO
-//!   - total number of MeshBlocks
-//!   - MeshBlock/nx3
-//!   - MeshBlock/nx2
-//!   - MeshBlock/nx1
+//! - with <problem>/resampled the primitives are interpolated from the mesh-sized arrays
+//!   InitUserMeshData filled; otherwise MCReadSnapshotBlock reads this block's slab from
+//!   the snapshot named by <problem>/input_filename, or by <montecarlo>/grid_from_file
+//!   when the grid was built from that snapshot.  Variables are located by name, so the
+//!   layout does not have to be described here.
 
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
