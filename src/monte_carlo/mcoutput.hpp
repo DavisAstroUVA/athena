@@ -9,6 +9,10 @@
 //! \brief definitions for MCOutput and output classes
 
 // Athena++ classes headers
+#include <cstdint>
+#include <cstdio>
+#include <string>
+
 #include "../athena.hpp"
 #include "montecarlo.hpp"
 #include "polarization.hpp"  // MCPolarization; no includes of its own, so no cycle
@@ -91,7 +95,7 @@ Real PhotonEnergyAtInfinity(Photon *pphot, int ip);
 
 class PhotonList {
 public:
-  PhotonList(int list_size_init, MCPolarization pol, int nuser);
+  PhotonList(int list_size_init, MCPolarization pol, int nuser, int max_res);
   ~PhotonList();
 
   MonteCarlo *pmy_mc;
@@ -111,10 +115,24 @@ public:
   void AddPhoton(Photon *pphot, int ip);
   void WriteList(std::string filename, Real tint_out);
   void ResetList();
+  //! the file this list writes to, so the spill path and the final write cannot disagree
+  std::string Filename() const;
 
 private:
   int len_limit;  // number of photons allowed with current allocated memory
   void ResizeList(int new_size);
+
+  //! Incremental output.  The list spills to the file whenever it reaches max_resident,
+  //! and streams through a small fixed buffer. WriteList seeks back to correct the header
+  //! fields that were notknown when the header was written.
+  void OpenAndWriteHeader(const std::string &filename, Real tint_out);
+  void StreamResident();
+  void SpillToFile();
+
+  FILE *fp_;                  //!> open between the first spill and WriteList
+  std::int64_t nwritten_;     //!> photons already on disk
+  long dt_pos_, length_pos_, ntot_pos_;  //!> offsets of the padded header fields
+  int max_resident;           //!> photons held in memory before spilling
 
 };
 

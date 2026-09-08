@@ -48,7 +48,6 @@ stepsize = 1.0e-3
 varystep = true
 raytrace = true
 boyerlindquist = true
-checkmove = 1000000
 
 <problem>
 backward  = true

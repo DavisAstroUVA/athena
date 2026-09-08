@@ -78,10 +78,11 @@ void Particles::AMRCoarseToFine(MeshBlock* pmbc, MeshBlock* pmbf) {
       pparf->Resize(nparf + 1);
       for (int j = 0; j < nint; ++j)
         pparf->intprop[j][nparf] = pparc->intprop[j][k];
-      for (int j = 0; j < nreal; ++j) {
+      for (int j = 0; j < nreal; ++j)
         pparf->rp[j][nparf] = pparc->rp[j][k];
-        pparf->rp1[j][nparf] = pparc->rp1[j][k];
-      }
+      if (!MONTE_CARLO_ENABLED)
+        for (int j = 0; j < nreal; ++j)
+          pparf->rp1[j][nparf] = pparc->rp1[j][k];
       for (int j = 0; j < naux; ++j)
         pparf->aux[j][nparf] = pparc->aux[j][k];
       ++nparf;
@@ -104,10 +105,12 @@ void Particles::AMRFineToCoarse(MeshBlock* pmbf, MeshBlock* pmbc) {
     for (int k = 0; k < nparf; ++k)
       pparc->intprop[j][nparc+k] = pparf->intprop[j][k];
   for (int j = 0; j < nreal; ++j)
-    for (int k = 0; k < nparf; ++k) {
+    for (int k = 0; k < nparf; ++k)
       pparc->rp[j][nparc+k] = pparf->rp[j][k];
-      pparc->rp1[j][nparc+k] = pparf->rp1[j][k];
-    }
+  if (!MONTE_CARLO_ENABLED)
+    for (int j = 0; j < nreal; ++j)
+      for (int k = 0; k < nparf; ++k)
+        pparc->rp1[j][nparc+k] = pparf->rp1[j][k];
   for (int j = 0; j < naux; ++j)
     for (int k = 0; k < nparf; ++k)
       pparc->aux[j][nparc+k] = pparf->aux[j][k];
@@ -347,7 +350,11 @@ Particles::Particles(MeshBlock *pmb, ParameterInput *pin)
     ppm = new ParticleMesh(this);
   }
   // Initiate ParticleBuffer class.
-  ParticleBuffer::SetNumberOfProperties(nint, 2 * nreal + naux, ncplx);
+  // rp1 is the second register of the dust-particle time integrator
+  // (Particles::Integrate).  Monte Carlo photons are pushed by PhotonPusher and never
+  // read it, so in a Monte Carlo build it is not resized and not communicated.
+  ParticleBuffer::SetNumberOfProperties(
+      nint, (MONTE_CARLO_ENABLED ? nreal : 2 * nreal) + naux, ncplx);
 }
 
 //--------------------------------------------------------------------------------------
@@ -560,10 +567,11 @@ void Particles::RemoveOneParticle(int k) {
       // Replace the k-th particle by the last particle.
       for (int j = 0; j < nint; ++j)
         intprop[j][k] = intprop[j].back();
-      for (int j = 0; j < nreal; ++j) {
+      for (int j = 0; j < nreal; ++j)
         rp[j][k] = rp[j].back();
-        rp1[j][k] = rp1[j].back();
-      }
+      if (!MONTE_CARLO_ENABLED)
+        for (int j = 0; j < nreal; ++j)
+          rp1[j][k] = rp1[j].back();
       for (int j = 0; j < naux; ++j)
         aux[j][k] = aux[j].back();
       for (int j = 0; j < nwork; ++j)
@@ -574,10 +582,11 @@ void Particles::RemoveOneParticle(int k) {
     // Remove the last particle.
     for (int j = 0; j < nint; ++j)
       intprop[j].pop_back();
-    for (int j = 0; j < nreal; ++j) {
+    for (int j = 0; j < nreal; ++j)
       rp[j].pop_back();
-      rp1[j].pop_back();
-    }
+    if (!MONTE_CARLO_ENABLED)
+      for (int j = 0; j < nreal; ++j)
+        rp1[j].pop_back();
     for (int j = 0; j < naux; ++j)
       aux[j].pop_back();
     for (int j = 0; j < nwork; ++j)
@@ -674,7 +683,7 @@ void Particles::SendToNeighbors() {
     Real *pr(ppb->rbuf + ParticleBuffer::nreal * ppb->npar);
     for (int j = 0; j < nreal; ++j) {
       *pr++ = rp[j][k];
-      *pr++ = rp1[j][k];
+      if (!MONTE_CARLO_ENABLED) *pr++ = rp1[j][k];
     }
     for (int j = 0; j < naux; ++j)
       *pr++ = aux[j][k];
@@ -1085,7 +1094,7 @@ void Particles::FlushReceiveBuffer(ParticleBuffer& recv) {
       intprop[j][k] = *pi++;
     for (int j = 0; j < nreal; ++j) {
       rp[j][k] = *pr++;
-      rp1[j][k] = *pr++;
+      if (!MONTE_CARLO_ENABLED) rp1[j][k] = *pr++;
     }
     for (int j = 0; j < naux; ++j)
       aux[j][k] = *pr++;
@@ -1155,10 +1164,11 @@ void Particles::Resize(int new_npar) {
   // Resize the particle arrays.
   for (int i = 0; i < nint; ++i)
     intprop[i].resize(new_npar);
-  for (int i = 0; i < nreal; ++i) {
+  for (int i = 0; i < nreal; ++i)
     rp[i].resize(new_npar);
-    rp1[i].resize(new_npar);
-  }
+  if (!MONTE_CARLO_ENABLED)
+    for (int i = 0; i < nreal; ++i)
+      rp1[i].resize(new_npar);
   for (int i = 0; i < naux; ++i)
     aux[i].resize(new_npar);
   for (int i = 0; i < nwork; ++i)

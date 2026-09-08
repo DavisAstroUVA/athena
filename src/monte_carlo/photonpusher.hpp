@@ -36,7 +36,12 @@ public:
   // data
 
   Real dl; // current displacement
-  int checkmove; // check/terminate move
+  //! bound on the number of steps in a single free flight, accumulated in Photon::nmvp
+  //! across every Move call and every block the photon crosses between scatterings.  It
+  //! catches the flight that never ends -- a near-horizontal photon in an optically thin
+  //! domain with periodic sides -- while leaving a photon that simply scatters often
+  //! alone.  0 disables the cap.
+  int capmove;
 
   MonteCarlo *pmy_mc;
   MonteCarloBlock *pmy_mcb;

@@ -95,7 +95,6 @@ scattering     = none
 emission       = freefree
 absorption     = freefree
 polarized      = none
-checkmove      = 1000000
 stepsize       = 1.0e-2
 varystep       = true
 abs_method     = weight

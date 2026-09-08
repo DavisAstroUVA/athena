@@ -99,11 +99,7 @@ def write_athinput(nx1, nphot, iseed, file='athinput.kerrframes'):
          # fluid three-velocity never enters, which is not the case being tested.
          "boosts         = true",
          "stepsize       = 1.0e-2",
-         "varystep       = true",
-         # varystep makes the step a fixed fraction of a cell, so refining the grid
-         # multiplies the number of steps needed to cross the domain.  Left at the
-         # default, the finer runs trip the iteration cap and every photon is destroyed.
-         "checkmove      = 100000000", "",
+         "varystep       = true", "",
          "<problem>",
          "temp      = 1.0e6",
          "constdens = true",
@@ -137,10 +133,11 @@ def read_deviation(pattern="kerrframes.out1.proc*.00000.list"):
 
     user = np.concatenate(user, axis=0)
     if user.shape[0] == 0:
-        raise RuntimeError("photon lists are empty -- every photon was destroyed rather"
-                           " than escaping.  The usual cause is the iteration cap: with"
-                           " varystep the step is a fraction of a cell, so a finer grid"
-                           " needs a larger <montecarlo>/checkmove.")
+        raise RuntimeError("photon lists are empty -- every photon was destroyed or"
+                           " retired rather than escaping.  If <montecarlo>/capmove is"
+                           " set, check it is well above the steps a photon needs to"
+                           " cross the domain: with varystep the step is a fraction of a"
+                           " cell, so a finer grid needs more of them.")
     return user[:, IUUDEV], user[:, IUURAD], user[:, IUUCEN]
 
 

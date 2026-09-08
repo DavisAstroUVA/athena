@@ -15,6 +15,7 @@
 #include <sstream>
 #include <complex>
 #include <random>
+#include <vector>
 // Athena++ classes headers
 #include "../athena.hpp"
 #include "../coordinates/coordinates.hpp"
@@ -37,6 +38,7 @@
 class Mesh;
 class MeshBlock;
 class MonteCarloBlock;
+class MCRankExchange;
 class ParameterInput;
 class Photon;
 class PhotonPusher;
@@ -241,7 +243,7 @@ public:
   int list_size_init; // maximum number of photons run per output on any process
   int max_phots_init; // maximum number of photon elements
   int nuser_var, nuser_mom;
-  int checkmove,checkscat;
+  int checkscat,capmove;
   int emission_method;
   int *emission_geometry;
   BoundaryFace *emission_face;
@@ -304,6 +306,25 @@ public:
   // SWD: some of these functions could/should be private
   void RunMonteCarlo(Outputs *pouts, Mesh *pmesh, ParameterInput *pinput);
   bool CheckAndBroadCastPhotonsRemaining();
+  //! move photons between blocks on this rank; true when something landed here
+  bool ExchangeLocal();
+  //! flush receive buffers into their blocks; true when any block received something
+  bool DrainArrivals();
+  // send what was staged for other ranks, take delivery, and test for completion
+  bool FinishRound();
+  // transport every photon of this emission type to completion using photon counters
+  void TransportAsync(int etype);
+  //! use the counter-based termination test instead of a collective every round
+  bool async_term;
+  // ceiling on consecutive same-rank transport sweeps before taking the global step,
+  // so two blocks trading a photon cannot hold the other ranks at the barrier
+  int local_max_sweeps;
+  // Blocks taking part in the current transfer round. see CheckAndBroadCastPhotonsRemaining
+  // for what puts a block in each.
+  std::vector<int> send_list_, recv_list_;
+  // moves photons between ranks a rank at a time; null when <montecarlo>/rank_exchange is off,
+  // inactive on a single rank
+  MCRankExchange *pexch;
   void InitUserMonteCarloData(ParameterInput *pin);
   // Enroll User functions
   void EnrollUserMCBoundaryFunction(enum BoundaryFace dir, MCBValFunc_t my_bc);
@@ -381,6 +402,9 @@ public:
   bool mom_flag_com; // Compute moments in comoving frame
   bool mom_flag_coord; // Compute moments in the coordinate basis
   bool accumulate_com; // accumulate comoving moments directly rather than deriving them
+  // The lab moments have to exist and be accumulated whenever the comoving ones are
+  // derived from them, even if the lab moments are not themselves being output.
+  bool need_lab_moments;
   bool mom_flag_src; // Compute source terms for output
   bool mom_flag_usr; // Compute user defined monte carlo moments
   bool mom_flag_scat; // Compute scattering source terms

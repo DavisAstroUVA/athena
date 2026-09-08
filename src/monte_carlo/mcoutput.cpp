@@ -9,6 +9,8 @@
 // C++ headers
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstdint>    // int64_t
+#include <vector>
 #include <stdexcept>  // runtime_error
 #include <iomanip>    // setfill(), setw()
 #include <errno.h>
@@ -706,7 +708,14 @@ enum BoundaryFace Spectrum::GetPhotonFace(Photon *pphot, int ip) {
 //----------------------------------------------------------------------------------------
 //! PhotonList constructor from input
 
-PhotonList::PhotonList(int list_size_init, MCPolarization pol, int nuser) {
+PhotonList::PhotonList(int list_size_init, MCPolarization pol, int nuser,
+                       int max_res) {
+
+  // Incremental output state; nothing is open until the list first spills or is written.
+  fp_ = nullptr;
+  nwritten_ = 0;
+  dt_pos_ = length_pos_ = ntot_pos_ = 0;
+  max_resident = max_res;
 
   // Allocate memory for photon list
   len_limit = list_size_init;
@@ -769,6 +778,9 @@ Real PhotonEnergyAtInfinity(Photon *pphot, int ip) {
 
 void PhotonList::AddPhoton(Photon *pphot, int ip) {
 
+  // Bound the resident list.  Past max_resident the photons already collected are
+  // streamed to the file and the array is reused, so the memory held is bounded.
+  if (max_resident > 0 && length >= max_resident) SpillToFile();
   if (length == len_limit) {
     // double array size when list is full
     ResizeList(2*len_limit);
@@ -823,51 +835,117 @@ void PhotonList::AddPhoton(Photon *pphot, int ip) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn std::string PhotonList::Filename() const
+//! \brief name of the file this list writes to
+//
+// One definition, used by both the spill path and the final write.  They open the same
+// file at different times and must not be able to disagree about which one it is.
+
+std::string PhotonList::Filename() const {
+  std::stringstream n;
+  n << base_name << "." << std::setw(5) << std::setfill('0') << output_number << ".list";
+  return n.str();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonList::OpenAndWriteHeader(const std::string &filename, Real tint_out)
+//! \brief open the list file and write its header
+//
+// length and ntot are padded to a fixed width and corrected in place once the data has been
+// written, because neither is known if/when the first photons spill: both depend on how many
+// photons ultimately arrive.  dt is padded for the one case where it is not known either --
+// a dynamic run accumulating several steps into one list, where the header records the
+// elapsed time since the previous output rather than the integration time of any one step.
+// A static run writes the final value at the outset and its correction changes nothing.
+// The reader
+// takes the first space-delimited token on each line (athena_mc.parse_line_value), so the
+// trailing blanks are ignored and the format is unchanged as far as it is concerned.
+
+void PhotonList::OpenAndWriteHeader(const std::string &filename, Real tint_out) {
+  std::stringstream msg;
+  if ((fp_ = fopen(filename.c_str(),"wb")) == nullptr) {
+    msg << "### FATAL ERROR in function [PhotonList::WriteList]" << std::endl
+        << "Output file '" << filename << "' could not be opened";
+    throw std::runtime_error(msg.str().c_str());
+  }
+  dt_pos_ = ftell(fp_);
+  fprintf(fp_,"dt=%-24.8e\n",tint_out);
+  length_pos_ = ftell(fp_);
+  fprintf(fp_,"length=%-20lld\n",static_cast<long long>(0));
+  fprintf(fp_,"npars=%d\n",nparams);
+  ntot_pos_ = ftell(fp_);
+  fprintf(fp_,"ntot=%-20d\n",nsrun);
+  fprintf(fp_,"polarized=%s\n",GetMCPolarizationName(polarized));
+  fprintf(fp_,"coord=%s\n",pmy_mc->geometry_tag.c_str());
+  // free parameters of the metric, so the file is self-describing; absent for
+  // metrics that have none
+  if (!pmy_mc->metric_params.empty())
+    fprintf(fp_,"metric_params=%s\n",pmy_mc->metric_params.c_str());
+  fprintf(fp_,"frame=%s\n",pmy_mc->frame_tag.c_str());
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonList::StreamResident()
+//! \brief convert and append the resident photons, a chunk at a time
+//
+// A fixed buffer rather than one the size of the list
+
+void PhotonList::StreamResident() {
+  if (length <= 0) return;
+  const int kChunk = 65536;
+  std::vector<double> buf(static_cast<std::size_t>(kChunk)*nparams);
+  int i = 0;
+  while (i < length) {
+    const int nthis = (length - i < kChunk) ? length - i : kChunk;
+    std::size_t n = 0;
+    for (int m = 0; m < nthis; ++m)
+      for (int j = 0; j < nparams; ++j)
+        buf[n++] = static_cast<double>(photons(i+m,j));
+    // write data in big endian order
+    if (!(mcoutput::IsBigEndian()))
+      for (std::size_t m = 0; m < n; ++m) mcoutput::Swap8Bytes(&buf[m]);
+    fwrite(buf.data(),sizeof(double),n,fp_);
+    i += nthis;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonList::SpillToFile()
+//! \brief push the resident photons to disk and reuse the array
+
+void PhotonList::SpillToFile() {
+  if (length == 0) return;
+  // pmy_mc->tint, not the member dt: tint is the integration time already folded into
+  // every photon weight (ComputeEmissionArray multiplies the emissivity by it), whereas dt
+  // is this output's cadence.  For a static run tint is what WriteList will finally record,
+  // so the header goes out correct and the later correction is a no-op.  The file name has
+  // to match the one WriteList will use, which is why both go through Filename().
+  if (fp_ == nullptr) OpenAndWriteHeader(Filename(), pmy_mc->tint);
+  StreamResident();
+  nwritten_ += length;
+  length = 0;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void PhotonList::WriteList(std::string filename, Real tint_out)
 //! \brief write photon list to binary file
 
 void PhotonList::WriteList(std::string filename, Real tint_out) {
   // Since list lengths are variable each process writes its own list
+  if (fp_ == nullptr) OpenAndWriteHeader(filename, tint_out);
+  StreamResident();
+  nwritten_ += length;
+  length = 0;
 
-  // open file for output
-  FILE *pfile;
-  std::stringstream msg;
-
-  //if ((pfile = fopen("temp.out","w")) == nullptr) {
-  if ((pfile = fopen(filename.c_str(),"w")) == nullptr) {
-    msg << "### FATAL ERROR in function [PhotonList::WriteList]" << std::endl
-        << "Output file '" << filename << "' could not be opened";
-    throw std::runtime_error(msg.str().c_str());
-  }
-
-  // write header information
-  fprintf(pfile,"dt=%.8e\n",tint_out);
-  fprintf(pfile,"length=%d\nnpars=%d\n",length,nparams);
-  fprintf(pfile,"ntot=%d\n",nsrun);
-  fprintf(pfile,"polarized=%s\n",GetMCPolarizationName(polarized));
-  fprintf(pfile,"coord=%s\n",pmy_mc->geometry_tag.c_str());
-  // free parameters of the metric, so the file is self-describing; absent for
-  // metrics that have none
-  if (!pmy_mc->metric_params.empty())
-    fprintf(pfile,"metric_params=%s\n",pmy_mc->metric_params.c_str());
-  fprintf(pfile,"frame=%s\n",pmy_mc->frame_tag.c_str());
-  // write data
-  int ndata = length*nparams;
-  double *data;
-  data = new double[ndata];
-  int n=0;
-  for (int i=0; i<length; ++i) {
-    for (int j=0; j<nparams; ++j) {
-      data[n++] = static_cast<double>(photons(i,j));
-    }}
-  // write data in big endian order
-  if (!(mcoutput::IsBigEndian())) {
-    for (int i=0; i<ndata; ++i)
-      mcoutput::Swap8Bytes(&data[i]);
-  }
-  fwrite(data,sizeof(double),static_cast<size_t>(ndata),pfile);
-  fclose(pfile);
-  delete [] data;
+  // Correct the fields that were placeholders when the header went out.
+  fseek(fp_, dt_pos_, SEEK_SET);
+  fprintf(fp_,"dt=%-24.8e",tint_out);
+  fseek(fp_, length_pos_, SEEK_SET);
+  fprintf(fp_,"length=%-20lld",static_cast<long long>(nwritten_));
+  fseek(fp_, ntot_pos_, SEEK_SET);
+  fprintf(fp_,"ntot=%-20d",nsrun);
+  fclose(fp_);
+  fp_ = nullptr;
 }
 
 //----------------------------------------------------------------------------------------
@@ -876,6 +954,7 @@ void PhotonList::WriteList(std::string filename, Real tint_out) {
 
 void PhotonList::ResetList() {
   length = 0;
+  nwritten_ = 0;
   nsrun = 0;
 }
 
@@ -1012,14 +1091,15 @@ void PhotonTrajectoryList::WriteList(std::string filename) {
   if (!(mcoutput::IsBigEndian()))
     for (int i=0; i<length; ++i) mcoutput::Swap4Bytes(&idata[i]);
   fwrite(idata,sizeof(int),static_cast<size_t>(length),pfile);
-  // Get total length of array
-  int ndata = 0;
+  // Get total length of array.  64-bit for the same reason as PhotonList::WriteList:
+  // steps summed over trajectories, times nparams, outgrows a 32-bit int.
+  std::int64_t ndata = 0;
   for (int i=0; i<length; ++i)
     ndata += nsteps[i];
   ndata *= nparams;
   double *data = new double[ndata];
   // write data
-  int n=0;
+  std::int64_t n=0;
   for (int i=0; i<length; ++i) {
     for (int j=0; j<nsteps[i]; ++j) {
       for (int k=0; k<nparams; ++k) {
@@ -1027,7 +1107,7 @@ void PhotonTrajectoryList::WriteList(std::string filename) {
       }}}
   // write data in big endian order
   if (!(mcoutput::IsBigEndian()))
-    for (int i=0; i<ndata; ++i) mcoutput::Swap8Bytes(&data[i]);
+    for (std::int64_t i=0; i<ndata; ++i) mcoutput::Swap8Bytes(&data[i]);
   fwrite(data,sizeof(double),static_cast<size_t>(ndata),pfile);
   fclose(pfile);
   delete [] data;
@@ -1228,7 +1308,11 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
               << " greater than user variables: " << pmy_mc->nuser_var << std::endl;
           throw std::runtime_error(msg.str().c_str());
         }
-        pphlist = new PhotonList(pmc->list_size_init,pmc->polarized,nuser_out);
+        // Photons held in memory before the list spills to its file.  At ~13 columns
+        // the default is a couple of hundred MB per rank, large enough that a modest run
+        // never spills and small enough that a large one cannot grow without bound.
+        int max_res = pin->GetOrAddInteger(pib->block_name,"max_resident",2000000);
+        pphlist = new PhotonList(pmc->list_size_init,pmc->polarized,nuser_out,max_res);
         pphlist->pmy_mc = pmc;
         // Initialize photon list
         if (pmc->dynamic) {
@@ -1400,7 +1484,9 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
   Real norms;
   if (nsrun != pmy_mc->nsamp) {
     norms = static_cast<Real>(nsrun)/static_cast<Real>(pmy_mc->nsamp);
-    printf("nsrun != nsamp: %d %d\n",nsrun,pmy_mc->nsamp);
+    // nsamp is 64-bit; %d on it is undefined and prints garbage.
+    printf("nsrun != nsamp: %d %lld\n",nsrun,
+           static_cast<long long>(pmy_mc->nsamp));
   } else {
     norms = 1.;
   }
@@ -1581,15 +1667,20 @@ void MCOutput::ReceiveMonteCarloSpectrum(Spectrum *pspect, bool add) {
 
   Real *recv_buf;
   recv_buf = new Real[size];
-  MPI_Request recv_rq;
   unsigned int tag = 100; // temporary
 
   ne--; ncth--; nphi--;
   int nsrun;
-  MPI_Irecv(&nsrun,size,MPI_INT,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&recv_rq);
-  MPI_Wait(&recv_rq, MPI_STATUS_IGNORE);
-  MPI_Irecv(recv_buf,size,MPI_ATHENA_REAL,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&recv_rq);
-  MPI_Wait(&recv_rq, MPI_STATUS_IGNORE);
+  MPI_Status st;
+  // Two corrections to what this used to do.  The count is 1, not size: nsrun is a single
+  // int, and posting a receive for size of them into it overruns the stack the moment any
+  // sender puts more than one on this tag.  And the source is taken from the first
+  // message rather than left as MPI_ANY_SOURCE on both, so the sample count and the
+  // spectrum that follows it come from the same rank; with ANY_SOURCE twice, one rank's
+  // count could be paired with another's spectrum.
+  MPI_Recv(&nsrun,1,MPI_INT,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&st);
+  MPI_Recv(recv_buf,size,MPI_ATHENA_REAL,st.MPI_SOURCE,tag++,MPI_COMM_WORLD,
+           MPI_STATUS_IGNORE);
   Spectrum *ptemp;
   if (add) {
     // Make temporary spectrum for copying, initalized empty
@@ -1631,14 +1722,9 @@ void MCOutput::OutputPhotonList(bool wtflag) {
   Real tlim = pmy_mc->pmy_mesh->tlim;
   if ( (time >= pphlist->last_time+pphlist->dt) || (time == tstart) || (time >= tlim)
        || wtflag ) {
-    // construct file name
-    std::string filename;
-    filename.assign(pphlist->base_name);
-    filename.append(".");
-    std::stringstream file_number;
-    file_number << std::setw(5) << std::setfill('0') << pphlist->output_number;
-    filename.append(file_number.str());
-    filename.append(".list");
+    // Filename() rather than a second copy of this logic: the spill path opens the file
+    // before this point and the two names have to agree.
+    std::string filename = pphlist->Filename();
     // compute integration time in cgs
     Real tint_out;
     if (pmy_mc->dynamic) {

@@ -53,6 +53,46 @@ public:
   void GetPositionIndices(int ibegin, int iend);
   static void Initialize(MonteCarlo *pmc, ParameterInput *pin);
 
+  //! reset the boundary state between transfer rounds
+  //!
+  //! Overrides Particles::ClearBoundary, which leaves every neighbor "waiting" so that
+  //! each one has to report in even when it has nothing to send.  A photon handed to a
+  //! same-rank neighbor is written straight into that block's receive buffer during the
+  //! send sweep, so for those neighbors there is nothing to wait for: they start
+  //! "completed" here and a sender marks one "arrived" only when it actually delivers.
+  //! Off-rank neighbors keep the waiting/poll protocol, which MPI still needs.
+  void ClearBoundary();
+
+  //! record, once, whether any neighbor of this block lives on another rank.  Such a
+  //! block has to take part in every round to keep the MPI protocol matched, whether or
+  //! not it holds photons.
+  void SetOffRankNeighborFlag();
+
+  //! does this block need the boundary sweeps this round?  A block with no photons, no
+  //! delivery from a same-rank neighbor and no off-rank neighbor cannot send, receive or
+  //! dirty any boundary state, so every sweep can skip it.
+  bool NeedsBoundaryWork() const {
+    return nphot > 0 || has_incoming_ || has_offrank_neighbor_;
+  }
+
+  //! add every rank this block has a neighbor on to `seen`, for the peer list
+  void CollectPeerRanks(std::vector<bool> &seen) const;
+
+  //! copy photons that arrived through the rank exchange into one receive slot, exactly
+  //! as an off-rank MPI receive used to fill it
+  void AcceptPhotons(int bufid, const int *ib, const Real *rb,
+                     const std::complex<Real> *cb, int npar);
+
+  //! per-photon property counts, so the exchange can size its buffers without reaching
+  //! into ParticleBuffer, which it is not a friend of
+  static int PropertyCountInt();
+  static int PropertyCountReal();
+  static int PropertyCountCplx();
+
+  //! set by a sender that has just deposited photons into this block's receive buffer
+  bool has_incoming_;
+  bool has_offrank_neighbor_;
+
   // public data
   // SWD: should be reorganized with tighter access control for some variables
   MonteCarloBlock* pmy_mcb; // ptr to MonteCarlo currently containing this Photon
@@ -61,7 +101,7 @@ public:
   int nphot_limit;
   int &nphot;
 
-  static int istatp, inscp, ityp;
+  static int istatp, inscp, ityp, inmvp;
   static int ii1p, ii2p, ii3p;
   static int ix0p, ix1p, ix2p, ix3p;
   static int ik0p, ik1p, ik2p, ik3p;
@@ -73,6 +113,11 @@ public:
   static int idtp;
 
   std::vector<int> &statp, &nscp, &type;
+  //! count of pusher steps taken since this photon last scattered, accumulated across
+  //! every Move call and every block it has crossed in that free flight.  Registered as a
+  //! photon property so that it rides along in the MPI buffers and survives a transfer to
+  //! another block; `capmove` retires a photon whose free flight runs past the cap.
+  std::vector<int> &nmvp;
   std::vector<int> &i1p, &i2p, &i3p;
   std::vector<Real> &x0p, &x1p, &x2p, &x3p;
   std::vector<Real> &k0p, &k1p, &k2p, &k3p;

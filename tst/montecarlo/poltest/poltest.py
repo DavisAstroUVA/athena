@@ -85,7 +85,6 @@ def write_athinput(path, stepsize, beta, polcirc, zeta):
           "nphot = 1", "iseed = 125787",
           "scattering = none", "emission = none", "absorption = none",
           "polarized = " + polarized,
-          "checkmove = 10000000",
           "stepsize = {0!r}".format(stepsize),
           "varystep = true",
           # both required: they gate the comoving-to-coordinate conversion the problem

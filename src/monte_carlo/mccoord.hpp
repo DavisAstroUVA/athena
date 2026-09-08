@@ -61,6 +61,8 @@ bool IsMCMetricCurved(MCCoordSystem c);
 const char *GetMCCoordSystemName(MCCoordSystem c);
 //! \brief true when the run integrates geodesics in a relativistic spacetime
 bool IsMCRelativistic(MCCoordSystem c);
+//! \brief true when GeneralPusher is used regardless of <montecarlo>/general_pusher
+bool IsMCPusherAlwaysGeneral(MCCoordSystem c);
 //! \brief true when the flat scale factors orthonormalize the coordinate basis
 bool HasFlatOrthonormalBasis(MCCoordSystem c);
 

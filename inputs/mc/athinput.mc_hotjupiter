@@ -102,7 +102,6 @@ stepsize = 0.1
 varystep = true
 dynamic = true
 coupled = true
-checkmove = 100000
 #boosts = true
 
 <problem>

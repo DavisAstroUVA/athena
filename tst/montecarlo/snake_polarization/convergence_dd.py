@@ -107,7 +107,6 @@ def write_athinput(iseed, nphot, stepsize, beta, polang, polcirc, nx,
           # boosts drives TransformToCoordinate, without which the emitted direction never
           # becomes a coordinate four-vector and the coherency tensor is never built.
           "boosts         = true",
-          "checkmove      = 100000000",
           "tmax           = 1.0e36", "",
           "<problem>",
           "dens_code = 1.0", "pgas_code = {0:e}".format(PGAS_CODE),

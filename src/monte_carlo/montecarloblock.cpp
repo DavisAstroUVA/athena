@@ -78,6 +78,11 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
         << std::endl;
     ATHENA_ERROR(msg);
   }
+  // DeriveComovingMoments() builds the comoving moments by transforming the lab ones, so
+  // asking for the comoving moments alone still requires the lab array to be allocated
+  // and filled.  Without this, <output>/variable = mccom with no mclab output reads an
+  // array that was never allocated.
+  need_lab_moments = mom_flag_lab || (mom_flag_com && !accumulate_com);
   mom_flag_src = pmy_mc->pmcout->mom_flag_src;
   mom_flag_usr = pmy_mc->pmcout->mom_flag_usr || (pmy_mc->nuser_mom > 0);
   mom_flag_scat = pmy_mc->pmcout->mom_flag_scat;
@@ -176,6 +181,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       else
         std::cout << "Reading in table for Compton cross section." << std::endl;
     }
+    // Builds at most once per process, not once per block; see the note on the function.
     GenerateComptonTable(comptonio);
     ScatteringOpacity = ComptonOpacity;
     if (IsPolarized(pmy_mc->polarized)) {
@@ -380,7 +386,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   // moments is 1 (Er) + 3 (Fr) + 9 (Pr) + 1 (Eave) + 1 (net cool)
   nmom = 13;
   int ntype = pmy_mc->ntype;
-  if (mom_flag_lab) moments.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
+  if (need_lab_moments) moments.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
   if (mom_flag_com) moments_com.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
   if (mom_flag_coord)
     moments_coord.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
@@ -461,7 +467,7 @@ MonteCarloBlock::~MonteCarloBlock() {
   vel.DeleteAthenaArray();
   uprim.DeleteAthenaArray();
   if (NSCALARS > 0) scalars.DeleteAthenaArray();
-  if (mom_flag_lab) moments.DeleteAthenaArray();
+  if (need_lab_moments) moments.DeleteAthenaArray();
   if (mom_flag_com) moments_com.DeleteAthenaArray();
   if (mom_flag_coord) moments_coord.DeleteAthenaArray();
   if (pmy_mc->nuser_mom > 0) moments_user.DeleteAthenaArray();
@@ -660,6 +666,8 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       if (IsPolarized(pmy_mc->polarized)) ScatteringStokesToCoherency(this, pphot, ip);
       nscat++;
       pphot->nscp[ip]++;
+      // Scattering starts a new free flight, so the capmove counter resets
+      pphot->nmvp[ip] = 0;
       if (pphot->nscp[ip] % pmy_mc->checkscat == 0) {
         //pphot->PrintPhoton("check scat",ip);
         // Check for possible infinite loop due to NaN in photon
@@ -698,6 +706,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       if (pphot->statp[ip] != BUFFERED) {
         // Bring the Stokes parameters up to date with the transported coherency tensor
         // before finalizing the photon, writing outputs
+        if (IsPolarized(pmy_mc->polarized)) CoherencyToObserverStokes(this, pphot, ip);
         FinalizePhoton(pphot,ip);
       }
 
@@ -888,7 +897,10 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
   // to avoid repated transformations to same basis.
   PhotonFrames frames(this, pphot, ip, dl);
 
-  if (mom_flag_lab) {
+  // need_lab_moments, not mom_flag_lab: the comoving moments are derived from these when
+  // they are not accumulated directly, so they have to be filled even when the lab
+  // moments themselves are not being written out.
+  if (need_lab_moments) {
     const PhotonFrameState &s = frames.Get(MCFRAME_LAB);
     if (!s.Finite(wp)) {
       pphot->statp[ip] = DESTROYED;

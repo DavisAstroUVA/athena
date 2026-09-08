@@ -14,13 +14,14 @@
 #include "photon.hpp"
 #include "../athena.hpp"
 #include "../athena_arrays.hpp"
+#include "mcexchange.hpp"
 
 // class variable initialization
 bool Photon::initialized = false;
 MCPolarization Photon::polarized = MCPOL_NONE;
 bool Photon::general_pusher_flag = false;
 
-int Photon::inscp = -1, Photon::istatp = -1, Photon::ityp = -1;
+int Photon::inscp = -1, Photon::istatp = -1, Photon::ityp = -1, Photon::inmvp = -1;
 int Photon::ii1p = -1, Photon::ii2p = -1, Photon::ii3p = -1;
 int Photon::ix0p = -1, Photon::ix1p = -1, Photon::ix2p = -1, Photon::ix3p = -1;
 int Photon::ik0p = -1, Photon::ik1p = -1, Photon::ik2p = -1, Photon::ik3p = -1;
@@ -43,11 +44,13 @@ static int nmpi = 0;
 
 Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
   : Particles(pmcb->pmy_block, pin),
+    has_incoming_(false), has_offrank_neighbor_(false),
   // Allocate space for photon data via initialization list
     //user(new std::vector<Real> [pmcb->pmy_mc->nuser_var]),
     //polten(new std::vector<std::complex<Real>> [ncplx]),
     nphot(npar),nscp(intprop[inscp]), statp(intprop[istatp]),
-    type(intprop[ityp]), i1p(intprop[ii1p]), i2p(intprop[ii2p]), i3p(intprop[ii3p]),
+    type(intprop[ityp]), nmvp(intprop[inmvp]),
+    i1p(intprop[ii1p]), i2p(intprop[ii2p]), i3p(intprop[ii3p]),
     x0p(rp[ix0p]), x1p(rp[ix1p]), x2p(rp[ix2p]), x3p(rp[ix3p]),
     k0p(rp[ik0p]), k1p(rp[ik1p]), k2p(rp[ik2p]), k3p(rp[ik3p]),
     dk0p(rp[idk0p]), dk1p(rp[idk1p]), dk2p(rp[idk2p]),
@@ -174,8 +177,17 @@ bool Photon::IsNanPhoton(int ip) {
 
 // SWD: Temporary --> converts protected function to public :(
 void Photon::AllocatePhotons(int nphot) {
+  const int nold = npar;
   // Call Resize function
   Resize(nphot);
+
+  // Zero the free-flight step counter on the slots just claimed for new photons.  Resize
+  // only value-initializes when the underlying vector actually grows, and it does not:
+  // RemoveOneParticle swaps the last photon down into the freed slot and decrements the
+  // count without shrinking the storage, so a slot handed out here has usually held a
+  // photon before and still carries its count.  Left alone, a new photon would inherit
+  // it and could be retired by capmove before travelling anywhere.
+  for (int ip = nold; ip < npar; ++ip) nmvp[ip] = 0;
 }
 
 //----------------------------------------------------------------------------------------
@@ -238,6 +250,7 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
   inscp = AddIntProperty("nscp");
   istatp = AddIntProperty("statp");
   ityp = AddIntProperty("type");
+  inmvp = AddIntProperty("nmv");
 
   // Add photon position.
   ix0p = AddRealProperty("x0");
@@ -402,10 +415,10 @@ void Photon::SendToNeighbors() {
     for (int j = 0; j < nint; ++j)
       *pi++ = intprop[j][k];
     Real *pr(ppb->rbuf + ParticleBuffer::nreal * ppb->npar);
-    for (int j = 0; j < nreal; ++j) {
+    // rp1 deliberately not sent: it is the dust integrator's second register and no
+    // Monte Carlo code path reads it.  See Particles::Resize.
+    for (int j = 0; j < nreal; ++j)
       *pr++ = rp[j][k];
-      *pr++ = rp1[j][k];
-    }
     for (int j = 0; j < naux; ++j)
       *pr++ = aux[j][k];
     // copy complex properties
@@ -421,15 +434,43 @@ void Photon::SendToNeighbors() {
     --k;
   }
 
+  // Nothing was handed off and no neighbor is on another rank, so there is nobody to
+  // notify: same-rank neighbors already sit at "completed" (see Photon::ClearBoundary),
+  // and walking the neighbor list to tell each of them "nothing for you" is exactly the
+  // per-block, per-round cost that dominates a run with many small blocks.
+  const bool rank_exchange = (pmy_mcb->pmy_mc->pexch != nullptr
+                              && pmy_mcb->pmy_mc->pexch->Active());
+  if (nbuf == 0 && (rank_exchange || !has_offrank_neighbor_)) return;
+
   // Send to neighbor processes and update boundary status.
   for (int i = 0; i < pbval_->nneighbor; ++i) {
     NeighborBlock& nb = pbval_->neighbor[i];
     int dst = nb.snb.rank;
     if (dst == Globals::my_rank) {
-      Particles *ppar = pmy_mesh->FindMeshBlock(nb.snb.gid)->pmy_mcb->pphot;
-      ppar->bstatus_[nb.targetid] =
-          (ppar->recv_[nb.targetid].npar > 0) ? BoundaryStatus::arrived
-                                              : BoundaryStatus::completed;
+      Photon *ppar = pmy_mesh->FindMeshBlock(nb.snb.gid)->pmy_mcb->pphot;
+      if (ppar->recv_[nb.targetid].npar > 0) {
+        ppar->bstatus_[nb.targetid] = BoundaryStatus::arrived;
+        // tell the receive sweep this block has something waiting for it
+        ppar->has_incoming_ = true;
+      } else {
+        ppar->bstatus_[nb.targetid] = BoundaryStatus::completed;
+      }
+    } else if (pmy_mcb->pmy_mc->pexch != nullptr
+               && pmy_mcb->pmy_mc->pexch->Active()) {
+#ifdef MPI_PARALLEL
+      // Hand these to the rank exchange instead of opening a conversation with this one
+      // neighbor block.  Everything leaving for that rank, from every block here, goes in
+      // one message at the end of the round.  Nothing is sent when there is nothing to
+      // send: the receiver no longer waits on a per-link count, so silence is the signal.
+      ParticleBuffer& send = send_[nb.bufid];
+      if (send.npar > 0) {
+        pmy_mcb->pmy_mc->pexch->Stage(nb.snb.rank, nb.snb.lid, nb.targetid,
+                                      send.ibuf, send.rbuf, send.cbuf, send.npar);
+        // Handed over, so empty the slot: the send sweep runs more than once per round
+        // now, and anything still sitting here would be staged a second time.
+        send.npar = 0;
+      }
+#endif
     } else {
 #ifdef MPI_PARALLEL
       ParticleBuffer& send = send_[nb.bufid];
@@ -655,6 +696,109 @@ bool Photon::ReceiveFromNeighbors() {
   }
 
   return flag;
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn int Photon::PropertyCountInt()
+//! \brief per-photon property counts, exposed for MCRankExchange's buffer arithmetic
+
+int Photon::PropertyCountInt()  { return ParticleBuffer::nint; }
+int Photon::PropertyCountReal() { return ParticleBuffer::nreal; }
+int Photon::PropertyCountCplx() {
+  return (general_pusher_flag && IsPolarized(polarized)) ? ParticleBuffer::ncplx : 0;
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::CollectPeerRanks(std::vector<bool> &seen) const
+//! \brief mark every rank this block has a neighbor on
+
+void Photon::CollectPeerRanks(std::vector<bool> &seen) const {
+  for (int i = 0; i < pbval_->nneighbor; ++i)
+    seen[pbval_->neighbor[i].snb.rank] = true;
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::AcceptPhotons(int bufid, ...)
+//! \brief fill one receive slot from the rank exchange
+//!
+//! Leaves the buffer in exactly the state an off-rank MPI receive used to leave it in, so
+//! FlushReceiveBuffer downstream cannot tell the two apart.
+
+void Photon::AcceptPhotons(int bufid, const int *ib, const Real *rb,
+                           const std::complex<Real> *cb, int npar) {
+  if (npar <= 0) return;
+  ParticleBuffer& recv = recv_[bufid];
+  // Append rather than overwrite.  Several rounds of local transport can happen before
+  // the ranks exchange, so the same neighbor link may contribute more than once to a
+  // single message, and the second batch must not land on top of the first.
+  const int nold = recv.npar;
+  if (nold + npar > recv.nparmax) recv.Reallocate(nold + npar);
+  const int ni = PropertyCountInt(), nr = PropertyCountReal(), nc = PropertyCountCplx();
+  for (int n = 0; n < npar*ni; ++n) recv.ibuf[nold*ni + n] = ib[n];
+  for (int n = 0; n < npar*nr; ++n) recv.rbuf[nold*nr + n] = rb[n];
+  if (nc > 0 && cb != nullptr) {
+    for (int n = 0; n < npar*nc; ++n) recv.cbuf[nold*nc + n] = cb[n];
+  }
+  recv.npar = nold + npar;
+  bstatus_[bufid] = BoundaryStatus::arrived;
+  has_incoming_ = true;
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::SetOffRankNeighborFlag()
+//! \brief record whether any neighbor of this block lives on another rank
+//!
+//! Fixed for the life of the mesh, so it is worked out once after LinkNeighbors rather
+//! than rediscovered every transfer round.
+
+void Photon::SetOffRankNeighborFlag() {
+  has_offrank_neighbor_ = false;
+#ifdef MPI_PARALLEL
+  for (int i = 0; i < pbval_->nneighbor; ++i) {
+    if (pbval_->neighbor[i].snb.rank != Globals::my_rank) {
+      has_offrank_neighbor_ = true;
+      return;
+    }
+  }
+#endif
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::ClearBoundary()
+//! \brief reset the boundary state between transfer rounds
+//!
+//! See the note in photon.hpp: same-rank neighbors start "completed" rather than
+//! "waiting", because a same-rank hand-off is a direct write during the send sweep and
+//! there is nothing to poll for.  That is what lets a block with no photons and no
+//! delivery be skipped entirely, instead of having to report "nothing for you" to each
+//! of its neighbors every round.
+
+void Photon::ClearBoundary() {
+  // With the rank exchange running there is nothing to poll for on either kind of
+  // neighbor: same-rank hand-offs are direct writes, and off-rank photons are delivered
+  // by MCRankExchange before the receive sweep.  A slot only becomes "arrived" when
+  // something was actually put in it.
+  const bool rank_exchange = (pmy_mcb->pmy_mc->pexch != nullptr
+                              && pmy_mcb->pmy_mc->pexch->Active());
+  for (int i = 0; i < pbval_->nneighbor; ++i) {
+    NeighborBlock& nb = pbval_->neighbor[i];
+    if (nb.snb.rank == Globals::my_rank || rank_exchange) {
+      bstatus_[nb.bufid] = BoundaryStatus::completed;
+#ifdef MPI_PARALLEL
+      if (nb.snb.rank != Globals::my_rank) send_[nb.bufid].npar = 0;
+#endif
+    } else {
+      bstatus_[nb.bufid] = BoundaryStatus::waiting;
+#ifdef MPI_PARALLEL
+      ParticleBuffer& recv = recv_[nb.bufid];
+      recv.mpi_active = false;
+      recv.flagn = recv.flagi = recv.flagr = recv.flagc = 0;
+      recv.reqn = recv.reqi = recv.reqr = recv.reqc = MPI_REQUEST_NULL;
+      send_[nb.bufid].npar = 0;
+#endif
+    }
+  }
+  has_incoming_ = false;
 }
 
 //--------------------------------------------------------------------------------------

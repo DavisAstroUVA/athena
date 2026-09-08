@@ -168,7 +168,7 @@ def write_athinput(path, kind, vel, nphot, iseed, accumulate_comoving=False,
     o += [
           "scattering = none", "emission = freefree",
           "absorption = " + ("none" if geodesic else "freefree"),
-          "polarized = none", "checkmove = 1000000",
+          "polarized = none",
           "stepsize = {0!r}".format(1.0e-2 if stepsize is None else stepsize),
           "varystep = true", "abs_method = weight",
           # boosts stay on even at zero velocity: that is what makes the comoving

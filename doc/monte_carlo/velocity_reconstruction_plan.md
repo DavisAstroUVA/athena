@@ -259,8 +259,10 @@ Two things surfaced while building this:
 - The `velocity` input to `mc_gr_simple` is read and never used, and the four-velocity block it
   would feed is commented out. Left alone.
 
-Runs need a large `<montecarlo>/checkmove`: with `varystep` the step is a fraction of a cell, so
-refining the grid multiplies the steps per crossing and the default cap destroys every photon.
+These runs used to need a large `<montecarlo>/checkmove`, because with `varystep` the step is a
+fraction of a cell and refining the grid multiplied the steps per crossing until the default cap
+destroyed every photon. `checkmove` has since been removed; nothing needs setting now. If
+`capmove` is ever turned on for such a run, it needs the same generous margin.
 
 ### Phases 2 and 3 -- reconstruct at the photon, switch the consumers. **Done.**
 

@@ -74,7 +74,6 @@ scattering          = none
 emission            = none
 absorption          = none
 polarized           = linear
-checkmove           = 10000000
 stepsize            = 1.0e-2
 varystep            = true
 boosts              = true

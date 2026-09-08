@@ -883,7 +883,9 @@ Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap) {
   Real dadnu = (ap-am)/(nup-num);
   Real lnu = std::log(num);
   Real sum = Planck(temp,num)*am*dlnu/h/2.;
-  for(int i=1; i<n-1; ++i) {
+  // Interior nodes run to n-1: the composite trapezoid rule over n intervals weights
+  // nodes 1..n-1 fully and the two endpoints by a half.
+  for(int i=1; i<n; ++i) {
     lnu += dlnu;
     Real nu = std::exp(lnu);
     Real alpha = dadnu*(nu-num)+am;
