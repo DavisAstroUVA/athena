@@ -164,6 +164,16 @@ bool Photon::IsNanPhoton(int ip) {
     if (std::isnan(sip[ip])) return true;
     if (std::isnan(sqp[ip])) return true;
     if (std::isnan(sup[ip])) return true;
+    // Check coherency tensor for NaN or Inf, which indicate transport corruption.
+    // This catches corruption immediately rather than waiting for it to propagate to Stokes.
+    if (polten != nullptr) {
+      for (int i = 0; i < 16; ++i) {
+        if (std::isnan(polten[i][ip].real()) || std::isnan(polten[i][ip].imag()) ||
+            std::isinf(polten[i][ip].real()) || std::isinf(polten[i][ip].imag())) {
+          return true;
+        }
+      }
+    }
   }
   if (std::isnan(scp[ip])) return true;
   if (std::isnan(acp[ip])) return true;

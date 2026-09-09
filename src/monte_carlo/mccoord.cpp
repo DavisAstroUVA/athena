@@ -1110,12 +1110,120 @@ void MCKerrSchildCartesian::InverseMetricDerivative(Real x[4], Real dgcon[4][4][
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MCKerrSchildCartesian::Connect(Real x[4], Real gcov[4][4])
-//! \brief compute metric in cartesian Kerr-Schild
+//! \fn void MCKerrSchildCartesian::Connect(Real x[4], Real gamma[4][4][4])
+//! \brief compute the connection in cartesian Kerr-Schild
+//
+// Kerr-Schild is g_{mn} = eta_{mn} + f l_m l_n with l null in eta, and in cartesian
+// coordinates eta is constant, so the whole connection comes from the f l l piece and
+// vanishes with f.  There is no flat-background curvilinear part to carry. Writing
+// G_{lmn} = 1/2 (d_m h_{ln} + d_n h_{lm} - d_l h_{mn}) with h = f l l and grouping,
+//
+//   G_{lmn} = 1/2 [ f_,m l_l l_n + f_,n l_l l_m - f_,l l_m l_n
+//                   + f ( l_n F_{ml} + l_m F_{nl} + l_l S_{mn} ) ],
+//
+// where F and S are the antisymmetric and symmetric parts of d_a l_b.  Raising the first
+// index is exact and cheap because the inverse is linear in f,
+// g^{ls} = eta^{ls} - f l^l l^s, so it is a diagonal scaling plus one rank-one correction
+// instead of a matrix multiply.
+//
+// The scalar and vector derivatives below are the same expressions the gr_user metric
+// function in the problem generators uses; r is defined implicitly by
+// r^4 - (R^2 - a^2) r^2 - a^2 z^2 = 0.
 
 void MCKerrSchildCartesian::Connect(Real x[4], Real gamma[4][4][4]) {
 
+  Real eta[4];
+  eta[IMC0] = -1.0;
+  eta[IMC1] = 1.0;
+  eta[IMC2] = 1.0;
+  eta[IMC3] = 1.0;
 
+  Real a = bh_spin_;
+  Real m = bh_mass_;
+  Real a2 = a*a;
+  Real xx = x[IMC1], yy = x[IMC2], zz = x[IMC3];
+  Real z2 = zz*zz;
+  Real rr2 = xx*xx + yy*yy + z2;
+  Real r2 = 0.5*(rr2 - a2 + std::hypot(rr2 - a2, 2.0*a*zz));
+  Real r = std::sqrt(r2);
+  Real r4 = r2*r2;
+  Real den = r4 + a2*z2;
+  Real ra2 = r2 + a2;
+  Real f = 2.0*m*r2*r/den;
+
+  // null vector; l^mu = eta^{mu nu} l_nu, so only the time component changes sign
+  Real lcov[4], lcon[4];
+  lcov[IMC0] = 1.0;
+  lcov[IMC1] = (r*xx + a*yy)/ra2;
+  lcov[IMC2] = (r*yy - a*xx)/ra2;
+  lcov[IMC3] = zz/r;
+  for (int i = 0; i < 4; i++) lcon[i] = eta[i]*lcov[i];
+
+  // dr/dx^mu
+  Real rden = 2.0*r2 - rr2 + a2;
+  Real dr[4];
+  dr[IMC0] = 0.0;
+  dr[IMC1] = r*xx/rden;
+  dr[IMC2] = r*yy/rden;
+  dr[IMC3] = (r*zz + a2*zz/r)/rden;
+
+  // df/dx^mu
+  Real fc = r4 - 3.0*a2*z2;
+  Real df[4];
+  df[IMC0] = 0.0;
+  df[IMC1] = -fc*dr[IMC1]/(r*den)*f;
+  df[IMC2] = -fc*dr[IMC2]/(r*den)*f;
+  df[IMC3] = -(fc*dr[IMC3] + 2.0*a2*r*zz)/(r*den)*f;
+
+  // dl[alpha][beta] = d_alpha l_beta; l_0 is constant so its column stays zero
+  Real dl[4][4];
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++) dl[i][j] = 0.0;
+
+  Real c1 = xx - 2.0*r*lcov[IMC1];
+  dl[IMC1][IMC1] = (c1*dr[IMC1] + r)/ra2;
+  dl[IMC2][IMC1] = (c1*dr[IMC2] + a)/ra2;
+  dl[IMC3][IMC1] = c1*dr[IMC3]/ra2;
+
+  Real c2 = yy - 2.0*r*lcov[IMC2];
+  dl[IMC1][IMC2] = (c2*dr[IMC1] - a)/ra2;
+  dl[IMC2][IMC2] = (c2*dr[IMC2] + r)/ra2;
+  dl[IMC3][IMC2] = c2*dr[IMC3]/ra2;
+
+  dl[IMC1][IMC3] = -zz/r2*dr[IMC1];
+  dl[IMC2][IMC3] = -zz/r2*dr[IMC2];
+  dl[IMC3][IMC3] = -zz/r2*dr[IMC3] + 1.0/r;
+
+  // connection with the first index down
+  Real gl[4][4][4];
+  for (int l = 0; l < 4; l++) {
+    for (int mu = 0; mu < 4; mu++) {
+      for (int nu = 0; nu < 4; nu++) {
+        Real fml = dl[mu][l]  - dl[l][mu];   // F_{mu l}
+        Real fnl = dl[nu][l]  - dl[l][nu];   // F_{nu l}
+        Real smn = dl[mu][nu] + dl[nu][mu];  // S_{mu nu}
+        gl[l][mu][nu] = 0.5*(df[mu]*lcov[l]*lcov[nu]
+                           + df[nu]*lcov[l]*lcov[mu]
+                           - df[l]*lcov[mu]*lcov[nu]
+                           + f*(lcov[nu]*fml + lcov[mu]*fnl + lcov[l]*smn));
+      }
+    }
+  }
+
+  // l^s G_{s mu nu}, the only contraction the raising needs
+  Real lg[4][4];
+  for (int mu = 0; mu < 4; mu++) {
+    for (int nu = 0; nu < 4; nu++) {
+      Real sum = 0.0;
+      for (int sig = 0; sig < 4; sig++) sum += lcon[sig]*gl[sig][mu][nu];
+      lg[mu][nu] = sum;
+    }
+  }
+
+  for (int l = 0; l < 4; l++)
+    for (int mu = 0; mu < 4; mu++)
+      for (int nu = 0; nu < 4; nu++)
+        gamma[l][mu][nu] = eta[l]*gl[l][mu][nu] - f*lcon[l]*lg[mu][nu];
 }
 
 //----------------------------------------------------------------------------------------
