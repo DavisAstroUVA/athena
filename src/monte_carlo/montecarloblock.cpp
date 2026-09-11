@@ -656,15 +656,29 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
 
     // account for scattering if not absorbed
     if (pphot->statp[ip] == EVOLVING) {
-      // Lorentz transform to comoving frame for scattering
-      if (boosts || tetrads) {
+      // Lorentz transform to comoving frame for scattering.  The polarized scattering
+      // routines need the wavevector in cartesian components, and on a spherical grid
+      // TransformToComoving/TransformToCoordinate are what supply that, by way of
+      // ToScatteringBasis and FromScatteringBasis.  Both are skipped entirely when there
+      // is nothing to transform, which is the standing case for the legacy spherical
+      // pusher: it sets tetrads false, and boosts is false for a static medium.  The
+      // rotation then never happened and ScatterThomsonPolarized read the local
+      // orthonormal spherical components as if they were cartesian, taking e_phi as the
+      // polarization reference axis.  Supply the pair here in exactly that case, so that
+      // every other path keeps the sequence it already had.
+      const bool comoving = (boosts || tetrads);
+      if (comoving) {
         TransformToComoving(pphot,ip,ip);
+      } else if (IsPolarized(pmy_mc->polarized)) {
+        ToScatteringBasis(this, pphot, ip);
       }
       // Convert coherency tensor to Stokes parameters for scattering (if needed)
       if (IsPolarized(pmy_mc->polarized)) CoherencyToScatteringStokes(this, pphot, ip);
       // call scattering function and update counters
       Scatter(this,pphot,ip,ip);
       if (IsPolarized(pmy_mc->polarized)) ScatteringStokesToCoherency(this, pphot, ip);
+      if (!comoving && IsPolarized(pmy_mc->polarized))
+        FromScatteringBasis(this, pphot, ip);
       nscat++;
       pphot->nscp[ip]++;
       // Scattering starts a new free flight, so the capmove counter resets
