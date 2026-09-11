@@ -158,7 +158,7 @@ def main(**kwargs):
         # average spectrum over phi
         intensity = spectrum['intensity']
         intens = np.sum(intensity[0,:,:,:],axis=0)/float(spectrum['nphi'])
-        qpol = -np.sum(intensity[1,:,:,:],axis=0)/float(spectrum['nphi'])
+        qpol = np.sum(intensity[1,:,:,:],axis=0)/float(spectrum['nphi'])
         # Bins that collected no photons have intens == 0; the polarization
         # fraction is undefined there, so mask them out rather than letting a
         # nan poison the whole norm.

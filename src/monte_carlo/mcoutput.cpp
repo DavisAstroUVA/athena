@@ -517,6 +517,9 @@ void Spectrum::UpdateSpectrum(Photon *pphot, int ip) {
         kcart[IMC1] = kr*sth*cph + kth*cth*cph - kph*sph;
         kcart[IMC2] = kr*sth*sph + kth*cth*sph + kph*cph;
         kcart[IMC3] = kr*cth - kth*sth;
+        Real knorm = std::sqrt(SQR(kcart[IMC1]) + SQR(kcart[IMC2]) + SQR(kcart[IMC3]));
+        if (knorm <= TINY_NUMBER) return;
+        for (int a = IMC1; a < 4; ++a) kcart[a] /= knorm;
       } else {
         // SWD: Add cylindrical
         std::stringstream msg;

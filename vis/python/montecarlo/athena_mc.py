@@ -991,11 +991,13 @@ def compute_pol_angle_error(intensity,errors=None):
 
 def compute_q_error(intensity,errors=None):
     """
-    Compute q=-Q/I and error if requested
+    Compute q=Q/I and error if requested
+
+    Q > 0 for polarization along the meridian direction l, as stored by the code.
     """
     i = intensity[0,:]
     q = intensity[1,:]
-    frac = -q/i
+    frac = q/i
     if errors is not None:
         ei = errors[0,:]
         eq = errors[1,:]
@@ -1183,9 +1185,11 @@ def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
         n_new = len(x) // nbin
         x = x[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
         y = y[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
-        y2 = yerr**2
-        y2 = y2[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
-        yerr = np.sqrt(y2)
+        # yerr is None whenever plterr is off, which rebinning has no reason to require
+        if yerr is not None:
+            y2 = yerr**2
+            y2 = y2[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
+            yerr = np.sqrt(y2)
 
     # Return x and y variables, their labels, and possible error on y
     return x,y,yerr,xlabel,ylabel

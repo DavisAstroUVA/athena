@@ -76,8 +76,15 @@ def plot_one(spectrum, ax, xunit, yunit, imu, iphi, plterr, **kwargs):
 
     for iphv in philist:
         for imuv in mulist:
-            x, y, yerr, xlabel, ylabel = athenamc.plot_frequency(spectrum, imuv, iphv,
+
+            result = athenamc.plot_frequency(spectrum, imuv, iphv,
                                          plterr=plterr, xunit=xunit, yunit=yunit, rebinx=rebinx)
+            # skip if no data
+            if result is None:
+                print("  skipping yunit={0!r} at imu={1}, iphi={2}".format(
+                    yunit, imuv, iphv))
+                continue
+            x, y, yerr, xlabel, ylabel = result
             athenamc.make_plot(x, y, yerr=yerr, xlabel=xlabel, ylabel=ylabel, ax=ax, **kwargs)
 
             if txtfile is not None:

@@ -30,7 +30,8 @@
 // meridian, which does not move. Used by non GR coordinates.
 
 
-static bool MeridianPair(const Real n[3], Real lhat[3], Real rhat[3]);
+static bool MeridianPair(const Real n[3], const Real zref[3],
+                         Real lhat[3], Real rhat[3]);
 static void WriteMeridianStokes(Photon *pphot, int ip, Real ecov[4][4],
                                 const Real lhat[3], const Real rhat[3]);
 
@@ -146,22 +147,28 @@ static bool MeridianBasis(MonteCarloBlock *pmcb, Photon *pphot, int ip,
   if (nmag <= TINY_NUMBER) return false;
   for (int i = 0; i < 3; ++i) n[i] /= nmag;
 
-  return MeridianPair(n, lhat, rhat);
+  // the scattering routines read Q and U against the comoving frame's own third leg
+  const Real zleg[3] = {0.0, 0.0, 1.0};
+  return MeridianPair(n, zleg, lhat, rhat);
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn static bool MeridianPair(const Real n[3], Real lhat[3], Real rhat[3])
+//! \fn static bool MeridianPair(const Real n[3], const Real zref[3], ...)
 //! \brief the meridian pair for a unit direction in some orthonormal frame
 //
-//   l = normalize(z - (z.n) n),   r = n x l,
+//   l = normalize(zref - (zref.n) n),   r = n x l,
 //
-// with z the frame's third spatial leg.  Split out so that the frame can be chosen by the
-// caller: the scattering routines want the comoving frame, the outputs want the normal
-// observer.  Returns false when n is parallel to z, where the meridian is undefined.
+// Split out so that both the frame and the axis within it can be chosen by the caller: the
+// scattering routines want the comoving frame's own third leg, while the outputs want a
+// single physical direction shared by every photon.  zref is given in the same tetrad
+// components as n and must be a unit vector.  Returns false when n is parallel to zref,
+// where the meridian is undefined.
 
-static bool MeridianPair(const Real n[3], Real lhat[3], Real rhat[3]) {
+static bool MeridianPair(const Real n[3], const Real zref[3],
+                         Real lhat[3], Real rhat[3]) {
 
-  Real l[3] = {-n[2]*n[0], -n[2]*n[1], 1.0 - n[2]*n[2]};
+  Real zdn = zref[0]*n[0] + zref[1]*n[1] + zref[2]*n[2];
+  Real l[3] = {zref[0] - zdn*n[0], zref[1] - zdn*n[1], zref[2] - zdn*n[2]};
   Real lmag = std::sqrt(SQR(l[0]) + SQR(l[1]) + SQR(l[2]));
   if (lmag <= TINY_NUMBER) return false;          // photon along the frame z axis
   for (int i = 0; i < 3; ++i) lhat[i] = l[i]/lmag;
@@ -300,8 +307,36 @@ void CoherencyToObserverStokes(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   if (nmag <= TINY_NUMBER) return;
   Real n[3] = {ktet[IMC1]/nmag, ktet[IMC2]/nmag, ktet[IMC3]/nmag};
 
+  // Reference axis, in tetrad components.  (0,0,1) is the tetrad's third spatial leg,
+  // which is what ConstructTetrad grows from the third coordinate direction: e_z in a
+  // cartesian or cylindrical chart, and so already the global z axis there.  In spherical
+  // polar it is e_phi, which rotates with azimuth -- Q and U would then be referenced to a
+  // different physical plane for every photon, they could not be combined across the grid,
+  // and they would not vanish for a photon leaving along the polar axis.  Project the
+  // global z direction into the tetrad instead, so the stored Stokes parameters mean the
+  // same thing everywhere and agree with a spectrum binned on polar_axis.
+  Real zref[3] = {0.0, 0.0, 1.0};
+  if (pmcb->topology == MCTOPO_SPHERICAL) {
+    // z = r cos(theta), so d/dz = cos(theta) d/dr - (sin(theta)/r) d/dtheta
+    Real sth = std::sin(pphot->x2p[ip]);
+    Real cth = std::cos(pphot->x2p[ip]);
+    Real rad = pphot->x1p[ip];
+    if (rad <= TINY_NUMBER) return;
+    Real zcoord[4], ztet[4];
+    zcoord[IMC0] = 0.0;
+    zcoord[IMC1] = cth;
+    zcoord[IMC2] = -sth/rad;
+    zcoord[IMC3] = 0.0;
+    CoordinateToTetrad(zcoord, ztet, ecov);
+    Real zmag = std::sqrt(SQR(ztet[IMC1]) + SQR(ztet[IMC2]) + SQR(ztet[IMC3]));
+    if (zmag <= TINY_NUMBER) return;
+    zref[0] = ztet[IMC1]/zmag;
+    zref[1] = ztet[IMC2]/zmag;
+    zref[2] = ztet[IMC3]/zmag;
+  }
+
   Real lhat[3], rhat[3];
-  if (!MeridianPair(n, lhat, rhat)) return;   // photon along the frame z axis
+  if (!MeridianPair(n, zref, lhat, rhat)) return;   // photon along the reference axis
 
   WriteMeridianStokes(pphot, ip, ecov, lhat, rhat);
 }
