@@ -15,6 +15,7 @@
 #include "montecarlo.hpp"
 #include "polarization.hpp"
 #include "tetrad.hpp"
+#include "photon_frames.hpp"
 #include "photon.hpp"
 #include "photonpusher.hpp"
 #include "../athena.hpp"
@@ -660,12 +661,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       // routines need the wavevector in cartesian components, and on a spherical grid
       // TransformToComoving/TransformToCoordinate are what supply that, by way of
       // ToScatteringBasis and FromScatteringBasis.  Both are skipped entirely when there
-      // is nothing to transform, which is the standing case for the legacy spherical
-      // pusher: it sets tetrads false, and boosts is false for a static medium.  The
-      // rotation then never happened and ScatterThomsonPolarized read the local
-      // orthonormal spherical components as if they were cartesian, taking e_phi as the
-      // polarization reference axis.  Supply the pair here in exactly that case, so that
-      // every other path keeps the sequence it already had.
+      // is nothing to transform.
       const bool comoving = (boosts || tetrads);
       if (comoving) {
         TransformToComoving(pphot,ip,ip);
@@ -2321,23 +2317,12 @@ void MonteCarloBlock::TransformToComoving(Photon *pphot, int ips, int ipe) {
 
   if (GENERAL_RELATIVITY) {
     for(int ip=ips; ip<=ipe; ip++) {
-      // Construct the tetrad
-      Real gcov[4][4];
-      Real x[4];
-      x[IMC0] = pphot->x0p[ip];
-      x[IMC1] = pphot->x1p[ip];
-      x[IMC2] = pphot->x2p[ip];
-      x[IMC3] = pphot->x3p[ip];
-      pcoord->Metric(x, gcov);
-
-      // Create tetrad basis on a four-velocity rebuilt here, so it is a unit timelike
-      // vector at the photon rather than at the cell center.  This is the inverse of
-      // TransformToCoordinate and the two are called around Scatter, which does not move
-      // the photon, so both see the same x and the round trip stays exact.
-      Real ucon[4];
-      FluidFourVelocity(x, pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip], ucon);
+      // The comoving frame at the photon, from the one definition shared with the
+      // polarized scattering basis.  This is the inverse of TransformToCoordinate and the
+      // two are called around Scatter, which does not move the photon, so both see the
+      // same x
       Real econ[4][4], ecov[4][4];
-      ConstructTetrad(ucon, gcov, econ, ecov);
+      ComovingFrame(this, pphot, ip, econ, ecov);
 
       Real k0init = pphot->k0p[ip];
       // Transform to comoving tetrad.  In GR the coordinate-frame spatial components are
@@ -2368,21 +2353,14 @@ void MonteCarloBlock::TransformToComoving(Photon *pphot, int ips, int ipe) {
       pphot->GetFourVector(ip, !pmy_mc->general_pusher_flag, kf);
 
       if (pmy_mc->general_pusher_flag) {
+        // One projection through the frame ComovingFrame defines, shared with
+        // MeridianBasis; it already carries the fluid velocity, so the boosts branch
+        // below is for the legacy pushers only.
+        Real econ[4][4], ecov[4][4];
+        ComovingFrame(this, pphot, ip, econ, ecov);
         for (int i=0; i<4; i++) ki[i] = kf[i];
-        Real x[4], invtet[4][4];
-        x[0] = pphot->x0p[ip];
-        x[1] = pphot->x1p[ip];
-        x[2] = pphot->x2p[ip];
-        x[3] = pphot->x3p[ip];
-        pcoord->InverseTetrad(x,invtet);
-        for (int j=0; j<4; j++) {
-          kf[j] = 0.;
-          for (int i=0; i<4; i++) {
-            kf[j] += invtet[j][i] * ki[i];
-          }
-        }
-      }
-      if (boosts) {
+        CoordinateToTetrad(ki, kf, ecov);
+      } else if (boosts) {
         for (int i=0; i<4; i++) ki[i] = kf[i];
         for (int j=0; j<4; j++) {
           kf[j] = 0.;
@@ -2419,21 +2397,9 @@ void MonteCarloBlock::TransformToCoordinate(Photon *pphot, int ips, int ipe) {
 
   if (GENERAL_RELATIVITY) {
     for(int ip=ips; ip<=ipe; ip++) {
-      Real gcov[4][4];
-      Real x[4];
-      x[IMC0] = pphot->x0p[ip];
-      x[IMC1] = pphot->x1p[ip];
-      x[IMC2] = pphot->x2p[ip];
-      x[IMC3] = pphot->x3p[ip];
-      pcoord->Metric(x, gcov);
-
-      // Create tetrad basis on a four-velocity rebuilt here, so it is a unit timelike
-      // vector at the photon rather than at the cell center.
-      Real ucon[4];
-      FluidFourVelocity(x, pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip], ucon);
-
+      // The same frame TransformToComoving projected into; see ComovingFrame.
       Real econ[4][4], ecov[4][4];
-      ConstructTetrad(ucon, gcov, econ, ecov);
+      ComovingFrame(this, pphot, ip, econ, ecov);
 
       // Transform out of the comoving tetrad.  Comoving stores a unit direction, the GR
       // coordinate frame stores dimensional components.
@@ -2466,27 +2432,19 @@ void MonteCarloBlock::TransformToCoordinate(Photon *pphot, int ips, int ipe) {
       Real ki[4], kf[4];
       pphot->GetFourVector(ip, true, kf);
 
-      if (boosts) {
+      if (pmy_mc->general_pusher_flag) {
+        // The exact inverse of the projection in TransformToComoving, through the same
+        // frame, so the round trip across a scattering closes.
+        Real econ[4][4], ecov[4][4];
+        ComovingFrame(this, pphot, ip, econ, ecov);
+        for (int i=0; i<4; i++) ki[i] = kf[i];
+        TetradToCoordinate(ki, kf, econ);
+      } else if (boosts) {
         for (int i=0; i<4; i++) ki[i] = kf[i];
         for (int j=0; j<4; j++) {
           kf[j] = 0.;
           for (int i=0; i<4; i++) {
             kf[j] += boost_lab(i3,i2,i1,j,i) * ki[i];
-          }
-        }
-      }
-      if (pmy_mc->general_pusher_flag) {
-        for (int i=0; i<4; i++) ki[i] = kf[i];
-        Real x[4], tetrad[4][4];
-        x[0] = pphot->x0p[ip];
-        x[1] = pphot->x1p[ip];
-        x[2] = pphot->x2p[ip];
-        x[3] = pphot->x3p[ip];
-        pcoord->Tetrad(x,tetrad);
-        for (int j=0; j<4; j++) {
-          kf[j] = 0.;
-          for (int i=0; i<4; i++) {
-            kf[j] += tetrad[j][i] * ki[i];
           }
         }
       }

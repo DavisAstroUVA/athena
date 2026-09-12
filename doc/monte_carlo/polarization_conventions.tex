@@ -95,10 +95,20 @@ orthonormality and handedness it draws.}
 \label{fig:meridian}
 \end{figure}
 
-If $\nhat$ is parallel to $\zref$ the meridian is undefined. \texttt{MeridianPair} returns
-false, and the caller returns \emph{without updating}: the Stokes parameters silently retain
-whatever values they already held rather than being zeroed. This is worth remembering when
-reading photons that emerge close to the reference axis.
+If $\nhat$ is parallel to $\zref$ the meridian is undefined, and \texttt{MeridianPair}
+returns a deterministic pair instead: the limit of Eq.~\eqref{eq:meridian} approached along
+the $\phi = 0$ meridian, $\lhat \to -\mathrm{sign}(\zref\cdot\nhat)\,\hat{x}$ with $\hat{x}$
+the frame's first leg, which is also the convention \texttt{ScatterThomsonPolarized} falls
+back to when its own azimuth is undefined. Any fixed choice would do, since $Q$ and $U$
+along the axis are only defined up to that choice; a choice is needed because the
+scattering routines read and write Stokes parameters against the pair on both sides of a
+scatter. Until this was in place \texttt{MeridianPair} refused, its callers returned without
+updating, and a photon scattered exactly along the axis left the scatter carrying its
+\emph{pre-scatter} coherency tensor. That is not a corner case: a right-angle Thomson scatter
+of any ray lying in a meridional plane sends the photon exactly along $\hat{e}_\phi$, the
+comoving frame's third leg. It went unnoticed because for a static medium the stale tensor
+happens to project onto the new transverse plane as a pure state, so the degree of
+polarization still read one; a boost broke that accident and exposed it.
 
 \section{Which axis is the reference}
 
@@ -185,6 +195,21 @@ convention --- the comoving frame and that frame's own third leg --- because
 \texttt{ScatterThomsonPolarized} reads the reference off the stored components directly. The
 two are deliberately separate, and \texttt{MeridianBasis} passes $(0,0,1)$ explicitly for
 that reason.
+
+The comoving frame itself has a single definition, \texttt{ComovingFrame}, used both by the
+transport that projects the wavevector into it and by \texttt{MeridianBasis} that references
+$Q$ and $U$ within it. It is grown by Gram--Schmidt from the fluid four-velocity against the
+coordinate metric, in flat spacetime exactly as in a curved one, so that spherical polar with
+the general pusher is a faithful proxy for the relativistic charts. The two consumers used to
+build it independently, the transport as a pure boost of the static legs and the scattering
+basis from \texttt{vel} read as though it were a coordinate four-velocity, and they agreed
+only for a fluid at rest or drifting radially. For a drift along $\hat{e}_\theta$ the tensor
+left a scatter transverse to the wrong wavevector, with a transversality residual of order
+one, while the degree of polarization still read one: a fully polarized tensor is rank one and
+projects onto \emph{any} two-plane as a pure state. The regression test therefore gates on
+transversality rather than on the degree of polarization. For a flow that is not along a
+coordinate axis the Gram--Schmidt legs differ from a pure boost's by a spatial rotation; both
+are valid comoving frames, and what matters is that every consumer uses the same one.
 
 \section{Angle binning}
 

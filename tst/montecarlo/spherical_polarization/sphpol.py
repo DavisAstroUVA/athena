@@ -17,13 +17,23 @@ mc_sphpol.  Two independent things are measured, selected by problem/scatopac.
     a quantity that genuinely varies and would report order 0.
 
     alpha and chi choose which connection components the ray exercises: chi = 0 sweeps
-    theta, chi = 90 sweeps phi, and alpha = 0 is a purely radial ray.  All three must read
-    order 2.  In particular the radial ray is *not* an exact-zero control -- unlike
-    snake_a = 0, which degenerates to cartesian Minkowski where the connection vanishes
-    identically.  Along a radial ray the orthonormal legs do not rotate, but
-    Gamma^theta_(r theta) = Gamma^phi_(r phi) = 1/r still act on the coordinate components
-    through the scale factors.  It is checked at order 2 rather than against zero so that
-    anyone who later "fixes" it to zero finds out here that the expectation was wrong.
+    theta, chi = 90 sweeps phi, and alpha = 0 is a purely radial ray.  A fourth, generic
+    ray leaves the equatorial plane while sweeping in azimuth, so both angles change along
+    it.  All four must read order 2.  In particular the radial ray is *not* an exact-zero
+    control -- unlike snake_a = 0, which degenerates to cartesian Minkowski where the
+    connection vanishes identically.  Along a radial ray the orthonormal legs do not
+    rotate, but Gamma^theta_(r theta) = Gamma^phi_(r phi) = 1/r still act on the
+    coordinate components through the scale factors.  It is checked at order 2 rather
+    than against zero so that anyone who later "fixes" it to zero finds out here that the
+    expectation was wrong.
+
+    The generic ray earns its place.  The first three all lie in a symmetry plane, and for
+    those the problem generator's own emission tetrad happens to share its transverse pair
+    with the framework's meridian pair, so handing Stokes parameters across unchanged was
+    right by accident.  For a general ray the two pairs differ by a rotation and the
+    residual sat at 0.15, frozen under refinement, until the handover was made to rotate
+    the linear part explicitly.  Circular polarization, invariant under that rotation,
+    was what separated a test defect from a transport defect: it read 2e-6 throughout.
 
   POLDEG (scatopac > 0)
 
@@ -35,17 +45,39 @@ mc_sphpol.  Two independent things are measured, selected by problem/scatopac.
 
     That single number covers the whole chain the scatter sits inside: coordinate to
     comoving, the meridian basis built in the comoving frame, tensor to Stokes and back,
-    and comoving to coordinate.  An error in any of them shows up as a degree of
-    polarization that is not 1.  Two regimes are distinguished by refinement: at zero
-    velocity the residual converges at second order and is transport truncation; at
-    non-zero velocity it is frozen under refinement and is a genuine error in the
-    comoving round trip.  As of this writing the velocity cases fail, and are meant to
-    stay red until that is fixed -- they used to read 1e-9 only because an unpaired
-    basis rotation made P degenerate, which is why a check that beats the integrator's
-    own truncation should be distrusted rather than celebrated.
+    and comoving to coordinate.  At zero velocity its residual is second-order
+    transport truncation; anything frozen under refinement is an error.  Two geometries
+    are run.  For a ray in a meridional plane the right-angle outgoing direction is
+    exactly the frame's third leg, where the meridian is undefined; MeridianPair used to
+    refuse there and the photon left the scatter with its pre-scatter tensor.  At rest
+    that stale tensor happens to project onto the new transverse plane as a pure state,
+    so P still read 1, and a boost was what exposed it.  The row is kept as the regression
+    for that fix.  The generic geometry has every symmetry broken.
 
     What POLDEG cannot see is a wrong choice of reference axes: the degree of
-    polarization is invariant under rotating them.  The next two checks cover that.
+    polarization is invariant under rotating them.  The remaining checks cover that.
+
+  SCATRESID (scatopac > 0, static fluid)
+
+    The orientation of the scattered polarization at escape.  The scatter's emergent
+    polarization is perpendicular to the scattering plane, a direction the problem
+    generator knows in closed form; in flat spacetime it is constant along the outgoing
+    ray, so the escaping Q and U against the global z axis follow from it exactly, up to
+    the outgoing leg's transport truncation.  Reported for a static fluid only, where the
+    comoving legs at the scatter are the local spherical ones.
+
+  TRANSV (every run)
+
+    The transversality of the escaping coherency tensor against its own wavevector,
+    |N.k| / (|N||k|) in the normal observer's frame, gated once over every run.  This is
+    the check that sees a frame inconsistency, which POLDEG cannot: a fully polarized
+    tensor is rank one and projects onto any two-plane as a pure state, so P reads 1
+    even when the wavevector and the Stokes parameters were referenced to different
+    comoving frames.  The polar and azimuthal drift rows are where that happened -- the
+    transport built the comoving frame as a boost of the static legs, the scattering
+    basis grew it by Gram-Schmidt from vel read as if it were a coordinate four-velocity,
+    and the two coincide only for a fluid at rest or drifting radially.  With a polar
+    drift TRANSV was 1.06 while every POLDEG row passed.
 
   REFRESID (scatopac = 0, generic geometry)
 
@@ -100,6 +132,26 @@ POLDEG_TOL = 1.0e-4
 # rather than a physics one.
 REFRESID_TOL = 1.0e-12
 
+# Ceiling on the orientation residual of the scattered polarization at escape.  Unlike
+# REFRESID this crosses the transport after the scatter, so it carries that leg's
+# second-order truncation, of the same size as the zero-velocity POLDEG residual.
+SCATRESID_TOL = 1.0e-4
+
+# Velocity of the non-radial drift rows.  Large enough that a rotation between two
+# candidate comoving frames is an O(1) effect on P, small enough to stay well inside
+# the deck's tmax and capmove.
+NONRADIAL_BETA = 0.3
+
+# Ceiling on TRANSV, the transversality residual |N.k| / (|N| |k|) of the escaping
+# coherency tensor against its own wavevector, in the normal observer's frame.  Zero for
+# any tensor consistent with its wavevector, about 1e-7 of transport truncation here, and
+# order one when the wavevector and the Stokes parameters were referenced to different
+# comoving frames -- which is exactly what the degree of polarization cannot see, since a
+# fully polarized tensor projected onto any two-plane is still rank one and reads P = 1.
+# Collected from every run the driver makes and gated once.
+TRANSV_TOL = 1.0e-4
+TRANSV_SEEN = []
+
 # Emission point and mesh.  The launch radius sits well inside the outer boundary so the
 # ray has room to sweep, and well away from the axis so the meridian basis is comfortable.
 R0 = 10.0
@@ -108,7 +160,7 @@ PI = math.pi
 
 
 def write_athinput(path, stepsize, alpha, chi, scatopac=0.0, velocity=0.0, polcirc=0.0,
-                   th0=90.0, ph0=0.0, polang=0.0, nx1=32, nx2=16, nx3=16):
+                   th0=90.0, ph0=0.0, polang=0.0, veldir=1, nx1=32, nx2=16, nx3=16):
     """Write one deck.  Mirrors athinput.sphpol."""
     polarized = "circular" if polcirc != 0.0 else "linear"
     scattering = "user" if scatopac > 0.0 else "none"
@@ -150,6 +202,7 @@ def write_athinput(path, stepsize, alpha, chi, scatopac=0.0, velocity=0.0, polci
          "polang = {0!r}".format(polang), "polcirc = {0!r}".format(polcirc),
          "scatopac = {0!r}".format(scatopac),
          "velocity = {0!r}".format(velocity),
+         "veldir = {0:d}".format(veldir),
          "rho_cgs = 1.0", "tgas_cgs = 1.0e6",
          "vel_cgs = 29979245800.0", "l_cgs = 1.0", ""]
     open(path, "w").write("\n".join(o))
@@ -167,10 +220,15 @@ def run(athena, workdir, tag, **kwargs):
         return None, None, None, out
     mres = re.search(r"POLRESID\s+(\S+)", out)
     mdeg = re.search(r"POLDEG\s+(\S+)\s+nscat\s+(\d+)", out)
+    msc = re.search(r"SCATRESID\s+(\S+)", out)
+    mtr = re.search(r"TRANSV\s+(\S+)", out)
     res = float(mres.group(1)) if mres else None
     deg = float(mdeg.group(1)) if mdeg else None
     nsc = int(mdeg.group(2)) if mdeg else None
-    return res, deg, nsc, out
+    scat = float(msc.group(1)) if msc else None
+    if mtr:
+        TRANSV_SEEN.append((tag, float(mtr.group(1))))
+    return res, deg, nsc, out, scat
 
 
 def run_refresid(athena, workdir, **kwargs):
@@ -188,6 +246,9 @@ def run_refresid(athena, workdir, **kwargs):
         return None, None, out
     m = re.search(r"REFRESID\s+(\S+)", out)
     mk = re.search(r"KCART\s+(\S+)\s+(\S+)\s+(\S+)", out)
+    mtr = re.search(r"TRANSV\s+(\S+)", out)
+    if mtr:
+        TRANSV_SEEN.append(("refresid", float(mtr.group(1))))
     kcart = tuple(float(mk.group(i)) for i in (1, 2, 3)) if mk else None
     return (float(m.group(1)) if m else None), kcart, out
 
@@ -211,12 +272,13 @@ def list_wavevector(workdir):
     return None, header.get("basis")
 
 
-def measure_order(athena, workdir, alpha, chi, step0, nstep, refine):
+def measure_order(athena, workdir, alpha, chi, step0, nstep, refine, th0=90.0, ph0=0.0):
     """Residuals over a step refinement, and the order between successive pairs."""
     steps = [step0 / float(refine)**i for i in range(nstep)]
     res = []
     for st in steps:
-        r, _, _, out = run(athena, workdir, "order", stepsize=st, alpha=alpha, chi=chi)
+        r, _, _, out, _ = run(athena, workdir, "order", stepsize=st, alpha=alpha, chi=chi,
+                              th0=th0, ph0=ph0)
         if r is None:
             raise RuntimeError("mc_sphpol failed at stepsize {0!r}:\n{1}".format(st, out))
         res.append(r)
@@ -242,14 +304,20 @@ def main(**kwargs):
     results = []          # (label, measured, expected-text, ok)
 
     # --- transport order, for each family of connection components
-    rays = (("theta sweep", kwargs["alpha"], 0.0),
-            ("phi sweep", kwargs["alpha"], 90.0),
-            ("radial", 0.0, 0.0))
-    for name, alpha, chi in rays:
+    # The fourth family is the one the first three never reach: a ray that leaves the
+    # equatorial plane while also sweeping in azimuth, so both angles change along it.
+    # The emission handover's basis assumption was only right for the first three, and
+    # this ray is what caught it.
+    rays = (("theta sweep", kwargs["alpha"], 0.0, 90.0, 0.0),
+            ("phi sweep", kwargs["alpha"], 90.0, 90.0, 0.0),
+            ("radial", 0.0, 0.0, 90.0, 0.0),
+            ("generic", 35.0, 63.0, 57.0, 40.0))
+    for name, alpha, chi, th0, ph0 in rays:
         steps, res, orders = measure_order(athena, workdir, alpha, chi,
                                            kwargs["step0"], kwargs["nstep"],
-                                           kwargs["refine"])
-        print("\ntransport, {0} (alpha = {1!r}, chi = {2!r})".format(name, alpha, chi))
+                                           kwargs["refine"], th0=th0, ph0=ph0)
+        print("\ntransport, {0} (alpha = {1!r}, chi = {2!r}, th0 = {3!r}, ph0 = {4!r})"
+              .format(name, alpha, chi, th0, ph0))
         print("  stepsize      POLRESID      order")
         for i, st in enumerate(steps):
             o = "    -" if i == 0 or orders[i - 1] is None \
@@ -321,25 +389,76 @@ def main(**kwargs):
                     "<{0:.0e}".format(REFRESID_TOL), okk))
 
     # --- the comoving round trip at a scattering, over a range of fluid velocities
-    print("\nscattering, degree of polarization at escape")
-    print("  velocity       POLDEG       |P-1|   nscat")
-    for beta in kwargs["beta"]:
-        _, deg, nsc, out = run(athena, workdir, "scat",
-                               stepsize=kwargs["step0"], alpha=kwargs["alpha"], chi=0.0,
-                               scatopac=kwargs["scatopac"], velocity=beta)
-        if deg is None:
-            print("  {0:<8} run produced no POLDEG".format(beta))
-            results.append(("poldeg beta = {0!r}".format(beta), "-",
-                            "<{0:.0e}".format(POLDEG_TOL), False))
-            continue
-        err = abs(deg - 1.0)
-        print("  {0:<8}   {1:.10f}   {2:.3e}   {3:d}".format(beta, deg, err, nsc))
-        # Exactly one scatter is part of the claim: the right-angle result is only
-        # parameter-free for a single scatter, so a second one would invalidate it
-        # silently rather than loudly.
-        ok = err < POLDEG_TOL and nsc == 1
-        results.append(("poldeg beta = {0!r}".format(beta),
-                        "{0:.2e}".format(err), "<{0:.0e}".format(POLDEG_TOL), ok))
+    # Two geometries.  "meridional" is a ray with no azimuthal component, whose right-angle
+    # outgoing direction is exactly the frame's third leg, where the meridian is undefined;
+    # it is kept as the regression for the stale-tensor failure that used to live there.
+    # "generic" has every symmetry broken.  SCATRESID is the orientation of the emergent
+    # polarization against the closed-form prediction, which the degree of polarization is
+    # blind to; the problem generator reports it for a static fluid only.
+    print("\nscattering, degree of polarization at escape, and orientation at rest")
+    print("  geometry     velocity       POLDEG       |P-1|   nscat   SCATRESID")
+    geoms = (("meridional", 30.0, 0.0, 90.0, 0.0),
+             ("generic", 35.0, 63.0, 57.0, 40.0))
+    for gname, alpha, chi, th0, ph0 in geoms:
+        for beta in kwargs["beta"]:
+            _, deg, nsc, out, scat = run(athena, workdir, "scat",
+                                         stepsize=kwargs["step0"], alpha=alpha, chi=chi,
+                                         th0=th0, ph0=ph0,
+                                         scatopac=kwargs["scatopac"], velocity=beta)
+            label = "poldeg {0} beta = {1!r}".format(gname, beta)
+            if deg is None:
+                print("  {0:<11}  {1:<8} run produced no POLDEG".format(gname, beta))
+                results.append((label, "-", "<{0:.0e}".format(POLDEG_TOL), False))
+                continue
+            err = abs(deg - 1.0)
+            stxt = "{0:.3e}".format(scat) if scat is not None else "-"
+            print("  {0:<11}  {1:<8}   {2:.10f}   {3:.3e}   {4:d}     {5}".format(
+                gname, beta, deg, err, nsc, stxt))
+            # Exactly one scatter is part of the claim: the right-angle result is only
+            # parameter-free for a single scatter, so a second one would invalidate it
+            # silently rather than loudly.
+            ok = err < POLDEG_TOL and nsc == 1
+            results.append((label, "{0:.2e}".format(err), "<{0:.0e}".format(POLDEG_TOL), ok))
+            if beta == 0.0:
+                oks = scat is not None and scat < SCATRESID_TOL
+                results.append(("scatter orientation {0}".format(gname),
+                                "{0:.1e}".format(scat) if scat is not None else "-",
+                                "<{0:.0e}".format(SCATRESID_TOL), oks))
+
+    # A drift along e_theta or e_phi.  A radial drift boosts the local legs without
+    # rotating them, so a comoving frame built by Gram-Schmidt from the four-velocity and
+    # one built as a pure boost of the static legs coincide, and every radial row above
+    # would pass with the wavevector in one and the Stokes parameters in the other.  For
+    # these two drifts the frames differ by a rotation, and only a single shared
+    # definition of the comoving frame keeps the pair consistent.
+    print("\nscattering, non-radial drift at beta = {0!r}".format(NONRADIAL_BETA))
+    print("  geometry     drift       POLDEG       |P-1|   nscat")
+    for gname, alpha, chi, th0, ph0 in geoms:
+        for dname, vd in (("theta", 2), ("phi", 3)):
+            _, deg, nsc, out, _ = run(athena, workdir, "scatv",
+                                      stepsize=kwargs["step0"], alpha=alpha, chi=chi,
+                                      th0=th0, ph0=ph0, scatopac=kwargs["scatopac"],
+                                      velocity=NONRADIAL_BETA, veldir=vd)
+            label = "poldeg {0} drift {1}".format(gname, dname)
+            if deg is None:
+                print("  {0:<11}  {1:<8} run produced no POLDEG".format(gname, dname))
+                results.append((label, "-", "<{0:.0e}".format(POLDEG_TOL), False))
+                continue
+            err = abs(deg - 1.0)
+            print("  {0:<11}  {1:<8}   {2:.10f}   {3:.3e}   {4:d}".format(
+                gname, dname, deg, err, nsc))
+            results.append((label, "{0:.2e}".format(err), "<{0:.0e}".format(POLDEG_TOL),
+                            err < POLDEG_TOL and nsc == 1))
+
+    # --- transversality, over every run above
+    if TRANSV_SEEN:
+        worst_tag, worst = max(TRANSV_SEEN, key=lambda r: r[1])
+        print("\ntransversality |N.k|/(|N||k|) at escape: worst {0:.3e} in a '{1}' run, "
+              "over {2:d} runs".format(worst, worst_tag, len(TRANSV_SEEN)))
+        results.append(("transversality, all runs", "{0:.1e}".format(worst),
+                        "<{0:.0e}".format(TRANSV_TOL), worst < TRANSV_TOL))
+    else:
+        results.append(("transversality, all runs", "-", "<{0:.0e}".format(TRANSV_TOL), False))
 
     print("\n" + "-" * 66)
     print("{0:<34} {1:>12} {2:>8}   {3}".format("check", "measured", "expect", "result"))

@@ -26,6 +26,19 @@
 class MonteCarloBlock;
 class Photon;
 
+//----------------------------------------------------------------------------------------
+//! \brief the comoving orthonormal frame at a photon: the one definition
+//!
+//! Used in TransformToComoving/TransformToCoordinate to tranform photon to/from the
+//! scattering basis. Built by Gram-Schmidt from the fluid four-velocity against the
+//! coordinate metric. In GR the four-velocity comes from FluidFourVelocity, in
+//! flat spacetime it is vel carried onto coordinate components by the static tetrad. 
+//!
+//! econ and ecov are indexed [tetrad leg][coordinate component], for CoordinateToTetrad,
+//! TetradToCoordinate, PolarizationToTetrad and PolarizationToCoord.
+void ComovingFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
+                   Real econ[4][4], Real ecov[4][4]);
+
 //! \brief the frames radiation moments can be reported in.
 //!
 //! MCFRAME_LAB and MCFRAME_COMOVING are orthonormal: in general relativity they are the

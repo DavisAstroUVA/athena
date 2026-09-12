@@ -81,6 +81,14 @@ namespace {
   Real scatopac = 0.0;
   Real vel_beta = 0.0;
 
+  // The physical polarization direction the scatter produced, on the global cartesian
+  // legs, for the orientation check at escape.  Only meaningful for a static fluid, where
+  // the comoving legs at the scatter are the local spherical ones and the conversion to
+  // the global frame is the plain rotation; with a boost the polarization four-vector
+  // picks up a wavevector component under the transformation and this shortcut is wrong.
+  Real pscat[3] = {0.0, 0.0, 0.0};
+  bool pscat_set = false;
+
   void PolarizationInFlatFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
                                std::complex<Real> nflat[4][4]);
   void DirectionInFlatFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip, Real nhat[3]);
@@ -109,6 +117,14 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   // unambiguous in this chart, so the comoving frame is a pure boost of the local
   // orthonormal legs with no extra rotation to disentangle.
   Real beta = pin->GetOrAddReal("problem", "velocity", 0.0);
+  int veldir = pin->GetOrAddInteger("problem", "veldir", 1);
+  if (veldir < 1 || veldir > 3) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in mc_sphpol" << std::endl
+        << "veldir must be 1 (radial), 2 (polar) or 3 (azimuthal), got " << veldir
+        << std::endl;
+    ATHENA_ERROR(msg);
+  }
   if (std::fabs(beta) >= 1.0) {
     std::stringstream msg;
     msg << "### FATAL ERROR in mc_sphpol ProblemGenerator" << std::endl
@@ -122,9 +138,14 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
       for (int i = is; i <= ie; ++i) {
         phydro->w(IDN, k, j, i) = phydro->w1(IDN, k, j, i) = rho0;
         phydro->w(IPR, k, j, i) = phydro->w1(IPR, k, j, i) = pgas0;
-        phydro->w(IVX, k, j, i) = phydro->w1(IVX, k, j, i) = beta;
-        phydro->w(IVY, k, j, i) = phydro->w1(IVY, k, j, i) = 0.0;
-        phydro->w(IVZ, k, j, i) = phydro->w1(IVZ, k, j, i) = 0.0;
+        // veldir picks the leg the drift is along: 1 = e_r, 2 = e_theta, 3 = e_phi, in
+        // the physical components Athena++ stores.  A radial drift boosts the local
+        // legs without rotating them, which is why it was the only case for a long time;
+        // the other two are what tell a comoving frame built by Gram-Schmidt from one
+        // built as a pure boost apart, since the two then differ by a rotation.
+        phydro->w(IVX, k, j, i) = phydro->w1(IVX, k, j, i) = (veldir == 1) ? beta : 0.0;
+        phydro->w(IVY, k, j, i) = phydro->w1(IVY, k, j, i) = (veldir == 2) ? beta : 0.0;
+        phydro->w(IVZ, k, j, i) = phydro->w1(IVZ, k, j, i) = (veldir == 3) ? beta : 0.0;
       }
     }
   }
@@ -307,14 +328,45 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
     // Hand the photon over in the frame the emission path expects: k as a unit direction
     // on the comoving legs, polarization as Stokes parameters referenced to the meridian
     // basis.  TransferPhotonsOnBlock inverts both.
+    //
+    // "The meridian basis" is the framework's, not this generator's.  The tensor above was
+    // seeded against a tetrad of our own, with e_(1) grown from -e_theta, and the Stokes
+    // parameters are read back by ScatteringStokesToCoherency against the pair
+    // MeridianPair builds from k and the frame's third leg.  Those two transverse pairs
+    // agree only for special rays -- the meridional and equatorial ones the driver used to
+    // run exclusively -- and for a general ray they differ by a rotation, so handing over
+    // (Q, U) unchanged put an O(1) error into POLRESID that no refinement removed.  Rotate
+    // the linear part by the angle between the two pairs instead; V is invariant.
     pphot->k0p[ip] = en0;
     pphot->k1p[ip] = nr;
     pphot->k2p[ip] = nth;
     pphot->k3p[ip] = nph;
 
+    Real qh = stokes[1], uh = stokes[2];
+    if (qh != 0.0 || uh != 0.0) {
+      // our e_(1), e_(2) on the local orthonormal legs: coordinate components times the
+      // scale factors, i.e. what InverseTetrad would return
+      Real e1[3] = {econ[IMC1][IMC1], econ[IMC1][IMC2]*r0, econ[IMC1][IMC3]*r0*sth};
+      Real e2[3] = {econ[IMC2][IMC1], econ[IMC2][IMC2]*r0, econ[IMC2][IMC3]*r0*sth};
+      Real n3[3] = {nr, nth, nph};
+      const Real zleg[3] = {0.0, 0.0, 1.0};
+      Real lh[3], rh[3];
+      MeridianPair(n3, zleg, lh, rh);
+      // angle of the framework's l measured from our e_(1) toward e_(2), and the sense in
+      // which (e_(1), e_(2)) turns about k relative to (l, r)
+      Real cd = lh[0]*e1[0] + lh[1]*e1[1] + lh[2]*e1[2];
+      Real sd = lh[0]*e2[0] + lh[1]*e2[1] + lh[2]*e2[2];
+      Real hand = (e1[1]*e2[2] - e1[2]*e2[1])*n3[0] + (e1[2]*e2[0] - e1[0]*e2[2])*n3[1]
+                + (e1[0]*e2[1] - e1[1]*e2[0])*n3[2];
+      Real delta = std::atan2(sd, cd);
+      Real psi = 0.5*std::atan2(uh, qh) - delta;
+      Real plin = std::sqrt(SQR(qh) + SQR(uh));
+      qh = plin*std::cos(2.0*psi);
+      uh = plin*std::sin(2.0*psi)*((hand < 0.0) ? -1.0 : 1.0);
+    }
     pphot->sip[ip] = stokes[0];
-    pphot->sqp[ip] = stokes[1];
-    pphot->sup[ip] = stokes[2];
+    pphot->sqp[ip] = qh;
+    pphot->sup[ip] = uh;
     pphot->svp[ip] = stokes[3];
 
     pphot->acp[ip] = AbsorptionOpacity(this, pphot, ip);
@@ -330,6 +382,39 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
 
 void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip) {
 
+  // Two invariants reported in both modes, to localize a failure rather than just detect
+  // it.  TRANSV is the transversality residual max_a |N^{ab} k_b| / (|N| |k|) in the
+  // normal observer's frame: a coherency tensor consistent with its own wavevector has
+  // N^{ab} k_b = 0 exactly, so a non-zero value means the tensor and the stored k have
+  // come apart somewhere in the transport or the round trip, independent of any choice
+  // of reference axes.  POLDEGT is the degree of polarization in transport mode, where
+  // the photon is emitted fully polarized and never scatters, so it must be 1 at escape;
+  // if it is not, the emission handover alone is at fault and the scatter is innocent.
+  {
+    Real econ[4][4], ecov[4][4], ktet[4];
+    if (NormalFrameWavevector(this, pphot, ip, econ, ecov, ktet)) {
+      std::complex<Real> ntet[4][4];
+      pphot->PolarizationToTetrad(ntet, ecov, ip);
+      const Real eta[4] = {-1.0, 1.0, 1.0, 1.0};
+      Real res = 0.0, nrm = 0.0;
+      for (int a = 0; a < 4; ++a) {
+        std::complex<Real> s(0.0, 0.0);
+        for (int b = 0; b < 4; ++b) {
+          s += ntet[a][b]*eta[b]*ktet[b];
+          nrm = std::max(nrm, std::abs(ntet[a][b]));
+        }
+        res = std::max(res, std::abs(s));
+      }
+      Real kmag = std::sqrt(SQR(ktet[IMC1]) + SQR(ktet[IMC2]) + SQR(ktet[IMC3]));
+      printf("TRANSV %.10e\n", (nrm > 0.0 && kmag > 0.0) ? res/(nrm*kmag) : 0.0);
+    }
+    if (scatopac <= 0.0 && std::fabs(pphot->sip[ip]) > 0.0) {
+      Real pdeg = std::sqrt(SQR(pphot->sqp[ip]) + SQR(pphot->sup[ip]) + SQR(pphot->svp[ip]))
+                  / std::fabs(pphot->sip[ip]);
+      printf("POLDEGT %.10e\n", pdeg);
+    }
+  }
+
   if (scatopac > 0.0) {
     // Scattering mode.  An unpolarized photon Thomson-scattered through a right angle is
     // fully linearly polarized perpendicular to the scattering plane, so the degree of
@@ -344,6 +429,27 @@ void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip) {
       Real pdeg = std::sqrt(SQR(pphot->sqp[ip]) + SQR(pphot->sup[ip]) + SQR(pphot->svp[ip]))
                   / std::fabs(pphot->sip[ip]);
       printf("POLDEG %.10e nscat %d\n", pdeg, pphot->nscp[ip]);
+
+      // Orientation, which the degree of polarization cannot see.  In flat spacetime the
+      // polarization direction the scatter produced is constant along the outgoing ray,
+      // so the escaping Q and U, referenced to the global z axis and the escape
+      // direction, follow from it in closed form.  Static fluid only; see pscat.
+      if (pscat_set && vel_beta == 0.0) {
+        Real nhat[3];
+        DirectionInFlatFrame(this, pphot, ip, nhat);
+        const Real zref[3] = {0.0, 0.0, 1.0};
+        Real lhat[3], rhat[3];
+        if (MeridianPair(nhat, zref, lhat, rhat)) {
+          Real pl = pscat[0]*lhat[0] + pscat[1]*lhat[1] + pscat[2]*lhat[2];
+          Real pr = pscat[0]*rhat[0] + pscat[1]*rhat[1] + pscat[2]*rhat[2];
+          Real qref = pl*pl - pr*pr, uref = 2.0*pl*pr;
+          Real inorm = pphot->sip[ip];
+          Real dq = std::fabs(pphot->sqp[ip]/inorm - qref);
+          Real du = std::fabs(pphot->sup[ip]/inorm - uref);
+          printf("SCATRESID %.10e qcode %.10e qref %.10e ucode %.10e uref %.10e\n",
+                 std::max(dq, du), pphot->sqp[ip]/inorm, qref, pphot->sup[ip]/inorm, uref);
+        }
+      }
     }
     return;
   }
@@ -563,10 +669,39 @@ void ThomsonRightAngle(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe) {
     pphot->k2p[ip] = l[1];
     pphot->k3p[ip] = l[2];
 
+    // The emergent polarization of an unpolarized beam is perpendicular to the scattering
+    // plane, p = normalize(n x l).  Express it against the pair the framework will read
+    // the Stokes parameters back with, MeridianPair at the outgoing direction.  For a
+    // generic ray that pair's r is p itself and this reduces to Q = -1; for a ray in a
+    // meridional plane the outgoing direction is exactly the frame's z axis, the meridian
+    // is undefined, and the framework's fallback pair is not aligned with the scattering
+    // plane, so the hard-coded Q = -1 used to describe the wrong state there.  Projecting
+    // p is right in both cases.
+    Real p[3] = {n[1]*l[2] - n[2]*l[1], n[2]*l[0] - n[0]*l[2], n[0]*l[1] - n[1]*l[0]};
+    Real pmag = std::sqrt(SQR(p[0]) + SQR(p[1]) + SQR(p[2]));
+    for (int i = 0; i < 3; ++i) p[i] /= pmag;
+    const Real zleg[3] = {0.0, 0.0, 1.0};
+    Real lo[3], ro[3];
+    MeridianPair(l, zleg, lo, ro);
+    Real pl = p[0]*lo[0] + p[1]*lo[1] + p[2]*lo[2];
+    Real pr = p[0]*ro[0] + p[1]*ro[1] + p[2]*ro[2];
+
     pphot->sip[ip] = 1.0;
-    pphot->sqp[ip] = -1.0;
-    pphot->sup[ip] = 0.0;
+    pphot->sqp[ip] = pl*pl - pr*pr;
+    pphot->sup[ip] = 2.0*pl*pr;
     pphot->svp[ip] = 0.0;
+
+    // For a static fluid the comoving legs here are the local spherical ones, so p on
+    // the global cartesian legs is the plain rotation; FinalizePhoton holds the escaping
+    // Stokes parameters against it.
+    if (vel_beta == 0.0) {
+      Real cth = std::cos(pphot->x2p[ip]), sth = std::sin(pphot->x2p[ip]);
+      Real cph = std::cos(pphot->x3p[ip]), sph = std::sin(pphot->x3p[ip]);
+      pscat[0] = p[0]*sth*cph + p[1]*cth*cph - p[2]*sph;
+      pscat[1] = p[0]*sth*sph + p[1]*cth*sph + p[2]*cph;
+      pscat[2] = p[0]*cth     - p[1]*sth;
+      pscat_set = true;
+    }
 
     // belt and braces alongside OneScatterOpacity, so a stale scp cannot buy a second
     // scatter before the opacities are next refreshed
