@@ -2397,8 +2397,11 @@ void MonteCarloBlock::TransformToComoving(Photon *pphot, int ips, int ipe) {
       // comoving frame always keeps a unit propagation direction
       pphot->SetFourVector(ip, true, kf);
 
-      // Into the basis the polarized scattering routines assume; see polarization.hpp
-      if (IsPolarized(pmy_mc->polarized)) ToScatteringBasis(this, pphot, ip);
+      // Into the basis the polarized scattering routines assume; see polarization.hpp.
+      // Legacy pushers only.
+      if (!pmy_mc->general_pusher_flag && IsPolarized(pmy_mc->polarized))
+        ToScatteringBasis(this, pphot, ip);
+  
       pphot->acp[ip] /= nufact;
       pphot->scp[ip] /= nufact;
 

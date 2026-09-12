@@ -215,20 +215,38 @@ co-add them when both do. And \texttt{make\_spectrum} accumulates the stored $Q$
 verbatim --- it does not reconstruct the meridian --- so it inherits whatever referencing the
 run used.
 
-\section{A known inconsistency}
+The internal \texttt{spec} output is available in curved metrics as well. It used to be
+refused there because its angle binning divided out the flat scale factors by hand, which in
+Kerr-Schild put the direction off by some twenty degrees at $r = 6M$ and silently dropped
+photons below $\mu \approx 0.35$ as ingoing. It now projects the wavevector through the
+normal observer's tetrad, the same frame Sec.~1 describes and the same one the photon list
+writes, then rotates onto the global cartesian legs as the list does. Spectrum and list
+therefore bin every photon to the same $\mu$ by construction; on a Kerr-Schild shell at
+$r = 6M$ the two agree to round-off. What ``global $z$'' means in a curved metric is a
+convention shared between them: the normal observer's third leg rotated by the flat
+$R(\theta,\phi)$, which is the global axis exactly in a flat chart and its natural
+observer's-eye analogue otherwise.
 
-In spherical polar, the photon list writes $k$ in \emph{tetrad} components while $Q$ and $U$
-are referenced to the global $z$ axis. These are different bases, which contradicts the
-comment in \texttt{PhotonList::AddPhoton} that the wavevector ``goes out in the same normal
-frame the Stokes parameters are referenced to'', and the statement in
-\texttt{NormalFrameWavevector} that a reader can rebuild the meridian basis from the stored
-components alone by taking the third spatial leg as $(0,0,1)$.
+\section{The wavevector in the photon list}
 
-Nothing in the repository currently depends on that guarantee --- \texttt{make\_spectrum}
-uses $Q$ and $U$ verbatim and rotates $k$ into cartesian itself --- but any consumer written
-against the documented invariant would get the wrong basis. Closing it means either rotating
-the list's $k$ into global cartesian for spherical as well, so the two frames agree again, or
-amending both comments to state that the axes differ. The first is the more useful invariant;
-it also changes the $k$ columns of existing spherical photon lists, so it is not free.
+The photon list writes $k$ on the \emph{global cartesian} legs in every topology, so that
+it shares a frame with $Q$ and $U$ and a reader can rebuild the meridian plane of Sec.~2
+from the file alone: $\khat$ from the three wavevector columns, $\zref = \hat{z}$, and
+Eq.~\eqref{eq:meridian}. \texttt{PhotonList::AddPhoton} performs the rotation once, at
+output, after \texttt{CoherencyToObserverStokes} has finished with the Stokes parameters;
+on a cartesian grid it is the identity. The list header declares this with the line
+\texttt{basis=cartesian}.
+
+This was not always so. Earlier files carry the local orthonormal legs, $\hat{e}_r,
+\hat{e}_\theta, \hat{e}_\phi$ in spherical polar, and no \texttt{basis} line. The reader,
+\texttt{athena\_mc.unit\_direction\_cartesian}, treats the absence of the line as that
+older convention and applies the rotation itself, so both generations of file bin to the
+same angles. A list re-written through \texttt{athena\_mc} carries its \texttt{basis} line
+through unchanged, since the columns are copied verbatim.
+
+The spherical-polar transport test holds the list's columns against the escape direction
+the problem generator computes independently, in the same generic configurations used for
+the Stokes referencing check, so the two columns cannot drift apart again without a test
+noticing.
 
 \end{document}

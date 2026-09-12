@@ -83,6 +83,7 @@ namespace {
 
   void PolarizationInFlatFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
                                std::complex<Real> nflat[4][4]);
+  void DirectionInFlatFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip, Real nhat[3]);
   Real OneScatterOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
   void ThomsonRightAngle(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe);
 }
@@ -359,6 +360,63 @@ void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip) {
     }
   }
   if (scale > 0.0) printf("POLRESID %.10e\n", dmax/scale);
+
+  // Referencing check.  The Stokes parameters the outputs carry must agree with the same
+  // coherency tensor decomposed by hand in the global cartesian frame, against the
+  // meridian plane of the global z axis and the escape direction.
+  //
+  // This is the one step nothing else here can see.  POLRESID reads the tensor and never
+  // looks at sqp/sup, so it is blind to how they are referenced; the degree of
+  // polarization is invariant under any rotation of the reference axes, so the scattering
+  // check cannot see it either.  CoherencyToObserverStokes is what sets them, and it runs
+  // only under the general pusher.
+  //
+  // The comparison is legitimate because the normal observer in this chart is static, as
+  // is the global cartesian frame, so the two differ by a rotation and Q and U referenced
+  // to the same physical plane agree in both.  Everything below is built from the flat
+  // frame tensor and the escape direction, with no use of the tetrad machinery being
+  // tested beyond PolarizationInFlatFrame, which POLRESID already validates.
+  Real nhat[3];
+  DirectionInFlatFrame(this, pphot, ip, nhat);
+  // The same direction, for the driver to hold the photon list's wavevector columns
+  // against: those are written on the global cartesian legs and must match this.
+  // Full double precision: the list stores binary doubles, and the driver compares the
+  // two at round-off, so anything shorter here would be the limiting error.
+  printf("KCART %.17e %.17e %.17e\n", nhat[0], nhat[1], nhat[2]);
+
+  const Real zref[3] = {0.0, 0.0, 1.0};
+  Real zdn = nhat[0]*zref[0] + nhat[1]*zref[1] + nhat[2]*zref[2];
+  Real lvec[3] = {zref[0] - zdn*nhat[0], zref[1] - zdn*nhat[1], zref[2] - zdn*nhat[2]};
+  Real lmag = std::sqrt(SQR(lvec[0]) + SQR(lvec[1]) + SQR(lvec[2]));
+  if (lmag <= 1.0e-12) return;             // escaped along the reference axis
+  Real lhat[3], rhat[3];
+  for (int i = 0; i < 3; ++i) lhat[i] = lvec[i]/lmag;
+  rhat[0] = nhat[1]*lhat[2] - nhat[2]*lhat[1];
+  rhat[1] = nhat[2]*lhat[0] - nhat[0]*lhat[2];
+  rhat[2] = nhat[0]*lhat[1] - nhat[1]*lhat[0];
+
+  // Contract the spatial block of the flat-frame tensor onto that pair.  The offset by
+  // one is the time component: nflat is indexed by four-vector components.
+  std::complex<Real> nll(0.,0.), nrr(0.,0.), nlr(0.,0.), nrl(0.,0.);
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      const std::complex<Real> &nij = nflat[i+1][j+1];
+      nll += lhat[i]*lhat[j]*nij;
+      nrr += rhat[i]*rhat[j]*nij;
+      nlr += lhat[i]*rhat[j]*nij;
+      nrl += rhat[i]*lhat[j]*nij;
+    }
+  }
+  Real itot = 0.5*(nll + nrr).real();
+  if (std::fabs(itot) <= 1.0e-30) return;
+  Real qref = 0.5*(nll - nrr).real()/itot;
+  Real uref = 0.5*(nlr + nrl).real()/itot;
+
+  Real inorm = (std::fabs(pphot->sip[ip]) > 0.0) ? pphot->sip[ip] : 1.0;
+  Real dq = std::fabs(pphot->sqp[ip]/inorm - qref);
+  Real du = std::fabs(pphot->sup[ip]/inorm - uref);
+  printf("REFRESID %.10e qcode %.10e qref %.10e ucode %.10e uref %.10e\n",
+         std::max(dq, du), pphot->sqp[ip]/inorm, qref, pphot->sup[ip]/inorm, uref);
   return;
 }
 
@@ -411,6 +469,47 @@ void PolarizationInFlatFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
   }
 }
 
+
+//----------------------------------------------------------------------------------------
+//! \fn void DirectionInFlatFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
+//!                               Real nhat[3])
+//! \brief the photon's propagation direction as a unit vector on the global cartesian legs
+//
+// The same two steps PolarizationInFlatFrame applies to the tensor, applied to the
+// wavevector: divide out the scale factors to reach the local orthonormal legs, then
+// rotate those legs onto the global cartesian ones.  Under the general pusher the stored
+// four-vector is in coordinate components, which is what this assumes.
+
+void DirectionInFlatFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip, Real nhat[3]) {
+
+  Real x[4];
+  x[IMC0] = pphot->x0p[ip];
+  x[IMC1] = pphot->x1p[ip];
+  x[IMC2] = pphot->x2p[ip];
+  x[IMC3] = pphot->x3p[ip];
+
+  Real kco[4];
+  pphot->GetFourVector(ip, false, kco);
+
+  Real invtet[4][4];
+  pmcb->pcoord->InverseTetrad(x, invtet);
+  Real kort[4];
+  for (int a = 0; a < 4; ++a) {
+    kort[a] = 0.0;
+    for (int b = 0; b < 4; ++b) kort[a] += invtet[a][b]*kco[b];
+  }
+
+  Real cth = std::cos(x[IMC2]), sth = std::sin(x[IMC2]);
+  Real cph = std::cos(x[IMC3]), sph = std::sin(x[IMC3]);
+  Real kr = kort[IMC1], kth = kort[IMC2], kph = kort[IMC3];
+
+  nhat[0] = kr*sth*cph + kth*cth*cph - kph*sph;
+  nhat[1] = kr*sth*sph + kth*cth*sph + kph*cph;
+  nhat[2] = kr*cth     - kth*sth;
+
+  Real mag = std::sqrt(SQR(nhat[0]) + SQR(nhat[1]) + SQR(nhat[2]));
+  if (mag > 0.0) for (int i = 0; i < 3; ++i) nhat[i] /= mag;
+}
 
 //----------------------------------------------------------------------------------------
 //! \fn Real OneScatterOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip)

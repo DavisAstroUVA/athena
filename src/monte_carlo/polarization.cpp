@@ -252,9 +252,13 @@ static void WriteMeridianStokes(Photon *pphot, int ip, Real ecov[4][4],
 //
 // The photon is in the coordinate frame whenever this is called, so the wavevector is
 // projected here rather than being read off the photon.  Because the frame is orthonormal
-// and the photon is null, the components that come back satisfy |k_spatial| = k^(0); a
-// reader can rely on that, and on the frame's third spatial leg being (0,0,1), to rebuild
-// the meridian basis from the stored components alone.
+// and the photon is null, the components that come back satisfy |k_spatial| = k^(0).
+//
+// Note that the photon list does not write photons as they are here: PhotonList::
+// AddPhoton rotates them onto the global cartesian legs before writing, so that the
+// wavevector columns and the Stokes parameters -- referenced by CoherencyToObserverStokes
+// to the meridian of the global z axis -- describe the same physical direction in the
+// same frame, and a reader can rebuild that meridian from the file alone.
 //
 // Returns false when there is no normal observer, which NormalObserver reports when
 // g^{tt} is not negative.  econ, ecov and ktet are left untouched in that case.
