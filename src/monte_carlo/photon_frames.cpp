@@ -126,16 +126,6 @@ void PhotonFrames::Fill(MCFrame f) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void PhotonFrames::ToCellCenterBasis(Real n[3]) const
-//! \brief carry a unit direction from the orthonormal basis at the photon to the one at
-//!        its cell center
-//
-// The moments are summed over the photons crossing a cell, so they need every
-// contribution referred to one basis.  On a curvilinear grid the orthonormal legs turn
-// with position, by the full angular width of a cell between one face and the other, so
-// the choice of basis may not be small. In flat spacetime this is an exact rotation.
-
-//----------------------------------------------------------------------------------------
 //! \fn void ComovingFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
 //!                        Real econ[4][4], Real ecov[4][4])
 //! \brief the comoving orthonormal frame at a photon; see photon_frames.hpp
@@ -178,6 +168,14 @@ void ComovingFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void PhotonFrames::ToCellCenterBasis(Real n[3]) const
+//! \brief carry a unit direction from the orthonormal basis at the photon to the one at
+//!        its cell center
+//
+// The moments are summed over the photons crossing a cell, so they need every
+// contribution referred to one basis.  On a curvilinear grid the orthonormal legs turn
+// with position, by the full angular width of a cell between one face and the other, so
+// the choice of basis may not be small. In flat spacetime this is an exact rotation.
 
 void PhotonFrames::ToCellCenterBasis(Real n[3]) const {
   Coordinates *pco = pmcb_->pmy_block->pcoord;
