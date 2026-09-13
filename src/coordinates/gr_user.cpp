@@ -13,12 +13,14 @@
 
 // C++ headers
 #include <cmath>  // sqrt()
+#include <sstream>  // stringstream
 
 // Athena++ headers
 #include "../athena.hpp"
 #include "../athena_arrays.hpp"
 #include "../eos/eos.hpp"
 #include "../mesh/mesh.hpp"
+#include "../monte_carlo/mcstatic.hpp"
 #include "../parameter_input.hpp"
 #include "coordinates.hpp"
 
@@ -31,6 +33,7 @@ Real Determinant(Real a11, Real a12, Real a21, Real a22);
 void CalculateTransformation(
     const AthenaArray<Real> &g,
     const AthenaArray<Real> &g_inv, int face, AthenaArray<Real> &transformation);
+void RequireAllocated(const AthenaArray<Real> &a, const char *where);
 } // namespace
 
 //----------------------------------------------------------------------------------------
@@ -137,7 +140,8 @@ GRUser::GRUser(MeshBlock *pmb, ParameterInput *pin, bool flag)
     }
   }
 
-  // Allocate arrays for geometric quantities
+  // Allocate arrays for geometric quantities.
+  const bool fluid_static = HydroIsStatic(pin);
   metric_cell_kji_.NewAthenaArray(2, NMETRIC, nc3, nc2, nc1);
   if (!coarse_flag) {
     coord_vol_kji_.NewAthenaArray(nc3, nc2, nc1);
@@ -150,13 +154,16 @@ GRUser::GRUser(MeshBlock *pmb, ParameterInput *pin, bool flag)
     coord_width1_kji_.NewAthenaArray(nc3, nc2, nc1);
     coord_width2_kji_.NewAthenaArray(nc3, nc2, nc1);
     coord_width3_kji_.NewAthenaArray(nc3, nc2, nc1);
-    coord_src_kji_.NewAthenaArray(3, NMETRIC, nc3, nc2, nc1);
-    metric_face1_kji_.NewAthenaArray(2, NMETRIC, nc3, nc2, nc1+1);
-    metric_face2_kji_.NewAthenaArray(2, NMETRIC, nc3, nc2+1, nc1);
-    metric_face3_kji_.NewAthenaArray(2, NMETRIC, nc3+1, nc2, nc1);
-    trans_face1_kji_.NewAthenaArray(2, NMETRIC, nc3, nc2, nc1+1);
-    trans_face2_kji_.NewAthenaArray(2, NMETRIC, nc3, nc2+1, nc1);
-    trans_face3_kji_.NewAthenaArray(2, NMETRIC, nc3+1, nc2, nc1);
+    if (!fluid_static) {
+      // not needed for static fluid e.g. monte carlo post-processing
+      coord_src_kji_.NewAthenaArray(3, NMETRIC, nc3, nc2, nc1);
+      metric_face1_kji_.NewAthenaArray(2, NMETRIC, nc3, nc2, nc1+1);
+      metric_face2_kji_.NewAthenaArray(2, NMETRIC, nc3, nc2+1, nc1);
+      metric_face3_kji_.NewAthenaArray(2, NMETRIC, nc3+1, nc2, nc1);
+      trans_face1_kji_.NewAthenaArray(2, NMETRIC, nc3, nc2, nc1+1);
+      trans_face2_kji_.NewAthenaArray(2, NMETRIC, nc3, nc2+1, nc1);
+      trans_face3_kji_.NewAthenaArray(2, NMETRIC, nc3+1, nc2, nc1);
+    }
     g_.NewAthenaArray(NMETRIC, nc1+1);
     gi_.NewAthenaArray(NMETRIC, nc1+1);
   }
@@ -201,7 +208,7 @@ GRUser::GRUser(MeshBlock *pmb, ParameterInput *pin, bool flag)
         }
 
         // Store metric derivatives
-        if (!coarse_flag) {
+        if (!coarse_flag && !fluid_static) {
           for (int m = 0; m < NMETRIC; ++m) {
             coord_src_kji_(0,m,k,j,i) = dg_dx1(m);
             coord_src_kji_(1,m,k,j,i) = dg_dx2(m);
@@ -236,6 +243,7 @@ GRUser::GRUser(MeshBlock *pmb, ParameterInput *pin, bool flag)
           // Calculate areas
           Real det = Determinant(g);
           coord_area1_kji_(k,j,i) = std::sqrt(-det) * dx2 * dx3;
+          if (fluid_static) continue;
 
           // Set metric coefficients
           for (int n = 0; n < NMETRIC; ++n) {
@@ -273,6 +281,7 @@ GRUser::GRUser(MeshBlock *pmb, ParameterInput *pin, bool flag)
           // Calculate areas
           Real det = Determinant(g);
           coord_area2_kji_(k,j,i) = std::sqrt(-det) * dx1 * dx3;
+          if (fluid_static) continue;
 
           // Set metric coefficients
           for (int n = 0; n < NMETRIC; ++n) {
@@ -310,6 +319,7 @@ GRUser::GRUser(MeshBlock *pmb, ParameterInput *pin, bool flag)
           // Calculate areas
           Real det = Determinant(g);
           coord_area3_kji_(k,j,i) = std::sqrt(-det) * dx1 * dx2;
+          if (fluid_static) continue;
 
           // Set metric coefficients
           for (int n = 0; n < NMETRIC; ++n) {
@@ -587,6 +597,7 @@ Real GRUser::GetCellVolume(const int k, const int j, const int i) {
 void GRUser::AddCoordTermsDivergence(const Real dt, const AthenaArray<Real> *flux,
                            const AthenaArray<Real> &prim, const AthenaArray<Real> &bb_cc,
                            AthenaArray<Real> &cons) {
+  RequireAllocated(coord_src_kji_, "AddCoordTermsDivergence");
   // Extract indices
   int is = pmy_block->is;
   int ie = pmy_block->ie;
@@ -737,6 +748,7 @@ void GRUser::CellMetric(const int k, const int j, const int il, const int iu,
 
 void GRUser::Face1Metric(const int k, const int j, const int il, const int iu,
                          AthenaArray<Real> &g, AthenaArray<Real> &g_inv) {
+  RequireAllocated(metric_face1_kji_, "Face1Metric");
   for (int n = 0; n < NMETRIC; ++n) {
 #pragma omp simd
     for (int i=il; i<=iu; ++i) {
@@ -749,6 +761,7 @@ void GRUser::Face1Metric(const int k, const int j, const int il, const int iu,
 
 void GRUser::Face2Metric(const int k, const int j, const int il, const int iu,
                          AthenaArray<Real> &g, AthenaArray<Real> &g_inv) {
+  RequireAllocated(metric_face2_kji_, "Face2Metric");
   for (int n = 0; n < NMETRIC; ++n) {
 #pragma omp simd
     for (int i=il; i<=iu; ++i) {
@@ -761,6 +774,7 @@ void GRUser::Face2Metric(const int k, const int j, const int il, const int iu,
 
 void GRUser::Face3Metric(const int k, const int j, const int il, const int iu,
                          AthenaArray<Real> &g, AthenaArray<Real> &g_inv) {
+  RequireAllocated(metric_face3_kji_, "Face3Metric");
   for (int n = 0; n < NMETRIC; ++n) {
 #pragma omp simd
     for (int i=il; i<=iu; ++i) {
@@ -796,6 +810,7 @@ void GRUser::PrimToLocal1(
     const int k, const int j, const int il, const int iu,
     const AthenaArray<Real> &bb1, AthenaArray<Real> &prim_l, AthenaArray<Real> &prim_r,
     AthenaArray<Real> &bbx) {
+  RequireAllocated(trans_face1_kji_, "PrimToLocal1");
   // Go through 1D block of cells
 #pragma omp simd
   for (int i=il; i<=iu; ++i) {
@@ -967,6 +982,7 @@ void GRUser::PrimToLocal2(
     const int k, const int j, const int il, const int iu,
     const AthenaArray<Real> &bb2, AthenaArray<Real> &prim_l, AthenaArray<Real> &prim_r,
     AthenaArray<Real> &bbx) {
+  RequireAllocated(trans_face2_kji_, "PrimToLocal2");
   // Go through 1D block of cells
 #pragma omp simd
   for (int i=il; i<=iu; ++i) {
@@ -1138,6 +1154,7 @@ void GRUser::PrimToLocal3(
     const int k, const int j, const int il, const int iu,
     const AthenaArray<Real> &bb3, AthenaArray<Real> &prim_l, AthenaArray<Real> &prim_r,
     AthenaArray<Real> &bbx) {
+  RequireAllocated(trans_face3_kji_, "PrimToLocal3");
   // Go through 1D block of cells
 #pragma omp simd
   for (int i=il; i<=iu; ++i) {
@@ -1306,6 +1323,7 @@ void GRUser::FluxToGlobal1(
     const int k, const int j, const int il, const int iu,
     const AthenaArray<Real> &cons, const AthenaArray<Real> &bbx, AthenaArray<Real> &flux,
     AthenaArray<Real> &ey, AthenaArray<Real> &ez) {
+  RequireAllocated(trans_face1_kji_, "FluxToGlobal1");
   // Go through 1D block of cells
 #pragma omp simd
   for (int i=il; i<=iu; ++i) {
@@ -1418,6 +1436,7 @@ void GRUser::FluxToGlobal2(
     const int k, const int j, const int il, const int iu,
     const AthenaArray<Real> &cons, const AthenaArray<Real> &bbx, AthenaArray<Real> &flux,
     AthenaArray<Real> &ey, AthenaArray<Real> &ez) {
+  RequireAllocated(trans_face2_kji_, "FluxToGlobal2");
   // Go through 1D block of cells
 #pragma omp simd
   for (int i=il; i<=iu; ++i) {
@@ -1530,6 +1549,7 @@ void GRUser::FluxToGlobal3(
     const int k, const int j, const int il, const int iu,
     const AthenaArray<Real> &cons, const AthenaArray<Real> &bbx, AthenaArray<Real> &flux,
     AthenaArray<Real> &ey, AthenaArray<Real> &ez) {
+  RequireAllocated(trans_face3_kji_, "FluxToGlobal3");
   // Go through 1D block of cells
 #pragma omp simd
   for (int i=il; i<=iu; ++i) {
@@ -1811,5 +1831,27 @@ void CalculateTransformation(
   transformation(1,T32) = 1.0/cc * g_23/g_33;
   transformation(1,T33) = 1.0/cc;
   return;
+}
+
+//----------------------------------------------------------------------------------------
+// Function for refusing to read a per-cell array that was never allocated
+// Inputs:
+//   a: the array about to be read
+//   where: name of the calling function, for the message
+// Notes:
+//   The face metrics, frame transformations and metric derivatives are skipped when the
+//   fluid is never advanced (see monte_carlo/mcstatic.hpp).  Only the Riemann solvers and
+//   the coordinate source terms read them, and neither runs in a static (e.g. Monte Carlo)
+//   run. This produces an error if they are reached.
+
+void RequireAllocated(const AthenaArray<Real> &a, const char *where) {
+  if (a.GetSizeInBytes() == 0) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in GRUser::" << where << std::endl
+        << "face-centered metric arrays are not allocated: the fluid is static in this "
+        << "Monte Carlo run (<montecarlo>/dynamic = false), so the time integrator was "
+        << "not expected to be reached" << std::endl;
+    ATHENA_ERROR(msg);
+  }
 }
 } // namespace

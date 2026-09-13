@@ -413,6 +413,9 @@ public:
 
   bool boosts;  // Compute lorentz transformations
   bool tetrads; // Compute tetrads
+  //! are boost_cmv/boost_lab allocated and filled?  They serve the moment deposition
+  //! and, outside GR, the legacy frame transforms; see the constructor for the condition.
+  bool cache_tetrads;
   bool coupled; // Whether time dependent code is coupled to hydro
   bool coherent_scattering; // photon does notchange energy after scattering
   bool acceleration;  // use MRW acceleration

@@ -559,8 +559,7 @@ void GeneralPusher::AdvanceStep(Photon *pphot, Real step, int ip) {
   }
 
   std::complex<Real> n0[4][4], d1[4][4];
-  for (int i = 0; i < 4; i++)
-    for (int j = 0; j < 4; j++) n0[i][j] = pphot->polten[i*4+j][ip];
+  pphot->LoadTensor(ip, n0);
 
   // Rate at the step start.  The previous step evaluated the connection at exactly this
   // position and wavevector -- only the tensor it was applied to differs -- so reuse it
@@ -590,9 +589,11 @@ void GeneralPusher::AdvanceStep(Photon *pphot, Real step, int ip) {
   std::complex<Real> d2[4][4];
   ApplyPolarizationRate(acon_mid, nhalf, d2);
 
+  std::complex<Real> n1[4][4];
   for (int i = 0; i < 4; i++)
     for (int j = 0; j < 4; j++)
-      pphot->polten[i*4+j][ip] = n0[i][j] + d2[i][j]*step;
+      n1[i][j] = n0[i][j] + d2[i][j]*step;
+  pphot->StoreTensor(ip, n1);
 }
 
 //----------------------------------------------------------------------------------------

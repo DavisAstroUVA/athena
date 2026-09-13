@@ -348,7 +348,9 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   rho.NewAthenaArray(ncells3,ncells2,ncells1);
   species.NewAthenaArray(nspec,ncells3,ncells2,ncells1);
   tgas.NewAthenaArray(ncells3,ncells2,ncells1);
-  if (boosts || tetrads) {
+  // Tetrads only used in flat spacetime or when moments are requested
+  cache_tetrads = (boosts || tetrads) && (call_moments || !GENERAL_RELATIVITY);
+  if (cache_tetrads) {
     boost_cmv.NewAthenaArray(ncells3,ncells2,ncells1,4,4);
     boost_lab.NewAthenaArray(ncells3,ncells2,ncells1,4,4);
   }
@@ -459,7 +461,7 @@ MonteCarloBlock::~MonteCarloBlock() {
   rho.DeleteAthenaArray();
   species.DeleteAthenaArray();
   tgas.DeleteAthenaArray();
-  if (boosts || tetrads) {
+  if (cache_tetrads) {
     boost_cmv.DeleteAthenaArray();
     boost_lab.DeleteAthenaArray();
   }
@@ -2223,6 +2225,10 @@ void MonteCarloBlock::ComputeTransformations() {
     }
   }
   shift_unity = fluid_at_rest && !curved_metric;
+
+  // Everything below fills boost_cmv and boost_lab, which exist only when something will
+  // read them; the constructor records that decision.
+  if (!cache_tetrads) return;
 
   if (GENERAL_RELATIVITY) {
     // In GR the map to an orthonormal frame is not a flat Lorentz boost.  vel holds a
