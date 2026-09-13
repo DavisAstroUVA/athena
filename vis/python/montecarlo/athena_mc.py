@@ -151,6 +151,10 @@ class Photons:
         self.metric_params = phlist.get('metric_params', {})
         # The frame the wavevector and the Stokes parameters are both measured in.
         self.frame = phlist.get('frame')
+        # The spatial basis of k1,k2,k3: 'cartesian' when the writer has already rotated
+        # the local legs onto the global ones, None for older files that carry the local
+        # orthonormal legs and need the rotation applied here.
+        self.basis = phlist.get('basis')
         # How to interpret this list: relativistic?, spatial basis, wavevector convention
         self.props = coord_properties(self.coord)
         self.relativistic = self.props['relativistic']
@@ -324,6 +328,16 @@ def read_list(filename, data=True, header=True):
             phlist['frame'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
             current_index = end_of_line_index + 1
 
+        # The spatial basis of the wavevector columns.  'cartesian' means the writer has
+        # already rotated the local legs onto the global ones; absent means an older file
+        # that still carries the local orthonormal legs, which the reader rotates itself.
+        phlist['basis'] = None
+        if raw_data_ascii.startswith("basis=", current_index):
+            current_index += len("basis=")
+            end_of_line_index = raw_data_ascii.find('\n', current_index)
+            phlist['basis'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+            current_index = end_of_line_index + 1
+
     if data:
         npars = phlist['npars']
         length = phlist['length']
@@ -471,7 +485,15 @@ def read_list_generator(filename, chunk_size=None):
         end_of_line_index = raw_data_ascii.find('\n', current_index)
         phlist['frame'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
         current_index = end_of_line_index + 1
-    
+
+    # see read_list: absent means the local orthonormal legs, 'cartesian' the global ones
+    phlist['basis'] = None
+    if raw_data_ascii.startswith("basis=", current_index):
+        current_index += len("basis=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        phlist['basis'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+        current_index = end_of_line_index + 1
+
     # Yield header first
     yield {'header': phlist, 'chunk': None, 'remaining': None, 'length': None, 'done': False}
     
@@ -540,6 +562,10 @@ def write_list(filename, phlist, header=True, length=None):
                               + ",".join(f"{k}={v!r}" for k, v in mpars.items()) + "\n")
             if phlist.get('frame') is not None:
                 outfile.write("frame="+phlist['frame']+"\n")
+            # Carried through unchanged: the columns are copied verbatim, so the basis
+            # they were written in is the basis they are still in.
+            if phlist.get('basis') is not None:
+                outfile.write("basis="+phlist['basis']+"\n")
 
     # Append binary data using numpy's tobytes() - faster than struct.pack
     with open(filename, 'ab') as outfile:
@@ -991,11 +1017,13 @@ def compute_pol_angle_error(intensity,errors=None):
 
 def compute_q_error(intensity,errors=None):
     """
-    Compute q=-Q/I and error if requested
+    Compute q=Q/I and error if requested
+
+    Q > 0 for polarization along the meridian direction l, as stored by the code.
     """
     i = intensity[0,:]
     q = intensity[1,:]
-    frac = -q/i
+    frac = q/i
     if errors is not None:
         ei = errors[0,:]
         eq = errors[1,:]
@@ -1183,9 +1211,11 @@ def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
         n_new = len(x) // nbin
         x = x[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
         y = y[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
-        y2 = yerr**2
-        y2 = y2[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
-        yerr = np.sqrt(y2)
+        # yerr is None whenever plterr is off, which rebinning has no reason to require
+        if yerr is not None:
+            y2 = yerr**2
+            y2 = y2[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
+            yerr = np.sqrt(y2)
 
     # Return x and y variables, their labels, and possible error on y
     return x,y,yerr,xlabel,ylabel
@@ -1545,16 +1575,21 @@ def unit_direction_cartesian(photons):
     """
     Cartesian components of the photon propagation direction, as a unit vector.
 
-    Handles both wavevector conventions.  Under the legacy pushers k1,k2,k3 are already
-    an orthonormal unit three-vector.  Under GeneralPusher they are contravariant
-    components, so in spherical coordinates k^theta and k^phi carry factors of 1/r and
-    1/(r sin(theta)) that have to be removed before rotating into the Cartesian basis,
-    and in cylindrical coordinates k^phi carries a factor of 1/R.  The result is
-    normalized either way: for a null vector the orthonormal spatial components have norm
-    equal to the time component, not unity.
+    Handles every wavevector convention the format has carried.  A file whose header
+    declares basis=cartesian already holds the global cartesian components and needs
+    only normalizing.  Otherwise the columns are on the local orthonormal legs: under the
+    legacy pushers directly, under GeneralPusher as contravariant components whose
+    spherical k^theta and k^phi carry factors of 1/r and 1/(r sin(theta)), and whose
+    cylindrical k^phi carries 1/R, all removed before rotating.  The result is normalized
+    either way: for a null vector the orthonormal spatial components have norm equal to
+    the time component, not unity.
     """
     props = photons.props
     k1, k2, k3 = photons.k1, photons.k2, photons.k3
+
+    if getattr(photons, 'basis', None) == 'cartesian':
+        norm = np.sqrt(k1*k1 + k2*k2 + k3*k3)
+        return k1/norm, k2/norm, k3/norm
 
     if props['geometry'] == 'spherical':
         cth = np.cos(photons.x2)
@@ -1588,20 +1623,17 @@ def unit_direction_radial(photons):
     """
     props = photons.props
 
-    if props['geometry'] == 'spherical':
-        k1 = photons.k1
-        if effective_kvec(photons) == 'coord':
-            # only the radial component is needed, but the norm is over all three
-            sth = np.sin(photons.x2)
-            k2 = photons.k2 * photons.x1
-            k3 = photons.k3 * photons.x1 * sth
-            norm = np.sqrt(k1*k1 + k2*k2 + k3*k3)
-            return k1/norm
-        norm = np.sqrt(k1*k1 + photons.k2**2 + photons.k3**2)
-        return k1/norm
-
-    # Cartesian (or cylindrical) positions: build rhat from the position itself
+    # Go through the cartesian direction, which already resolves every basis the file
+    # can carry, and dot it with the radial unit vector built from the position.  The
+    # spherical shortcut of reading k1 directly is gone: it was only right while the
+    # columns were on the local legs.
     kx, ky, kz = unit_direction_cartesian(photons)
+    if props['geometry'] == 'spherical':
+        sth = np.sin(photons.x2)
+        x = sth*np.cos(photons.x3)
+        y = sth*np.sin(photons.x3)
+        z = np.cos(photons.x2)
+        return kx*x + ky*y + kz*z
     if props['geometry'] == 'cylindrical':
         x = photons.x1*np.cos(photons.x2)
         y = photons.x1*np.sin(photons.x2)
@@ -1687,18 +1719,12 @@ def get_angle_bins_hybrid(photons, nmu, mufaces, nphi, phifaces):
         print("Error: this function only works with spherical geometry")
         return np.zeros(photons.nphot,dtype=int),np.zeros(photons.nphot,dtype=int)
 
-    kr = photons.k1
-    kth = photons.k2
-    kph = photons.k3
-    if effective_kvec(photons) == 'coord':
-        kth = kth * photons.x1
-        kph = kph * photons.x1 * np.sin(photons.x2)
-    knorm = np.sqrt(kr*kr + kth*kth + kph*kph)
-    kr, kth, kph = kr/knorm, kth/knorm, kph/knorm
-
-    cth = np.cos(photons.x2)
-    sth = np.sin(photons.x2)
-    kz = kr*cth - kth*sth
+    # The z and phi-hat components of the direction, from the cartesian form so that the
+    # basis the file was written in is resolved in one place.
+    kx, ky, kz = unit_direction_cartesian(photons)
+    cph = np.cos(photons.x3)
+    sph = np.sin(photons.x3)
+    kph = -kx*sph + ky*cph
 
     # Bin based on k . z
     mu = abs(kz)
@@ -1902,29 +1928,24 @@ def get_image_bins(phots, rcam, ifaces, xfaces, yfaces):
     nx  = xfaces.size - 1
     ny = yfaces.size - 1
 
-    #thc = 0.5*(xfaces[1:]+xfaces[:-1])
-    if phots.coord == 'spherical_polar':
+    # Cartesian position and direction, whatever chart and wavevector basis the file
+    # carries.  Previously keyed on the raw coord string, which knew only the two legacy
+    # tags and read the spherical wavevector as if it were always on the local legs.
+    geometry = phots.props['geometry']
+    if geometry == 'spherical':
         sth = np.sin(phots.x2)
-        cth = np.cos(phots.x2)
-        sph = np.sin(phots.x3)
-        cph = np.cos(phots.x3)
-        xp = phots.x1*sth*cph
-        yp = phots.x1*sth*sph
-        zp = phots.x1*cth
-        rp = phots.x1
-        kdx = rp*phots.k1
-        kx = phots.k1*sth*cph + phots.k2*cth*cph - phots.k3*sph
-        ky = phots.k1*sth*sph + phots.k2*cth*sph + phots.k3*cph
-        kz = phots.k1*cth - phots.k2*sth
-    elif phots.coord == 'cartesian':
-        xp = phots.x1
-        yp = phots.x2
+        xp = phots.x1*sth*np.cos(phots.x3)
+        yp = phots.x1*sth*np.sin(phots.x3)
+        zp = phots.x1*np.cos(phots.x2)
+    elif geometry == 'cylindrical':
+        xp = phots.x1*np.cos(phots.x2)
+        yp = phots.x1*np.sin(phots.x2)
         zp = phots.x3
-        rp = np.sqrt(xp**2+yp**2+zp**2)
-        kx = phots.k1
-        ky = phots.k2
-        kz = phots.k3
-        kdx = xp*kx+yp*ky+zp*kz
+    else:
+        xp, yp, zp = phots.x1, phots.x2, phots.x3
+    rp = np.sqrt(xp**2 + yp**2 + zp**2)
+    kx, ky, kz = unit_direction_cartesian(phots)
+    kdx = xp*kx + yp*ky + zp*kz
 
 
     dl = np.sqrt(rcam**2-rp**2+kdx**2)-kdx

@@ -162,6 +162,36 @@ void Spectrum::BuildEnergyGrid(Real emin, Real emax, int nen, bool logarthmic) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn static void LocalToCartesian(MCTopology topo, Real x2, Real x3,
+//!                                  Real &k1, Real &k2, Real &k3)
+//! \brief rotate orthonormal components on the local legs onto the global cartesian ones
+//
+// The outputs reference Q and U to the meridian plane of the global z axis, and the
+// wavevector they write has to live in the same frame or a reader cannot rebuild that
+// plane from the file.  On a spherical or cylindrical grid the local orthonormal legs
+// turn with position, so the direction is rotated here, once, at output.  Cartesian
+// topology needs nothing: its legs already are the global ones.  The components are
+// assumed to be orthonormal on entry.
+
+static void LocalToCartesian(MCTopology topo, Real x2, Real x3,
+                             Real &k1, Real &k2, Real &k3) {
+  if (topo == MCTOPO_SPHERICAL) {
+    Real cth = std::cos(x2), sth = std::sin(x2);
+    Real cph = std::cos(x3), sph = std::sin(x3);
+    Real kr = k1, kth = k2, kph = k3;
+    k1 = kr*sth*cph + kth*cth*cph - kph*sph;
+    k2 = kr*sth*sph + kth*cth*sph + kph*cph;
+    k3 = kr*cth     - kth*sth;
+  } else if (topo == MCTOPO_CYLINDRICAL) {
+    // (R, phi, z) with the azimuth in x2; only R-hat and phi-hat turn
+    Real cph = std::cos(x2), sph = std::sin(x2);
+    Real kR = k1, kph = k2;
+    k1 = kR*cph - kph*sph;
+    k2 = kR*sph + kph*cph;
+  }
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void Spectrum::SetSurface(std::string input_face)
 //! \brief set corresponding surface
 
@@ -473,74 +503,46 @@ void Spectrum::UpdateSpectrum(Photon *pphot, int ip) {
     // Get angle bins
     int phibin, mubin;
     if (polar_axis) {
+      // The direction on the normal observer's orthonormal legs, then rotated onto the
+      // global cartesian legs, in every topology.  Under GeneralPusher k1,k2,k3 are
+      // contravariant coordinate components, neither orthonormal nor a unit vector, so
+      // they are projected into the normal observer's frame first, which is the same one
+      // PhotonList::AddPhoton writes. Cartesian topology is a no-op in the rotation, and
+      // a topology AngleBinsCartesian cannot bin is rejected there.
       Real kcart[4];
-      // Was keyed on cartesian || minkowski, which left kcart uninitialized for the
-      // Cartesian Kerr-Schild case (gr_user); it shares this topology and belongs here.
-      if (pmy_mc->topology == MCTOPO_CARTESIAN)  {
-        if (pphot->pmy_mcb->pmy_mc->general_pusher_flag) {
-          // Under GeneralPusher k1,k2,k3 are contravariant coordinate components, so they
-          // are neither orthonormal nor a unit vector. Since projecting to infinity is
-          // challenging, we insteady project onto local the normal observer's orthonormal
-          // frame and normalize.
-          //
-          // The frame is the normal observer, and specifically not MCCoord::InverseTetrad,
-          // because CoherencyToObserverStokes references the Stokes parameters to this
-          // one.
-          Real econ[4][4], ecov[4][4], ktet[4];
-          if (!NormalFrameWavevector(pphot->pmy_mcb, pphot, ip, econ, ecov, ktet)) return;
-          Real norm = sqrt(SQR(ktet[IMC1]) + SQR(ktet[IMC2]) + SQR(ktet[IMC3]));
-          if (norm <= TINY_NUMBER) return;
-          for (int a = IMC1; a < 4; ++a) kcart[a] = ktet[a]/norm;
-        } else {
-          kcart[IMC1] = pphot->k1p[ip];
-          kcart[IMC2] = pphot->k2p[ip];
-          kcart[IMC3] = pphot->k3p[ip];
-        }
-      } else  if (pmy_mc->topology == MCTOPO_SPHERICAL) {
-        Real cth = cos(pphot->x2p[ip]);
-        Real sth = sin(pphot->x2p[ip]);
-        Real cph = cos(pphot->x3p[ip]);
-        Real sph = sin(pphot->x3p[ip]);
-        Real kr, kth, kph;
-        // Flat orthonormalization.  Only valid because the MCOutput constructor refuses
-        // spec output for a curved metric; see the note there.
-        if (pphot->pmy_mcb->pmy_mc->general_pusher_flag) {
-          kr = pphot->k1p[ip];
-          kth = pphot->k2p[ip]*pphot->x1p[ip];
-          kph = pphot->k3p[ip]*pphot->x1p[ip]*sth;
-        } else {
-          kr = pphot->k1p[ip];
-          kth = pphot->k2p[ip];
-          kph = pphot->k3p[ip];
-        }
-        // Compute cartesian
-        kcart[IMC1] = kr*sth*cph + kth*cth*cph - kph*sph;
-        kcart[IMC2] = kr*sth*sph + kth*cth*sph + kph*cph;
-        kcart[IMC3] = kr*cth - kth*sth;
+      if (pphot->pmy_mcb->pmy_mc->general_pusher_flag) {
+        Real econ[4][4], ecov[4][4], ktet[4];
+        if (!NormalFrameWavevector(pphot->pmy_mcb, pphot, ip, econ, ecov, ktet)) return;
+        for (int a = IMC1; a < 4; ++a) kcart[a] = ktet[a];
       } else {
-        // SWD: Add cylindrical
-        std::stringstream msg;
-        msg << "### FATAL ERROR in function [Spectrum::UpdateSpectrum]" << std::endl
-            << "polar_axis spectra are not implemented for coordinate system "
-            << GetMCCoordSystemName(pmy_mc->coord_system) << std::endl;
-        throw std::runtime_error(msg.str().c_str());
+        kcart[IMC1] = pphot->k1p[ip];
+        kcart[IMC2] = pphot->k2p[ip];
+        kcart[IMC3] = pphot->k3p[ip];
       }
+      LocalToCartesian(pmy_mc->topology, pphot->x2p[ip], pphot->x3p[ip],
+                       kcart[IMC1], kcart[IMC2], kcart[IMC3]);
+      Real knorm = std::sqrt(SQR(kcart[IMC1]) + SQR(kcart[IMC2]) + SQR(kcart[IMC3]));
+      if (knorm <= TINY_NUMBER) return;
+      for (int a = IMC1; a < 4; ++a) kcart[a] /= knorm;
       if (!AngleBinsCartesian(kcart,phibin,mubin))
         return;
     } else {
       if (pmy_mc->topology == MCTOPO_SPHERICAL) {
         Real ksph[4];
-        // Flat orthonormalization.  Only valid because the MCOutput constructor refuses
-        // spec output for a curved metric; see the note there.
+        // Binned against the boundary normal, so the direction is wanted on the local
+        // legs e_r, e_theta, e_phi and is not rotated.  Under GeneralPusher those are the
+        // normal observer's legs, reached by the same tetrad projection the polar_axis
+        // branch uses; it replaces the flat scale factors that were written out by hand
+        // here and holds in a curved metric too.
         if (pphot->pmy_mcb->pmy_mc->general_pusher_flag) {
-          ksph[IMC1] = pphot->k1p[ip];
-          ksph[IMC2] = pphot->k2p[ip]*pphot->x1p[ip];
-          ksph[IMC3] = pphot->k3p[ip]*pphot->x1p[ip]*sin(pphot->x2p[ip]);
-          Real norm = sqrt(SQR(ksph[IMC1])+SQR(ksph[IMC2])+SQR(ksph[IMC3]));
+          Real econ[4][4], ecov[4][4], ktet[4];
+          if (!NormalFrameWavevector(pphot->pmy_mcb, pphot, ip, econ, ecov, ktet)) return;
+          Real norm = sqrt(SQR(ktet[IMC1])+SQR(ktet[IMC2])+SQR(ktet[IMC3]));
+          if (norm <= TINY_NUMBER) return;
           // from IMC1: ksph[IMC0] is never set, and AngleBinsSphericalPolar reads only
           // the spatial components
           for (int i=IMC1; i<4; ++i)
-            ksph[i] /= norm;
+            ksph[i] = ktet[i]/norm;
         } else {
           ksph[IMC1] = pphot->k1p[ip];
           ksph[IMC2] = pphot->k2p[ip];
@@ -798,11 +800,19 @@ void PhotonList::AddPhoton(Photon *pphot, int ip) {
   photons(length,n++) = pphot->x2p[ip];
   photons(length,n++) = pphot->x3p[ip];
   photons(length,n++) = pphot->x0p[ip];
-  // The wavevector goes out in the same normal frame the Stokes parameters are
-  // referenced to
+  // The wavevector goes out on the "global" cartesian legs, the frame whose z axis the
+  // Stokes parameters are referenced to, so the two columns describe the same physical
+  // direction and a reader can rebuild the meridian plane from the file alone.  Under
+  // the general pusher it is first projected into the normal observer's frame, which is
+  // what CoherencyToObserverStokes measured against; the legacy pushers already hold an
+  // orthonormal unit direction. The local legs are then rotated onto the "global" ones,
+  // declared to the reader by the basis line in the header.
+  const MCTopology topo = pmy_mc->topology;
   if (pmy_mc->general_pusher_flag) {
     Real econ[4][4], ecov[4][4], ktet[4];
     if (NormalFrameWavevector(pphot->pmy_mcb, pphot, ip, econ, ecov, ktet)) {
+      LocalToCartesian(topo, pphot->x2p[ip], pphot->x3p[ip],
+                       ktet[IMC1], ktet[IMC2], ktet[IMC3]);
       photons(length,n++) = ktet[IMC1];
       photons(length,n++) = ktet[IMC2];
       photons(length,n++) = ktet[IMC3];
@@ -816,9 +826,11 @@ void PhotonList::AddPhoton(Photon *pphot, int ip) {
       photons(length,n++) = pphot->k0p[ip];
     }
   } else {
-    photons(length,n++) = pphot->k1p[ip];
-    photons(length,n++) = pphot->k2p[ip];
-    photons(length,n++) = pphot->k3p[ip];
+    Real k1 = pphot->k1p[ip], k2 = pphot->k2p[ip], k3 = pphot->k3p[ip];
+    LocalToCartesian(topo, pphot->x2p[ip], pphot->x3p[ip], k1, k2, k3);
+    photons(length,n++) = k1;
+    photons(length,n++) = k2;
+    photons(length,n++) = k3;
     photons(length,n++) = pphot->k0p[ip];
   }
   if (IsPolarized(polarized)) {
@@ -882,6 +894,11 @@ void PhotonList::OpenAndWriteHeader(const std::string &filename, Real tint_out) 
   if (!pmy_mc->metric_params.empty())
     fprintf(fp_,"metric_params=%s\n",pmy_mc->metric_params.c_str());
   fprintf(fp_,"frame=%s\n",pmy_mc->frame_tag.c_str());
+  // The spatial basis of the wavevector columns.  Always the global cartesian legs, in
+  // every topology, so that they share a frame with the Stokes parameters.  Files
+  // written before this line carry the local orthonormal legs instead, and a reader
+  // rotates those itself; the line is what tells it not to.
+  fprintf(fp_,"basis=cartesian\n");
 }
 
 //----------------------------------------------------------------------------------------
@@ -1181,39 +1198,22 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
       std::string type = pin->GetString(pib->block_name,"file_type");
 
       if (type.compare("spec") == 0) {
-        // Refused up front rather than per photon, so the run fails at setup instead of
-        // after the transfer has started.
+        // Spectra used to be refused for a curved metric, for two reasons that no longer
+        // hold.  The angle binning orthonormalized the wavevector with the flat scale
+        // factors, which in Kerr-Schild put the direction off by ~20 degrees at r = 6M
+        // and silently dropped photons below mu ~ 0.35 as ingoing; UpdateSpectrum now
+        // projects through the normal-observer tetrad instead, the same frame the
+        // Stokes parameters are referenced to and the photon list writes.  And the
+        // energy axis binned ep = k^t rather than the conserved -k_t; it now bins
+        // PhotonEnergyAtInfinity under relativistic_output.
         //
-        // Spectrum angle binning orthonormalizes the wavevector with the flat scale
-        // factors (r, r sin(theta), and unity in the radial and cartesian directions) and
-        // then treats the result as a unit direction.  That is exact only for a diagonal
-        // metric with g_rr = 1.  In Kerr-Schild g_rr = 1 + 2M/r, g_tr does not vanish,
-        // and the normal observer has n^r < 0, so the direction that comes out is off by
-        // to ~20 degrees at r = 6M -- large enough that photons with mu < 0.35 are
-        // classified as ingoing and silently dropped.  The energy axis is wrong in the
-        // same way: it bins ep = k^t rather than the conserved -k_t.
+        // What remains is a convention, shared with PhotonList::AddPhoton: the "global
+        // z" the polar_axis binning measures against is the normal observer's third leg
+        // rotated by the flat R(theta, phi).  In a flat chart that is the global z axis
+        // exactly; in a curved one it is the natural observer's-eye analogue, and it is
+        // the same axis the list's wavevector columns are written against, so spectrum
+        // and list agree with each other by construction.
         //
-        // Doing this properly means projecting through the normal-observer tetrad, which
-        // MonteCarloBlock::boost_lab already holds per cell.  Until then the photon list
-        // is the supported route: it stores -k_t directly, and
-        // vis/python/montecarlo/make_spectrum.py bins it.
-        // Keyed on curvature, not on whether the flat scale factors happen to
-        // orthonormalize the basis: a flat metric in a sheared chart, like snake, has a
-        // covariantly constant orthonormal frame that InverseTetrad projects onto exactly,
-        // and UpdateSpectrum uses it.  What breaks the binning is curvature, which is what
-        // the paragraph above is about.
-        if (IsMCMetricCurved(pmc->coord_system)) {
-          std::stringstream msg;
-          msg << "### FATAL ERROR in MCOutput constructor" << std::endl
-              << "spec output is not supported for coordinate system "
-              << GetMCCoordSystemName(pmc->coord_system) << "." << std::endl
-              << "Angle and energy binning assume a flat spacetime, so that the "
-              << "orthonormal frame the direction is measured in is globally defined."
-              << std::endl
-              << "Use file_type = phlist and bin it with "
-              << "vis/python/montecarlo/make_spectrum.py instead." << std::endl;
-          ATHENA_ERROR(msg);
-        }
         // set momentum range and polarization, logarithmic flags for spectrum constructor
         MomentumRange range;
         range.ne = pin->GetInteger(pib->block_name,"ne");

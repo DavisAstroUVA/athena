@@ -20,11 +20,8 @@
 //----------------------------------------------------------------------------------------
 //! \brief which metric the Monte Carlo module is integrating on.
 //!
-//! COORDINATE_SYSTEM is not enough on its own.  It is a bare string literal, so the
-//! comparisons `COORDINATE_SYSTEM == "cartesian"` scattered through the module are
-//! pointer comparisons with unspecified behavior, and more importantly "gr_user" says
-//! nothing at all about the metric -- it was silently taken to mean Cartesian
-//! Kerr-Schild.  MCCoordSystem names the metric outright; see
+//! COORDINATE_SYSTEM is not fully determinant. e.g. "gr_user" does not uniquely specify
+//! the metric. MCCoordSystem names the metric outright; see
 //! MonteCarlo::SetCoordinateSystem for how it is resolved from the configure-time
 //! coordinate system plus <montecarlo>/mc_coord.
 
@@ -42,7 +39,7 @@ enum MCCoordSystem {
 //----------------------------------------------------------------------------------------
 //! \brief shape of the coordinate triple (x1,x2,x3), independent of the metric.
 //!
-//! The metric and the grid topology are separate facts and the module needs both.
+//! The metric and the grid topology are separate concepts.
 //! Kerr-Schild in Cartesian form is a curved metric on an (x,y,z) grid, so code that
 //! orthonormalizes directions, converts wavevectors for output or bins escape angles has
 //! to branch on this rather than on MCCoordSystem.
@@ -84,9 +81,7 @@ public:
   AthenaArray<Real> vol;
   AthenaArray<Real> dmin;
 
-  // Which of these a run actually calls is not obvious from the interface, and getting it
-  // wrong wastes effort implementing and verifying code that is never reached.  As of
-  // this writing, for a general-relativistic run on the general pusher:
+  // For a general-relativistic run on the general pusher:
   //
   //   Metric                   LIVE.  RK4Step converts k^mu -> k_mu and back and
   //                            renormalizes to k.k = 0; also ComovingFrameMatrix and
@@ -95,18 +90,22 @@ public:
   //   InverseMetricDerivative  LIVE.  RK4Step, for dk_mu/dl = -1/2 d_mu g^{ab} k_a k_b.
   //                            This is the geodesic right-hand side.
   //   MetricDerivative         Not called by anything, in any coordinate system.
-  //   Connect                  Only VerletStep, whose call sites in generalpusher.cpp are
-  //                            commented out in favor of RK4Step.  The Hamiltonian
-  //                            formulation uses metric derivatives, not Christoffels.
+  //   Connect                  LIVE whenever polarization is tracked.  The geodesic itself
+  //                            is Hamiltonian and uses metric derivatives, so this is
+  //                            reached only through GeneralPusher::ConnectionContraction,
+  //                            which builds A^i_k = Gamma^i_kl k^l for the coherency
+  //                            tensor transport.  An unpolarized run never calls it.
+  //                            Also used in VerletStep, whose call sites are commented
+  //                            out in favor of RK4Step.
   //   Tetrad, InverseTetrad    Only the non-GR branches of TransformToComoving and
   //                            TransformToCoordinate, and the flat branch of
   //                            PhotonFrames::Fill (gr_tetrad_ is false there).  A GR run
   //                            goes through boost_lab/boost_cmv, built by ConstructTetrad
   //                            from the metric, and never reaches these.
   //
-  // Derived classes should still implement them correctly -- VerletStep may be revived and
-  // the non-GR paths are live for cartesian and spherical_polar -- but do not expect a
-  // GR test to exercise them.
+  // Derived classes should still implement them correctly for now. VerletStep may be revived
+  // and the non-GR paths are live for cartesian and spherical_polar.
+
   virtual void Metric(Real x[4],Real gcov[4][4]);
   virtual void MetricDerivative(Real x[4],Real dgcov[4][4][4]);
   virtual void InverseMetric(Real x[4],Real gcon[4][4]);

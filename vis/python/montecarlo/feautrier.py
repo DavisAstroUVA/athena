@@ -1,6 +1,13 @@
 """
-Code for performing Feautrier solution in isothermal atmophsere.  Used for 
-evaluating accuracy of polarized Thomson scattering.
+Feautrier solution for a plane-parallel scattering atmosphere, used as the reference for
+the polarized Monte Carlo tests.
+
+Polarization is reported as Q/I in the same convention the Monte Carlo code stores, so the
+two can be compared directly with no sign change: Q > 0 for polarization along the meridian
+direction l, which makes Q < 0 for a scattering atmosphere.
+
+Lives here, beside athena_mc, rather than in any one test directory: three separate tests
+depend on it, and all of them already need this directory on PYTHONPATH for athena_mc.
 """
 
 # standard python modules
@@ -235,7 +242,8 @@ def feautrier(grid,rad,heabund=0.09):
                   rad['intex'][3*na:4*na,i])
                 
         rad['intens'][i,:] = intensl + intensr
-        rad['pol'][i,:] = (intensr - intensl)/rad['intens'][i,:]
+        # Q/I, with Q > 0 for polarization along the meridian direction l
+        rad['pol'][i,:] = (intensl - intensr)/rad['intens'][i,:]
 
 def gauss_elim(Mat,X):
     """

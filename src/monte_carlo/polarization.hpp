@@ -86,4 +86,14 @@ void CoherencyToObserverStokes(MonteCarloBlock *pmcb, Photon *pphot, int ip);
 // rotate the photon back out of the scattering basis
 void FromScatteringBasis(MonteCarloBlock *pmcb, Photon *pphot, int ip);
 
+// The meridian pair for a unit direction n in some orthonormal frame:
+//   l = normalize(zref - (zref.n) n),   r = n x l,
+// with zref a unit vector in the same components.  Public so that a problem generator
+// that hands over Stokes parameters can reference them to exactly the pair the framework
+// will read them against.  When n is parallel to zref the meridian is undefined and a
+// deterministic pair is returned instead, the limit approached along the phi = 0
+// meridian; see the definition for the convention.  Returns false only when n has no
+// magnitude to normalize.
+bool MeridianPair(const Real n[3], const Real zref[3], Real lhat[3], Real rhat[3]);
+
 #endif // POLARIZATION_HPP

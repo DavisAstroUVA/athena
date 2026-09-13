@@ -1,0 +1,87 @@
+<comment>
+problem   = single-photon polarized transport in spherical polar
+configure = --prob=mc_sphpol --coord=spherical_polar -mc
+
+# Two tests share this input, selected by problem/scatopac.
+#
+# scatopac = 0  -- parallel transport.  One photon, no scattering, reports POLRESID: the
+#   departure of the coherency tensor in the global cartesian frame from its emitted value.
+#   Flat spacetime, so the exact answer is zero and what is left is truncation error;
+#   halving stepsize should quarter it.  alpha and chi set which connection components the
+#   ray exercises.  There is no exact-zero control in this chart -- see the pgen header.
+#
+# scatopac > 0  -- the comoving round trip at a scattering.  The photon is emitted
+#   unpolarized, Thomson-scatters exactly once through a right angle, and reports POLDEG.
+#   A right-angle scatter of unpolarized light is fully polarized, and the degree of
+#   polarization is invariant under both boosts and parallel transport, so POLDEG must be
+#   1 whatever problem/velocity is set to.  Requires scattering = user.
+
+<job>
+problem_id = sphpol
+
+<output1>
+file_type = phlist
+dt = 1.e-20
+
+<time>
+cfl_number = 0.3
+nlim       = 1
+tlim       = 1.0
+
+<mesh>
+nx1        = 64
+x1min      = 1.0
+x1max      = 100.0
+ix1_bc     = outflow
+ox1_bc     = outflow
+ix1_mc_bc  = escape
+ox1_mc_bc  = escape
+
+nx2        = 32
+x2min      = 0.0
+x2max      = 3.1415926535897931
+ix2_bc     = polar
+ox2_bc     = polar
+ix2_mc_bc  = escape
+ox2_mc_bc  = escape
+
+nx3        = 32
+x3min      = 0.0
+x3max      = 6.2831853071795862
+ix3_bc     = periodic
+ox3_bc     = periodic
+ix3_mc_bc  = periodic
+ox3_mc_bc  = periodic
+
+<hydro>
+gamma = 1.6666666666666667
+
+<montecarlo>
+nphot        = 1
+iseed        = 12345
+emission     = none
+scattering   = none
+absorption   = none
+polarized    = linear
+general_pusher = true
+initialize_comoving = true
+boosts       = true
+stepsize     = 0.01
+varystep     = true
+capmove      = 2000000
+tmax         = 1.0e36
+
+<problem>
+r0      = 10.0
+th0     = 90.0
+ph0     = 0.0
+alpha   = 30.0
+chi     = 0.0
+polang  = 0.0
+polcirc = 0.0
+rho_cgs  = 1.0
+tgas_cgs = 1.0e6
+vel_cgs  = 29979245800.0
+l_cgs    = 1.0
+scatopac = 0.0
+velocity = 0.0

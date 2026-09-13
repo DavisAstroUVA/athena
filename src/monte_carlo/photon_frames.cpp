@@ -25,6 +25,7 @@
 #include "montecarlo.hpp"
 #include "tetrad.hpp"
 #include "photon.hpp"
+#include "mccoord.hpp"
 #include "../athena.hpp"
 #include "../athena_arrays.hpp"
 #include "../mesh/mesh.hpp"
@@ -122,6 +123,48 @@ void PhotonFrames::Fill(MCFrame f) {
   s.e = ep * shift;
   for (int i=0; i<3; ++i) s.n[i] = kc[IMC1+i]/kc[IMC0];
   s.dl = dl_ * shift;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void ComovingFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
+//!                        Real econ[4][4], Real ecov[4][4])
+//! \brief the comoving orthonormal frame at a photon; see photon_frames.hpp
+//!
+//! econ and ecov are indexed [tetrad leg][coordinate component], for CoordinateToTetrad,
+//! TetradToCoordinate, PolarizationToTetrad and PolarizationToCoord.
+
+void ComovingFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
+                   Real econ[4][4], Real ecov[4][4]) {
+
+  Real x[4];
+  x[IMC0] = pphot->x0p[ip];
+  x[IMC1] = pphot->x1p[ip];
+  x[IMC2] = pphot->x2p[ip];
+  x[IMC3] = pphot->x3p[ip];
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+
+  // The metric at the photon rather than at the cell center, so the leg is a unit
+  // timelike vector where it is used.
+  Real gcov[4][4];
+  pmcb->pcoord->Metric(x, gcov);
+
+  Real ucon[4];
+  if (GENERAL_RELATIVITY) {
+    pmcb->FluidFourVelocity(x, i3, i2, i1, ucon);
+  } else {
+    // vel is (gamma, gamma*beta^i) on the local orthonormal legs.  Carry it onto
+    // coordinate components with the static tetrad, whose legs are those of the
+    // orthonormal frame at rest; the boost then happens inside ConstructTetrad, by growing
+    // the frame from the moving four-velocity.  Tetrad maps orthonormal to coordinate
+    // components as ucon[j] = tet[j][i] vel[i], the convention TransformToCoordinate uses.
+    Real tet[4][4];
+    pmcb->pcoord->Tetrad(x, tet);
+    for (int j = 0; j < 4; ++j) {
+      ucon[j] = 0.0;
+      for (int i = 0; i < 4; ++i) ucon[j] += tet[j][i] * pmcb->vel(i3, i2, i1, i);
+    }
+  }
+  ConstructTetrad(ucon, gcov, econ, ecov);
 }
 
 //----------------------------------------------------------------------------------------

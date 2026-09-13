@@ -62,3 +62,19 @@ meshtest.dat
 
 # compiled doxygen file
 doc/doxy*
+
+# Python bytecode
+__pycache__/
+
+# LaTeX build products, alongside the .tex they are built from
+doc/**/*.aux
+doc/**/*.log
+doc/**/*.pdf
+doc/**/*.toc
+
+# Agent tooling.  Empty .claude directories appear all over the tree as a side effect of
+# running commands in them; the one at the repository root holds real project
+# configuration and is deliberately left visible.
+.claude/
+!/.claude/
+.mcp.json

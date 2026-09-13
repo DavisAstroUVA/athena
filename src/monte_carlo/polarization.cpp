@@ -19,6 +19,7 @@
 #include "photon.hpp"
 #include "tetrad.hpp"
 #include "mccoord.hpp"
+#include "photon_frames.hpp"
 
 //----------------------------------------------------------------------------------------
 //! \fn void ToScatteringBasis(MonteCarloBlock *pmcb, Photon *pphot, int ip)
@@ -30,7 +31,6 @@
 // meridian, which does not move. Used by non GR coordinates.
 
 
-static bool MeridianPair(const Real n[3], Real lhat[3], Real rhat[3]);
 static void WriteMeridianStokes(Photon *pphot, int ip, Real ecov[4][4],
                                 const Real lhat[3], const Real rhat[3]);
 
@@ -104,38 +104,19 @@ void FromScatteringBasis(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 // off the stored components (see polarization.hpp).  l goes into e_(1) because
 // StokesToTensor puts I+Q there, i.e. Q > 0 means polarization along the meridian.
 //
-// Returns false when n is parallel to z, where the meridian is undefined; the caller
-// then leaves the Stokes parameters alone
+// Returns false only when the stored direction has no magnitude.  A photon exactly along
+// the frame's z axis, where the meridian is undefined, gets MeridianPair's deterministic
+// fallback rather than a refusal: refusing used to leave the coherency tensor stale
+// across a scatter whose outgoing direction happened to be that axis, which a
+// right-angle scatter of any ray in a meridional plane produces exactly.
 
 static bool MeridianBasis(MonteCarloBlock *pmcb, Photon *pphot, int ip,
                           Real econ[4][4], Real ecov[4][4], Real lhat[3], Real rhat[3]) {
 
-  int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
-
-  Real x[4];
-  x[IMC0] = pphot->x0p[ip];
-  x[IMC1] = pphot->x1p[ip];
-  x[IMC2] = pphot->x2p[ip];
-  x[IMC3] = pphot->x3p[ip];
-  Real gcov[4][4];
-  pmcb->pcoord->Metric(x, gcov);
-
-  // The frame k is expressed in at a scattering.  The MonteCarloBlock constructor
-  // guarantees vel is allocated whenever polarized is set, holding the fluid velocity,
-  // the normal observer or the coordinate observer as appropriate, so no test is needed
-  // here.
-  //
-  // In general relativity the frame is rebuilt at the photon instead, so that it is a
-  // unit timelike vector where gcov above is evaluated.  uprim only exists in GR, which
-  // is why the flat path still reads vel; there the metric is constant across a cell and
-  // the two agree anyway.
-  Real ucon[4];
-  if (GENERAL_RELATIVITY) {
-    pmcb->FluidFourVelocity(x, i3, i2, i1, ucon);
-  } else {
-    for (int m = 0; m < 4; ++m) ucon[m] = pmcb->vel(i3, i2, i1, m);
-  }
-  ConstructTetrad(ucon, gcov, econ, ecov);
+  // The frame k is expressed in at a scattering, from the one function that defines it,
+  // so the wavevector the transport produced and the axes Q and U are referenced to
+  // cannot come apart.  See photon_frames.hpp for what used to go wrong here.
+  ComovingFrame(pmcb, pphot, ip, econ, ecov);
 
   // k as stored is already in this frame and is a unit direction there
   Real n[3];
@@ -146,24 +127,49 @@ static bool MeridianBasis(MonteCarloBlock *pmcb, Photon *pphot, int ip,
   if (nmag <= TINY_NUMBER) return false;
   for (int i = 0; i < 3; ++i) n[i] /= nmag;
 
-  return MeridianPair(n, lhat, rhat);
+  // the scattering routines read Q and U against the comoving frame's own third leg
+  const Real zleg[3] = {0.0, 0.0, 1.0};
+  return MeridianPair(n, zleg, lhat, rhat);
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn static bool MeridianPair(const Real n[3], Real lhat[3], Real rhat[3])
+//! \fn static bool MeridianPair(const Real n[3], const Real zref[3], ...)
 //! \brief the meridian pair for a unit direction in some orthonormal frame
 //
-//   l = normalize(z - (z.n) n),   r = n x l,
+//   l = normalize(zref - (zref.n) n),   r = n x l,
 //
-// with z the frame's third spatial leg.  Split out so that the frame can be chosen by the
-// caller: the scattering routines want the comoving frame, the outputs want the normal
-// observer.  Returns false when n is parallel to z, where the meridian is undefined.
+// Split out so that both the frame and the axis within it can be chosen by the caller: the
+// scattering routines want the comoving frame's own third leg, while the outputs want a
+// single physical direction shared by every photon.  zref is given in the same tetrad
+// components as n and must be a unit vector.
+//
+// When n is parallel to zref the meridian plane is undefined, and every caller needs a
+// pair anyway: the scattering routines read and write Stokes parameters against it on
+// both sides of a scatter, and returning nothing left the coherency tensor stale for a
+// photon scattered exactly along the axis.  The pair returned is the limit of the generic
+// formula approached along the phi = 0 meridian, l -> -sign(zref.n) x-hat with x-hat the
+// frame's first leg, which is also the convention ScatterThomsonPolarized falls back to
+// when its own azimuth is undefined (phio = 0 for sin(theta) = 0).  Any fixed choice
+// would close the round trip; this one is continuous with the neighbouring directions.
+// Should n be parallel to the first leg as well -- impossible while it is also parallel
+// to zref, but guarded -- the second leg is used instead.
 
-static bool MeridianPair(const Real n[3], Real lhat[3], Real rhat[3]) {
+bool MeridianPair(const Real n[3], const Real zref[3], Real lhat[3], Real rhat[3]) {
 
-  Real l[3] = {-n[2]*n[0], -n[2]*n[1], 1.0 - n[2]*n[2]};
+  Real zdn = zref[0]*n[0] + zref[1]*n[1] + zref[2]*n[2];
+  Real l[3] = {zref[0] - zdn*n[0], zref[1] - zdn*n[1], zref[2] - zdn*n[2]};
   Real lmag = std::sqrt(SQR(l[0]) + SQR(l[1]) + SQR(l[2]));
-  if (lmag <= TINY_NUMBER) return false;          // photon along the frame z axis
+  if (lmag <= TINY_NUMBER) {
+    // n along the reference axis: take the phi = 0 limit described above
+    Real a[3] = {1.0, 0.0, 0.0};
+    if (std::fabs(n[0]) > 1.0 - 1.0e-8) { a[0] = 0.0; a[1] = 1.0; }
+    Real adn = a[0]*n[0] + a[1]*n[1] + a[2]*n[2];
+    for (int i = 0; i < 3; ++i) l[i] = a[i] - adn*n[i];
+    lmag = std::sqrt(SQR(l[0]) + SQR(l[1]) + SQR(l[2]));
+    if (lmag <= TINY_NUMBER) return false;        // n has no magnitude at all
+    Real sgn = (zdn < 0.0) ? 1.0 : -1.0;
+    for (int i = 0; i < 3; ++i) l[i] *= sgn;
+  }
   for (int i = 0; i < 3; ++i) lhat[i] = l[i]/lmag;
 
   // r = n x l, completing a right-handed triad (l, r, n)
@@ -245,9 +251,13 @@ static void WriteMeridianStokes(Photon *pphot, int ip, Real ecov[4][4],
 //
 // The photon is in the coordinate frame whenever this is called, so the wavevector is
 // projected here rather than being read off the photon.  Because the frame is orthonormal
-// and the photon is null, the components that come back satisfy |k_spatial| = k^(0); a
-// reader can rely on that, and on the frame's third spatial leg being (0,0,1), to rebuild
-// the meridian basis from the stored components alone.
+// and the photon is null, the components that come back satisfy |k_spatial| = k^(0).
+//
+// Note that the photon list does not write photons as they are here: PhotonList::
+// AddPhoton rotates them onto the global cartesian legs before writing, so that the
+// wavevector columns and the Stokes parameters -- referenced by CoherencyToObserverStokes
+// to the meridian of the global z axis -- describe the same physical direction in the
+// same frame, and a reader can rebuild that meridian from the file alone.
 //
 // Returns false when there is no normal observer, which NormalObserver reports when
 // g^{tt} is not negative.  econ, ecov and ktet are left untouched in that case.
@@ -300,8 +310,36 @@ void CoherencyToObserverStokes(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   if (nmag <= TINY_NUMBER) return;
   Real n[3] = {ktet[IMC1]/nmag, ktet[IMC2]/nmag, ktet[IMC3]/nmag};
 
+  // Reference axis, in tetrad components.  (0,0,1) is the tetrad's third spatial leg,
+  // which is what ConstructTetrad grows from the third coordinate direction: e_z in a
+  // cartesian or cylindrical chart, and so already the global z axis there.  In spherical
+  // polar it is e_phi, which rotates with azimuth -- Q and U would then be referenced to a
+  // different physical plane for every photon, they could not be combined across the grid,
+  // and they would not vanish for a photon leaving along the polar axis.  Project the
+  // global z direction into the tetrad instead, so the stored Stokes parameters mean the
+  // same thing everywhere and agree with a spectrum binned on polar_axis.
+  Real zref[3] = {0.0, 0.0, 1.0};
+  if (pmcb->topology == MCTOPO_SPHERICAL) {
+    // z = r cos(theta), so d/dz = cos(theta) d/dr - (sin(theta)/r) d/dtheta
+    Real sth = std::sin(pphot->x2p[ip]);
+    Real cth = std::cos(pphot->x2p[ip]);
+    Real rad = pphot->x1p[ip];
+    if (rad <= TINY_NUMBER) return;
+    Real zcoord[4], ztet[4];
+    zcoord[IMC0] = 0.0;
+    zcoord[IMC1] = cth;
+    zcoord[IMC2] = -sth/rad;
+    zcoord[IMC3] = 0.0;
+    CoordinateToTetrad(zcoord, ztet, ecov);
+    Real zmag = std::sqrt(SQR(ztet[IMC1]) + SQR(ztet[IMC2]) + SQR(ztet[IMC3]));
+    if (zmag <= TINY_NUMBER) return;
+    zref[0] = ztet[IMC1]/zmag;
+    zref[1] = ztet[IMC2]/zmag;
+    zref[2] = ztet[IMC3]/zmag;
+  }
+
   Real lhat[3], rhat[3];
-  if (!MeridianPair(n, lhat, rhat)) return;   // photon along the frame z axis
+  if (!MeridianPair(n, zref, lhat, rhat)) return;   // direction has no magnitude
 
   WriteMeridianStokes(pphot, ip, ecov, lhat, rhat);
 }

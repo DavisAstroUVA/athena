@@ -29,6 +29,11 @@ GeneralPusher::GeneralPusher(MonteCarloBlock *pmcb)
 
   step_par = pmy_mcb->stepsize;
   acon_valid = false;
+  // A coordinate system whose Connect leaves components untouched would otherwise have
+  // them read as whatever was on the stack, which is silent and looks like a physics bug.
+  for (int i = 0; i < NCOORD; i++)
+    for (int j = 0; j < NCOORD; j++)
+      for (int k = 0; k < NCOORD; k++) gamma[i][j][k] = 0.0;
 
 }
 
@@ -526,11 +531,25 @@ void GeneralPusher::ApplyPolarizationRate(const Real acon[4][4],
 //! \fn void GeneralPusher::AdvanceStep(Photon *pphot, Real step, int ip)
 //! \brief advance the geodesic and, when it is tracked, the coherency tensor
 //
-// The coherency tensor is transported with Heun's method, which straddles the geodesic
-// step: the rate is taken once at the state the step starts from and once at the state it
-// ends at, and the two are averaged.  Writing the transport as dN/dl = L(l) N, that gives
+// The coherency tensor is transported with the midpoint rule: a half step to estimate the
+// tensor midway through the interval, then a full step from the initial value using the
+// rate evaluated there.  Writing the transport as dN/dl = -A(l) N, that is
 //
-//   N_(n+1) = [1 + h(L_n + L_(n+1))/2 + h^2 L_(n+1) L_n / 2] N_n,
+//   N_half = N_n + (h/2) f(A_n, N_n),    N_(n+1) = N_n + h f(A_mid, N_half),
+//
+// with A_mid the average of the connection contractions at the two ends of the step.
+//
+// ipole (ipolarray.c, push_polar) has a true midpoint to hand because its geodesic tracer
+// stores Xhalf and Kconhalf for every step: it runs the geodesic to completion first and
+// integrates the radiation along the stored ray.  Monte Carlo cannot work that way, since
+// the path is not known ahead of time so the midpoint is approximated as in blacklight
+// (polarized.cpp), by averaging the endpoints.  Averaging the contracted A rather than
+// averaging Gamma and k separately differs at O(h^2) in the operator and O(h^3) in N,
+// which is the scheme's own truncation error.
+//
+// Leaving RK4Step a single full step matters twice: the geodesic is untouched, so
+// unpolarized results stay bit-identical, and the endpoint contraction is still the last
+// one computed, so acon carries into the next step's predictor as it did before.
 
 void GeneralPusher::AdvanceStep(Photon *pphot, Real step, int ip) {
 
@@ -543,29 +562,37 @@ void GeneralPusher::AdvanceStep(Photon *pphot, Real step, int ip) {
   for (int i = 0; i < 4; i++)
     for (int j = 0; j < 4; j++) n0[i][j] = pphot->polten[i*4+j][ip];
 
-  // Predictor, evaluated where the step starts.  The previous step's corrector already
-  // evaluated the connection at exactly this position and wavevector -- only the tensor
-  // it was applied to differs -- so reuse it whenever nothing has moved the photon since.
+  // Rate at the step start.  The previous step evaluated the connection at exactly this
+  // position and wavevector -- only the tensor it was applied to differs -- so reuse it
+  // whenever nothing has moved the photon since.
   if (!acon_valid) ConnectionContraction(pphot, ip, acon);
-  ApplyPolarizationRate(acon, n0, d1);
+  Real acon_start[4][4];
+  for (int i = 0; i < 4; i++)
+    for (int k = 0; k < 4; k++) acon_start[i][k] = acon[i][k];
+  ApplyPolarizationRate(acon_start, n0, d1);
+
+  // Half step, giving the tensor midway through the interval
+  std::complex<Real> nhalf[4][4];
   for (int i = 0; i < 4; i++)
     for (int j = 0; j < 4; j++)
-      pphot->polten[i*4+j][ip] = n0[i][j] + d1[i][j]*step;
+      nhalf[i][j] = n0[i][j] + d1[i][j]*(0.5*step);
 
   RK4Step(pphot, step, ip);
 
-  // Corrector, evaluated where the step ends, on the predicted tensor.  This connection
-  // is what the next predictor reuses.
-  std::complex<Real> npred[4][4], d2[4][4];
-  for (int i = 0; i < 4; i++)
-    for (int j = 0; j < 4; j++) npred[i][j] = pphot->polten[i*4+j][ip];
+  // Contraction at the step end, which is also what the next step's predictor reuses
   ConnectionContraction(pphot, ip, acon);
-  ApplyPolarizationRate(acon, npred, d2);
   acon_valid = true;
+
+  // Rate at the midpoint, from the averaged operator applied to the half-step tensor
+  Real acon_mid[4][4];
+  for (int i = 0; i < 4; i++)
+    for (int k = 0; k < 4; k++) acon_mid[i][k] = 0.5*(acon_start[i][k] + acon[i][k]);
+  std::complex<Real> d2[4][4];
+  ApplyPolarizationRate(acon_mid, nhalf, d2);
 
   for (int i = 0; i < 4; i++)
     for (int j = 0; j < 4; j++)
-      pphot->polten[i*4+j][ip] = n0[i][j] + 0.5*step*(d1[i][j] + d2[i][j]);
+      pphot->polten[i*4+j][ip] = n0[i][j] + d2[i][j]*step;
 }
 
 //----------------------------------------------------------------------------------------

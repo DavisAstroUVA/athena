@@ -83,6 +83,12 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
       if (radial) {
         xlow = pin->GetReal("mesh","x1min");
         xhigh = pin->GetReal("mesh","x1max");
+      } else {
+        // Stratified in z = r cos(theta) rather than in r, so the profile is measured from
+        // the midplane out to zmax.  The disk is symmetric about z = 0, so only |z| is
+        // ever passed to DensityProfile and the lower bound is the midplane itself.
+        xlow = 0.0;
+        xhigh = pin->GetReal("problem","zmax");
       }
     }
   }
@@ -123,6 +129,38 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           for (int i=is; i<=ie; i++) {
             Real x1 = pcoord->x1v(i);
             if (!constdens) rho = DensityProfile(x1,xlow,xhigh,taumin,taumax,kappaes);
+            phydro->u(IDN,k,j,i) = rho;
+            phydro->u(IM1,k,j,i) = rho*vel;
+            phydro->u(IM2,k,j,i) = 0.0;
+            phydro->u(IM3,k,j,i) = 0.0;
+            phydro->u(IEN,k,j,i) = rideal*rho*tgas/(gamma-1.0);
+          }
+        }
+      }
+    } else {
+      // Vertically stratified disk: the density depends only on z = r cos(theta), so every
+      // cylindrical radius carries the same plane-parallel atmosphere and the emergent
+      // polarization can be compared against a plane-parallel solution.
+      //
+      // Above |z| = zmax the exponential simply continues, which is the right continuation
+      // for an isothermal atmosphere -- there is nothing up there.  Clamping the argument
+      // at zmax instead, so that everything above it carries the full surface density, is
+      // wrong in a way that is easy to miss: the atmosphere top is a plane (z = zmax) but
+      // the domain top is a cone (constant theta), and the wedge between them grows with
+      // radius.  Filled with surface-density material it is optically thin vertically
+      // (tau ~ 0.02) but not along a grazing ray (tau ~ 0.26 at mu = 0.06), so it
+      // contaminates the most grazing angle bin only, which is also the bin carrying most
+      // of the polarization signal.
+      Real rhofloor = pin->GetOrAddReal("problem","rhofloor",0.0);
+      for (int k=ks; k<=ke; k++) {
+        for (int j=js; j<=je; j++) {
+          Real cth = std::cos(pcoord->x2v(j));
+          for (int i=is; i<=ie; i++) {
+            Real zabs = std::fabs(pcoord->x1v(i)*cth);
+            if (!constdens) {
+              rho = DensityProfile(zabs,xlow,xhigh,taumin,taumax,kappaes);
+              if (rho < rhofloor) rho = rhofloor;
+            }
             phydro->u(IDN,k,j,i) = rho;
             phydro->u(IM1,k,j,i) = rho*vel;
             phydro->u(IM2,k,j,i) = 0.0;

@@ -1,0 +1,101 @@
+<comment>
+problem   = vertically stratified disk atmosphere, general pusher
+configure = --prob=mc_isoth --coord=spherical_polar -mc -mpi
+reference = tst/montecarlo/thomson_polarized_spectrum (the cartesian slab this mirrors)
+
+# Emergent polarization from a scattering atmosphere stratified in z = r cos(theta), the
+# spherical-polar counterpart of the cartesian slab test.  The optical depths, temperature
+# and emission match it, so the same Feautrier solution describes both.
+#
+# Geometry.  theta runs from the pole to the midplane, so the midplane is ox2 (absorbing,
+# as the slab's z = 0 floor is) and the only boundaries the slab lacks are the two radial
+# walls.  The inner radius is twice zmax so that the hole in the disk is a small fraction
+# of the emitting area.
+#
+# Resolution.  Density is laid down from the cell-center z, so the vertical cell r*dtheta
+# inside the atmosphere is what has to resolve the scale height (6.2e9 cm), and the
+# atmosphere occupies only the last few degrees above the midplane at x1max.  The theta
+# spacing is therefore geometric, x2rat < 1, shrinking toward the midplane: with 512 cells
+# and 0.993 the midplane cell at x1max is a twelfth of a scale height, the atmosphere top
+# a fifth there and an eighth at x1min, and the cells near the pole, where the density is
+# negligible, are 0.65 degrees.  disk_atmosphere.py prints these numbers for any pairing.
+#
+# Binning.  The output is a photon list, and it must be binned with a height mask: photons
+# that left the domain at z <= zmax crossed a wall inside the atmosphere and are side
+# leaks, while those that left at z > zmax through either wall have emerged and drifted
+# outward, and include the grazing photons the polarization signal lives in.  screen.py in
+# this directory supplies that mask for make_spectrum.py:
+#
+#   python make_spectrum.py mcdisk.out1.proc0.00000.list --screen above_zmax \
+#          --nx 32 --xmin 1e-3 --xmax 0.1 --nmu 8 --nphi 8
+#
+# and disk_atmosphere.py applies the same mask when it runs the convergence ladder.
+
+<job>
+problem_id = mcdisk
+
+<output1>
+file_type = phlist
+
+<time>
+cfl_number = 0.1
+nlim = 1
+tlim = 1.0
+
+<mesh>
+nx1        = 32
+x1min      = 2.000000e+11
+x1max      = 1.600000e+12
+ix1_bc     = outflow
+ox1_bc     = outflow
+ix1_mc_bc  = escape
+ox1_mc_bc  = escape
+
+nx2        = 512
+x2min      = 0.0
+x2max      = 1.5707963267948966
+x2rat      = 0.993
+ix2_bc     = polar
+ox2_bc     = outflow
+ix2_mc_bc  = polar
+ox2_mc_bc  = absorb
+
+nx3        = 8
+x3min      = 0.0
+x3max      = 6.283185307179586
+ix3_bc     = periodic
+ox3_bc     = periodic
+ix3_mc_bc  = periodic
+ox3_mc_bc  = periodic
+
+<meshblock>
+nx1 = 8
+nx2 = 64
+nx3 = 8
+
+<hydro>
+gamma = 1.666666666666667
+iso_sound_speed = 1.0
+
+<montecarlo>
+# drop general_pusher/stepsize/varystep/capmove to run the legacy spherical pusher instead
+nphot      = 1000000
+iseed      = 1300431
+scattering = thomson
+emission   = freefree
+absorption = freefree
+polarized  = linear
+general_pusher = true
+stepsize   = 0.5
+varystep   = true
+capmove    = 2000000
+
+<problem>
+# radial = false selects the z-stratified branch of mc_isoth; true stratifies in r instead
+radial     = false
+zmax       = 1.000000e+11
+temp       = 1.000000e+05
+taumin     = 1.000000e-03
+taumax     = 1.000000e+04
+emin       = 1.000000e+00
+emax       = 1.000000e+02
