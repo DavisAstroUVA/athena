@@ -14,7 +14,17 @@ M4 removes nothing on either deck because both problem generators enroll user mo
 which keeps the moment deposition and with it the tetrad cache; it applies to the XRB
 generator, which enrolls none. `mc_poltest` (gr_user, no moments) exercises the skipped
 path. The end-of-run line `peak resident memory = ... MB per rank (max), ... MB total` is
-the in-code measurement from section 0. Target run: `src/pgen/mc_xrb_hdf_gr.cpp` on `gr_user` with the
+the in-code measurement from section 0.
+
+Gates run on the finished phase: `poltest`, `spherical_polarization` and `kerr_frames`
+pass; `disk_atmosphere` at its default ladder passes on the legacy pusher and, on the
+general pusher, reads under-powered on the grazing check exactly as it did before this
+work (see `polar_axis_notes.md`). A one-rank, 200000-photon general-pusher disk run on the
+pristine and the modified source gives identical tallies (escaped, absorbed, destroyed,
+scatters) and byte-identical transport columns, with Q and U differing by at most 8e-12
+after some 80 scatters per photon. Polarization costs a factor 1.5 (free flight only) to
+1.7 (Thomson-dominated) in run time on the pristine build, measured for the Phase S
+baseline. Target run: `src/pgen/mc_xrb_hdf_gr.cpp` on `gr_user` with the
 Cartesian Kerr-Schild metric, `emission = freefree`, `absorption = freefree`, Thomson or
 Compton scattering, `polarized = linear`, general pusher, MC post-processing (`dynamic =
 false`). Everything below is scoped to changes that leave the code structure alone: no
