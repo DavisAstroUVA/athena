@@ -46,6 +46,17 @@ public:
   bool IsNanPhoton(int ip);
   void PolarizationToTetrad(std::complex<Real> ttet[4][4], Real ecov[4][4], const int ip);
   void PolarizationToCoord(std::complex<Real> ttet[4][4], Real econ[4][4], const int ip);
+
+  //! The coherency tensor is Hermitian, so it is stored as sixteen reals rather than
+  //! sixteen complex numbers: the four real diagonal entries in slots 0..3, then the real
+  //! and imaginary parts of the six entries above the diagonal, in the order (0,1) (0,2)
+  //! (0,3) (1,2) (1,3) (2,3).  Nothing outside these four functions knows the layout.
+  //! LoadTensor expands to the full complex 4x4, mirroring the lower triangle as the
+  //! conjugate; StoreTensor keeps the diagonal's real part and the upper triangle.
+  static int TensorSlot(int i, int j, bool imag);
+  void LoadTensor(int ip, std::complex<Real> n[4][4]) const;
+  void StoreTensor(int ip, const std::complex<Real> n[4][4]);
+  std::complex<Real> Tensor(int ip, int i, int j) const;
   void AllocatePhotons(int nphot);
   void SendToNeighbors();
   void ApplyPeriodicBoundary(Real &x1, Real &x2, Real &x3, int k);
@@ -126,7 +137,9 @@ public:
   std::vector<Real> &sip, &sqp, &sup, &svp;
   std::vector<Real> &dtp;
   std::vector<Real> *user;     //!>   user variable arrays
-  std::vector<std::complex<Real>> *polten; //!> polarization tensor
+  //! the sixteen real columns of the coherency tensor; see TensorSlot for the layout, and
+  //! go through LoadTensor/StoreTensor/Tensor rather than indexing this directly
+  std::vector<Real> *polten;
 
   static bool initialized;
   static MCPolarization polarized;

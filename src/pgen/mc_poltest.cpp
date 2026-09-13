@@ -414,11 +414,11 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
       printf("Nr: %e %e %e\n",Nrr,Nrth,Nrph);
       printf("Nth: %e %e\n",Nthth,Nthph);
       printf("Nph: %e\n",Nphph);
-      printf("tcord[IMC1]: %e %e %e\n", pphot->polten[IMC1*4+IMC1][ip].real(),
-             pphot->polten[IMC1*4+IMC2][ip].real(),pphot->polten[IMC1*4+IMC3][ip].real());
-      printf("tcord[IMC2]: %e %e\n",pphot->polten[IMC2*4+IMC2][ip].real(),
-             pphot->polten[IMC2*4+IMC3][ip].real());
-      printf("tcord[IMC3]: %e\n",pphot->polten[IMC3*4+IMC3][ip].real());
+      printf("tcord[IMC1]: %e %e %e\n", pphot->Tensor(ip,IMC1,IMC1).real(),
+             pphot->Tensor(ip,IMC1,IMC2).real(), pphot->Tensor(ip,IMC1,IMC3).real());
+      printf("tcord[IMC2]: %e %e\n", pphot->Tensor(ip,IMC2,IMC2).real(),
+             pphot->Tensor(ip,IMC2,IMC3).real());
+      printf("tcord[IMC3]: %e\n", pphot->Tensor(ip,IMC3,IMC3).real());
     }
 
 
@@ -547,11 +547,11 @@ void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip) {
     printf("Nr: %e %e %e\n",Nrr,Nrth,Nrph);
     printf("Nth: %e %e\n",Nthth,Nthph);
     printf("Nph: %e\n",Nphph);
-    printf("tcord[IMC1]: %e %e %e\n",pphot->polten[IMC1*4+IMC1][ip].real(),
-           pphot->polten[IMC1*4+IMC2][ip].real(),pphot->polten[IMC1*4+IMC3][ip].real());
-    printf("tcord[IMC2]: %e %e\n",pphot->polten[IMC2*4+IMC2][ip].real(),
-           pphot->polten[IMC2*4+IMC3][ip].real());
-    printf("tcord[IMC3]: %e\n",pphot->polten[IMC3*4+IMC3][ip].real());
+    printf("tcord[IMC1]: %e %e %e\n", pphot->Tensor(ip,IMC1,IMC1).real(),
+           pphot->Tensor(ip,IMC1,IMC2).real(), pphot->Tensor(ip,IMC1,IMC3).real());
+    printf("tcord[IMC2]: %e %e\n", pphot->Tensor(ip,IMC2,IMC2).real(),
+           pphot->Tensor(ip,IMC2,IMC3).real());
+    printf("tcord[IMC3]: %e\n", pphot->Tensor(ip,IMC3,IMC3).real());
 
     Real cosd = spsi*sphi+cpsi*cphi;
     Real sind = spsi*cphi-cpsi*sphi;

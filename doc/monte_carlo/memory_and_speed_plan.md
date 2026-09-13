@@ -1,7 +1,20 @@
 # Memory footprint and speed of general-relativistic Monte Carlo runs: plan
 
-Status: **not started**. Written 2026-09-12 from a survey of the code as it stands on
-`polarization_update`. Target run: `src/pgen/mc_xrb_hdf_gr.cpp` on `gr_user` with the
+Status: **Phase M implemented (M1 to M5), Phase S not started.** Written 2026-09-12 from
+a survey of the code as it stands on `polarization_update`; Phase M landed 2026-09-13 on
+`memory_reduction`. Measured on one rank, `/usr/bin/time -v` maximum resident set:
+
+| deck | baseline | after M1 to M3 | after M5 | photon list / spectrum |
+|---|---|---|---|---|
+| snake atmosphere, `gr_user`, 32x32x128 in 16 blocks, 200000 photons | 603 MB | 285 MB | | spectrum byte-identical |
+| same, 20000 photons | 503 MB | 187 MB | 182 MB | transport identical; Q, U differ at 5e-16 |
+| isothermal shell, `kerr-schild`, 128x8x8, 200000 photons, polarized | 122 MB | | 92 MB | transport columns byte-identical; Q, U differ by 2e-16 |
+
+M4 removes nothing on either deck because both problem generators enroll user moments,
+which keeps the moment deposition and with it the tetrad cache; it applies to the XRB
+generator, which enrolls none. `mc_poltest` (gr_user, no moments) exercises the skipped
+path. The end-of-run line `peak resident memory = ... MB per rank (max), ... MB total` is
+the in-code measurement from section 0. Target run: `src/pgen/mc_xrb_hdf_gr.cpp` on `gr_user` with the
 Cartesian Kerr-Schild metric, `emission = freefree`, `absorption = freefree`, Thomson or
 Compton scattering, `polarized = linear`, general pusher, MC post-processing (`dynamic =
 false`). Everything below is scoped to changes that leave the code structure alone: no
@@ -88,12 +101,15 @@ the `gr_user` build of the GR deck; the list is *bitwise*.
 
 ### M2. Same gate for the hydro integrator's registers
 
-**What.** In the `Hydro` constructor skip `u1`, `w1` and `flux[0..2]` when
-`HydroIsStatic`. Keep `u` and `w`: the problem generator calls `PrimitiveToConserved` into
-`u`, and hydro outputs may be requested from an MC run. `u2`, `u0`, `fl_div`, `u_cc`,
-`w_cc` are already conditional on the integrator and order and stay as they are.
+**What.** In the `Hydro` constructor skip `u1` and `flux[0..2]` when `HydroIsStatic`.
+Keep `u` and `w`: the problem generator calls `PrimitiveToConserved` into `u`, and hydro
+outputs may be requested from an MC run. **Keep `w1` as well**, found during
+implementation: `Mesh::Initialize` passes it to `ConservedToPrimitive` as the previous
+state, restarts pack it (`meshblock.cpp`, `restart.cpp`), and `mc_isoth_gr` and
+`mc_snake_atm` write it alongside `w`. `u2`, `u0`, `fl_div`, `u_cc`, `w_cc` are already
+conditional on the integrator and order and stay as they are.
 
-**Expected gain.** ~25 Reals per cell. **Check:** as M1, *bitwise*.
+**Expected gain.** ~20 Reals per cell. **Check:** as M1, *bitwise*.
 
 ### M3. Same gate for the field's integrator registers
 
@@ -134,10 +150,15 @@ skipped when `ncplx == 0`, as its constructor already allows).
 
 **Why it is last in this phase.** It touches the photon layout, so it is the one item in
 the phase that needs `make clean` and a full re-run of the polarization gates:
-`spherical_polarization`, `poltest`, `snake_polarization`, `disk_atmosphere`. The store
-and load are exact, so the transport is *bitwise* provided the helpers reproduce the
-complex arithmetic order in `AdvanceStep`; if they do not, it is *statistical* with the
-gates as the criterion.
+`spherical_polarization`, `poltest`, `snake_polarization`, `disk_atmosphere`.
+
+**What it turned out to be.** The transport in `AdvanceStep` preserves Hermiticity
+exactly in floating point, so on the geodesic and the scattering draws the change is
+*bitwise*. The frame transforms (`PolarizationToCoord` and friends) sum the same terms
+in a different order for (i,j) and (j,i), so the mirrored lower triangle can differ from
+the full product in its last bit; that reaches the Stokes parameters at the 1e-16 level
+and nothing else. The complex property machinery in `Particles` and the exchange is
+left in place with a count of zero.
 
 **Expected gain.** 128 bytes per photon, 27 percent of the photon footprint. It also
 halves the exchange traffic per polarized photon and sets up S4.

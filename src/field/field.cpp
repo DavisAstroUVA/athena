@@ -18,6 +18,7 @@
 #include "../coordinates/coordinates.hpp"
 #include "../hydro/hydro.hpp"
 #include "../mesh/mesh.hpp"
+#include "../monte_carlo/mcstatic.hpp"
 #include "../reconstruct/reconstruction.hpp"
 #include "field.hpp"
 #include "field_diffusion/field_diffusion.hpp"
@@ -26,16 +27,37 @@
 
 Field::Field(MeshBlock *pmb, ParameterInput *pin) :
     pmy_block(pmb), b(pmb->ncells3, pmb->ncells2, pmb->ncells1),
-    b1(pmb->ncells3, pmb->ncells2, pmb->ncells1),
+    // Everything but b and bcc serves the constrained-transport update, which a Monte
+    // Carlo post-processing run never performs (see monte_carlo/mcstatic.hpp); those
+    // arrays are not allocated.
+    b1(pmb->ncells3, pmb->ncells2, pmb->ncells1,
+       (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+        AthenaArray<Real>::DataStatus::allocated)),
     bcc(NFIELD, pmb->ncells3, pmb->ncells2, pmb->ncells1),
-    e(pmb->ncells3, pmb->ncells2, pmb->ncells1),
-    wght(pmb->ncells3, pmb->ncells2, pmb->ncells1),
-    e2_x1f( pmb->ncells3   , pmb->ncells2   ,(pmb->ncells1+1)),
-    e3_x1f( pmb->ncells3   , pmb->ncells2   ,(pmb->ncells1+1)),
-    e1_x2f( pmb->ncells3   ,(pmb->ncells2+1), pmb->ncells1   ),
-    e3_x2f( pmb->ncells3   ,(pmb->ncells2+1), pmb->ncells1   ),
-    e1_x3f((pmb->ncells3+1), pmb->ncells2   , pmb->ncells1   ),
-    e2_x3f((pmb->ncells3+1), pmb->ncells2   , pmb->ncells1   ),
+    e(pmb->ncells3, pmb->ncells2, pmb->ncells1,
+      (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+       AthenaArray<Real>::DataStatus::allocated)),
+    wght(pmb->ncells3, pmb->ncells2, pmb->ncells1,
+         (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+          AthenaArray<Real>::DataStatus::allocated)),
+    e2_x1f( pmb->ncells3   , pmb->ncells2   ,(pmb->ncells1+1),
+           (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+            AthenaArray<Real>::DataStatus::allocated)),
+    e3_x1f( pmb->ncells3   , pmb->ncells2   ,(pmb->ncells1+1),
+           (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+            AthenaArray<Real>::DataStatus::allocated)),
+    e1_x2f( pmb->ncells3   ,(pmb->ncells2+1), pmb->ncells1   ,
+           (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+            AthenaArray<Real>::DataStatus::allocated)),
+    e3_x2f( pmb->ncells3   ,(pmb->ncells2+1), pmb->ncells1   ,
+           (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+            AthenaArray<Real>::DataStatus::allocated)),
+    e1_x3f((pmb->ncells3+1), pmb->ncells2   , pmb->ncells1   ,
+           (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+            AthenaArray<Real>::DataStatus::allocated)),
+    e2_x3f((pmb->ncells3+1), pmb->ncells2   , pmb->ncells1   ,
+           (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+            AthenaArray<Real>::DataStatus::allocated)),
     coarse_bcc_(3, pmb->ncc3, pmb->ncc2, pmb->ncc1,
                 (pmb->pmy_mesh->multilevel ? AthenaArray<Real>::DataStatus::allocated :
                  AthenaArray<Real>::DataStatus::empty)),
@@ -71,11 +93,13 @@ Field::Field(MeshBlock *pmb, ParameterInput *pin) :
     }
   }
 
-  // Allocate memory for scratch vectors
-  if (!pm->f3)
-    cc_e_.NewAthenaArray(ncells3, ncells2, ncells1);
-  else
-    cc_e_.NewAthenaArray(3, ncells3, ncells2, ncells1);
+  // Allocate memory for scratch vectors.  cc_e_ is the corner-EMF scratch, integrator only.
+  if (!HydroIsStatic(pin)) {
+    if (!pm->f3)
+      cc_e_.NewAthenaArray(ncells3, ncells2, ncells1);
+    else
+      cc_e_.NewAthenaArray(3, ncells3, ncells2, ncells1);
+  }
 
   face_area_.NewAthenaArray(ncells1);
   edge_length_.NewAthenaArray(ncells1);

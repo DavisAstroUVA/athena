@@ -64,7 +64,7 @@ Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
   nuser_var = pmcb->pmy_mc->nuser_var;
   // SWD: should these be set or controlled by flags?
   user = &(rp[iuserp]);
-  polten = &(cplxprop[ipolp]);
+  polten = &(rp[ipolp]);
   npar = 0;
 
 
@@ -113,7 +113,7 @@ void Photon::PrintPhoton(int ip) const {
       std:: cout << "pol tensor: ";
         for (int k = 0; k < 4; k++) {
           for (int l = 0; l < 4; l++) {
-            std:: cout << polten[k*4+l][ip] << " ";
+            std:: cout << Tensor(ip, k, l) << " ";
           }
           std::cout << std::endl;
         }
@@ -167,10 +167,7 @@ bool Photon::IsNanPhoton(int ip) {
     // Only the general pusher carries the tensor.
     if (general_pusher_flag) {
       for (int i = 0; i < 16; ++i) {
-        if (std::isnan(polten[i][ip].real()) || std::isnan(polten[i][ip].imag()) ||
-            std::isinf(polten[i][ip].real()) || std::isinf(polten[i][ip].imag())) {
-          return true;
-        }
+        if (std::isnan(polten[i][ip]) || std::isinf(polten[i][ip])) return true;
       }
     }
   }
@@ -208,6 +205,9 @@ void Photon::AllocatePhotons(int nphot) {
 void Photon::PolarizationToTetrad(std::complex<Real> ttet[4][4], Real ecov[4][4],
                                   const int ip) {
 
+  std::complex<Real> n[4][4];
+  LoadTensor(ip, n);
+
   for (int i = 0; i < 4; i++)
     for (int j = 0; j < 4; j++)
       ttet[i][j] = std::complex<Real>(0.,0.);
@@ -216,7 +216,7 @@ void Photon::PolarizationToTetrad(std::complex<Real> ttet[4][4], Real ecov[4][4]
     for (int j = 0; j < 4; j++)
       for (int k = 0; k < 4; k++)
         for (int l = 0; l < 4; l++) {
-          ttet[i][j] += polten[k*4+l][ip] * ecov[i][k] * ecov[j][l];
+          ttet[i][j] += n[k][l] * ecov[i][k] * ecov[j][l];
         }
 
 }
@@ -230,17 +230,66 @@ void Photon::PolarizationToTetrad(std::complex<Real> ttet[4][4], Real ecov[4][4]
 void Photon::PolarizationToCoord(std::complex<Real> ttet[4][4], Real econ[4][4],
                                  const int ip) {
 
+  std::complex<Real> n[4][4];
   for(int i = 0; i < NCOORD; i++)
     for(int j = 0; j < NCOORD; j++)
-      polten[i*4+j][ip] = std::complex<Real>(0.,0.);
+      n[i][j] = std::complex<Real>(0.,0.);
 
   for(int i = 0; i < NCOORD; i++)
     for(int j = 0; j < NCOORD; j++)
       for(int k = 0; k < NCOORD; k++)
         for(int l = 0; l < NCOORD; l++) {
-          polten[i*4+j][ip] += ttet[k][l] * econ[k][i] * econ[l][j];
+          n[i][j] += ttet[k][l] * econ[k][i] * econ[l][j];
         }
 
+  StoreTensor(ip, n);
+}
+
+//----------------------------------------------------------------------------------------
+//! Hermitian storage of the coherency tensor.  See the declaration in photon.hpp.
+//
+// The transport in GeneralPusher::AdvanceStep preserves Hermiticity exactly in floating
+// point (each lower-triangle term is the conjugate of the matching upper-triangle term,
+// operation for operation). The frame transforms above sum the same terms in a different
+// order for (i,j) and (j,i)
+
+namespace {
+// index of the pair (i,j), i < j, in the order (0,1) (0,2) (0,3) (1,2) (1,3) (2,3)
+const int kPairIndex[4][4] = {{-1, 0, 1, 2}, {0, -1, 3, 4}, {1, 3, -1, 5}, {2, 4, 5, -1}};
+} // namespace
+
+int Photon::TensorSlot(int i, int j, bool imag) {
+  if (i == j) return i;
+  return 4 + 2*kPairIndex[i][j] + (imag ? 1 : 0);
+}
+
+void Photon::LoadTensor(int ip, std::complex<Real> n[4][4]) const {
+  for (int i = 0; i < 4; i++) {
+    n[i][i] = std::complex<Real>(polten[i][ip], 0.);
+    for (int j = i+1; j < 4; j++) {
+      const int p = 4 + 2*kPairIndex[i][j];
+      n[i][j] = std::complex<Real>(polten[p][ip], polten[p+1][ip]);
+      n[j][i] = std::conj(n[i][j]);
+    }
+  }
+}
+
+void Photon::StoreTensor(int ip, const std::complex<Real> n[4][4]) {
+  for (int i = 0; i < 4; i++) {
+    polten[i][ip] = n[i][i].real();
+    for (int j = i+1; j < 4; j++) {
+      const int p = 4 + 2*kPairIndex[i][j];
+      polten[p][ip] = n[i][j].real();
+      polten[p+1][ip] = n[i][j].imag();
+    }
+  }
+}
+
+std::complex<Real> Photon::Tensor(int ip, int i, int j) const {
+  if (i == j) return std::complex<Real>(polten[i][ip], 0.);
+  const int p = 4 + 2*kPairIndex[i][j];
+  const std::complex<Real> upper(polten[p][ip], polten[p+1][ip]);
+  return (i < j) ? upper : std::conj(upper);
 }
 
 //--------------------------------------------------------------------------------------
@@ -306,13 +355,11 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
     isup = AddRealProperty("sup");
     isvp = AddRealProperty("svp");
     if (general_pusher_flag) {
-      // Add complex polarization tensor
-      for (int i=0; i<4; i++) {
-        for (int j=0; j<4; j++) {
-          int idummy = AddComplexProperty("pol"+std::to_string(i)+std::to_string(j));
-          if ( (i==0) && (j==0))
-            ipolp = idummy;
-          }
+      // The coherency tensor, as sixteen consecutive real columns (Hermitian storage; the
+      // layout is TensorSlot's).  Consecutive because polten is a pointer to the first.
+      for (int n = 0; n < 16; n++) {
+        int idummy = AddRealProperty("pol"+std::to_string(n));
+        if (n == 0) ipolp = idummy;
       }
     }
   }
@@ -430,8 +477,8 @@ void Photon::SendToNeighbors() {
       *pr++ = rp[j][k];
     for (int j = 0; j < naux; ++j)
       *pr++ = aux[j][k];
-    // copy complex properties
-    if (general_pusher_flag && IsPolarized(polarized)) {
+    // copy complex properties (none at present: the coherency tensor travels as reals)
+    if (ParticleBuffer::ncplx > 0) {
       std::complex<Real> *pc(ppb->cbuf + ParticleBuffer::ncplx * ppb->npar);
       for (int j = 0; j < ncplx; ++j) {
         *pc++ = cplxprop[j][k];
@@ -504,7 +551,7 @@ void Photon::SendToNeighbors() {
                   dst, send.tag + 2, my_comm, &req);
         MPI_Request_free(&req);
         // Send complex properties
-        if (general_pusher_flag && IsPolarized(polarized)) {
+        if (ParticleBuffer::ncplx > 0) {
           MPI_Isend(send.cbuf, npsend * ParticleBuffer::ncplx, MPI_ATHENA_COMPLEX,
                     dst, send.tag + 3, my_comm, &req);
           MPI_Request_free(&req);
@@ -643,7 +690,7 @@ bool Photon::ReceiveFromNeighbors() {
 	    //MPI_Status stat;
 	    //MPI_Request_get_status(recv.reqr,&test,&stat);
 	    //printf("t2: %d %d %d %d %d %d %d %d %d %d\n",Globals::my_rank,nb_rank,nb.snb.lid,nb.bufid,recv.tag+1,pmy_block->lid,test,stat.MPI_SOURCE,stat.MPI_TAG,stat.MPI_ERROR);
-            if (general_pusher_flag && IsPolarized(polarized)) {
+            if (ParticleBuffer::ncplx > 0) {
               MPI_Irecv(recv.cbuf, recv.npar * ParticleBuffer::ncplx, MPI_ATHENA_COMPLEX,
                         nb_rank, recv.tag + 3, my_comm, &recv.reqc);
             }
@@ -713,9 +760,7 @@ bool Photon::ReceiveFromNeighbors() {
 
 int Photon::PropertyCountInt()  { return ParticleBuffer::nint; }
 int Photon::PropertyCountReal() { return ParticleBuffer::nreal; }
-int Photon::PropertyCountCplx() {
-  return (general_pusher_flag && IsPolarized(polarized)) ? ParticleBuffer::ncplx : 0;
-}
+int Photon::PropertyCountCplx() { return ParticleBuffer::ncplx; }
 
 //--------------------------------------------------------------------------------------
 //! \fn void Photon::CollectPeerRanks(std::vector<bool> &seen) const
