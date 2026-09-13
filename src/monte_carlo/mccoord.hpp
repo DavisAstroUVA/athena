@@ -95,8 +95,8 @@ public:
   //                            reached only through GeneralPusher::ConnectionContraction,
   //                            which builds A^i_k = Gamma^i_kl k^l for the coherency
   //                            tensor transport.  An unpolarized run never calls it.
-  //                            Also used in VerletStep, whose call sites are commented
-  //                            out in favor of RK4Step.
+  //                            Also used in VerletStep, which is compiled only with
+  //                            MC_VERLET_DK (photon.hpp); RK4Step is the integrator.
   //   Tetrad, InverseTetrad    Only the non-GR branches of TransformToComoving and
   //                            TransformToCoordinate, and the flat branch of
   //                            PhotonFrames::Fill (gr_tetrad_ is false there).  A GR run
@@ -113,6 +113,15 @@ public:
   virtual void Connect(Real x[4],Real gamma[4][4][4]);
   virtual void Tetrad(Real x[4], Real tetrad[4][4]);
   virtual void InverseTetrad(Real x[4], Real invtet[4][4]);
+
+  //! Fused evaluations for the general pusher's step loop, which wants these pairs at
+  //! the same point: the geodesic right-hand side needs g^{mu nu} and its derivative,
+  //! and the end of a step needs g_{mu nu} and g^{mu nu} together.  The defaults call
+  //! the two single-purpose functions above, in that order. Kerr-Schild overrides them
+  //! to compute the shared intermediates once per point.
+  virtual void MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4]);
+  virtual void InverseMetricAndDerivative(Real x[4], Real gcon[4][4],
+                                          Real dgcon[4][4][4]);
 
   Real GetMass() const {return bh_mass_;}
   Real GetSpin() const {return bh_spin_;}
@@ -188,7 +197,23 @@ public:
   void InverseMetric(Real x[4], Real gcov[4][4]);
   void Connect(Real x[4], Real gamma[4][4][4]);
   void InverseMetricDerivative(Real x[4], Real dgcon[4][4][4]);
+  void MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4]);
+  void InverseMetricAndDerivative(Real x[4], Real gcon[4][4], Real dgcon[4][4][4]);
 
+private:
+  //! the point quantities every metric function of this class is built from, computed
+  //! once by PointQuantities and consumed by the Fill* assemblers.  The single-purpose
+  //! functions and the fused ones share these, so a value can only be defined here.
+  struct Point {
+    Real a, a2, r, r2, sth, cth, sth2, cth2, s2th, c2th, sigma, sigma2, delta, A, alts;
+    // reciprocals taken once here; the assemblers multiply by them.  Divisions were most
+    // of the cost of the derivative and the connection under the profiler.
+    Real inv_sigma, inv_sigma2, inv_sigma3, inv_sth, inv_sth2;
+  };
+  void PointQuantities(const Real x[4], Point &p) const;
+  static void FillMetric(const Point &p, Real gcov[4][4]);
+  static void FillInverse(const Point &p, Real gcon[4][4]);
+  static void FillInverseDerivative(const Point &p, Real dgcon[4][4][4]);
 };
 
 //----------------------------------------------------------------------------------------
@@ -206,7 +231,25 @@ public:
   void InverseMetric(Real x[4], Real gcov[4][4]);
   void Connect(Real x[4], Real gamma[4][4][4]);
   void InverseMetricDerivative(Real x[4], Real dgcon[4][4][4]);
+  void MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4]);
+  void InverseMetricAndDerivative(Real x[4], Real gcon[4][4], Real dgcon[4][4][4]);
 
+private:
+  //! the point quantities of g = eta + f l l: the Kerr radius, f and the spatial null
+  //! vector, and, when PointDerivatives has run, their gradients.  Shared by the
+  //! single-purpose functions and the fused ones so that each formula has one home.
+  struct Point {
+    Real a, m, a2, rr2, r2, r, f, l1, l2, l3;
+    // reciprocals taken once: 1/(r^2+a^2), 1/r, 1/(r^4 + a^2 z^2)
+    Real inv_ra2, inv_r, inv_den;
+    Real dr_dx, dr_dy, dr_dz, df_dx, df_dy, df_dz;
+    Real dl1_dx, dl1_dy, dl1_dz, dl2_dx, dl2_dy, dl2_dz, dl3_dx, dl3_dy, dl3_dz;
+  };
+  void PointQuantities(const Real x[4], Point &p) const;
+  void PointDerivatives(const Real x[4], Point &p) const;
+  static void FillMetric(const Point &p, Real gcov[4][4]);
+  static void FillInverse(const Point &p, Real gcon[4][4]);
+  static void FillInverseDerivative(const Point &p, Real dgcon[4][4][4]);
 };
 
 //----------------------------------------------------------------------------------------

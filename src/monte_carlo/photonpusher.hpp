@@ -144,7 +144,9 @@ public:
   // functions
   void Move(Photon *pphot, int ips, int ipe);
   void UpdateOpacities(Photon *pphot, MonteCarloBlock *pmcb, int ip);
+#if MC_VERLET_DK
   void VerletStep(Photon *pphot, Real step, int ip);
+#endif
   void RK4Step(Photon *pphot, Real step, int ip);
   void SubStep(Real xcon[4], Real kcov[4], Real dl[8]);
   void AdvanceStep(Photon *pphot, Real step, int ip);
@@ -157,6 +159,16 @@ public:
   Real acon[4][4];
   bool acon_valid;
   Real StepSize(Photon *pphot, int ip);
+
+  // The metric pair at the point the last RK4 step ended
+  Real metric_x[4];
+  Real metric_gcov[4][4];
+  Real metric_gcon[4][4];
+  bool metric_valid;
+  //! g_{mu nu} and g^{mu nu} at x, from the cache when x is the cached point
+  void MetricPairAt(Real x[4], Real gcov[4][4], Real gcon[4][4]);
+  //! whether the coherency tensor is transported; constant for the run, read every step
+  bool polarized_;
 
 };
 

@@ -26,6 +26,7 @@ int Photon::ii1p = -1, Photon::ii2p = -1, Photon::ii3p = -1;
 int Photon::ix0p = -1, Photon::ix1p = -1, Photon::ix2p = -1, Photon::ix3p = -1;
 int Photon::ik0p = -1, Photon::ik1p = -1, Photon::ik2p = -1, Photon::ik3p = -1;
 int Photon::idk0p = -1, Photon::idk1p = -1, Photon::idk2p = -1, Photon::idk3p = -1;
+std::vector<Real> Photon::dk_scratch_;
 int Photon::iep = -1, Photon::iwp = -1, Photon::iscp = -1, Photon::iacp = -1;
 int Photon::isip = -1, Photon::isqp = -1, Photon::isup = -1, Photon::isvp = -1;
 int Photon::iuserp = -1, Photon::ipolp = -1, Photon::idtp = -1;
@@ -53,8 +54,12 @@ Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
     i1p(intprop[ii1p]), i2p(intprop[ii2p]), i3p(intprop[ii3p]),
     x0p(rp[ix0p]), x1p(rp[ix1p]), x2p(rp[ix2p]), x3p(rp[ix3p]),
     k0p(rp[ik0p]), k1p(rp[ik1p]), k2p(rp[ik2p]), k3p(rp[ik3p]),
+#if MC_VERLET_DK
     dk0p(rp[idk0p]), dk1p(rp[idk1p]), dk2p(rp[idk2p]),
     dk3p(rp[idk3p]),
+#else
+    dk0p(dk_scratch_), dk1p(dk_scratch_), dk2p(dk_scratch_), dk3p(dk_scratch_),
+#endif
     ep(rp[iep]), wp(rp[iwp]), scp(rp[iscp]), acp(rp[iacp]),
     sip(rp[isip]), sqp(rp[isqp]), sup(rp[isup]), svp(rp[isvp]),
     dtp(rp[idtp]) {
@@ -102,10 +107,12 @@ void Photon::PrintPhoton(int ip) const {
             << std::endl
             << "k: " << k0p[ip] << " " << k1p[ip] << " " << k2p[ip] << " " << k3p[ip]
             << std::endl;
+#if MC_VERLET_DK
   if (general_pusher_flag) {
     std::cout << "dk: " << dk0p[ip] << " " << dk1p[ip] << " " << dk2p[ip] << " "
               << dk3p[ip] << std::endl;
   }
+#endif
   if (IsPolarized(polarized)) {
     std:: cout << "stokes: " << sip[ip] << " " << sqp[ip] << " " << sup[ip]
               << " " << svp[ip] << std::endl;
@@ -177,6 +184,30 @@ bool Photon::IsNanPhoton(int ip) {
   return false;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void Photon::EnsureScratch()
+//! \brief keep the shared dk scratch column at least as long as this block's arrays
+//
+// One column per process, shared by all four dk*p references of every block, so a
+// problem generator's dk0p[ip] = 0 lands in bounds for any ip < npar.  Called wherever
+// npar can grow: AllocatePhotons and the receive flush.  A no-op with MC_VERLET_DK on.
+
+void Photon::EnsureScratch() {
+#if !MC_VERLET_DK
+  if (dk_scratch_.size() < static_cast<std::size_t>(npar)) dk_scratch_.resize(npar);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool Photon::IsNanTransport(int ip) const
+//! \brief NaN in the weight, position or wavevector
+
+bool Photon::IsNanTransport(int ip) const {
+  return std::isnan(wp[ip]) || std::isnan(x0p[ip]) || std::isnan(x1p[ip]) ||
+         std::isnan(x2p[ip]) || std::isnan(x3p[ip]) || std::isnan(k0p[ip]) ||
+         std::isnan(k1p[ip]) || std::isnan(k2p[ip]) || std::isnan(k3p[ip]);
+}
+
 //--------------------------------------------------------------------------------------
 //! \fn void Photon::AllocatePhotons(int nphot)
 //! \brief Allocates photons
@@ -186,6 +217,7 @@ void Photon::AllocatePhotons(int nphot) {
   const int nold = npar;
   // Call Resize function
   Resize(nphot);
+  EnsureScratch();
 
   // Zero the free-flight step counter on the slots just claimed for new photons.  Resize
   // only value-initializes when the underlying vector actually grows, and it does not:
@@ -324,11 +356,13 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
 
   if (pmc->general_pusher_flag) {
     general_pusher_flag = true;
-    // Add change in photon momentum.
+#if MC_VERLET_DK
+    // Add change in photon momentum (Verlet only; see MC_VERLET_DK in photon.hpp).
     idk0p = AddRealProperty("dk0");
     idk1p = AddRealProperty("dk1");
     idk2p = AddRealProperty("dk2");
     idk3p = AddRealProperty("dk3");
+#endif
   }
 
   // Add energy, weight, and opacities.
@@ -743,6 +777,7 @@ bool Photon::ReceiveFromNeighbors() {
         ParticleBuffer& recv = recv_[nb.bufid];
         int nparold = npar;
         FlushReceiveBuffer(recv);
+        EnsureScratch();
         // Update Photon position indices
         GetPositionIndices(nparold,npar-1);
         //        printf("recv %d %d %d\n",Globals::my_rank,nparold,npar-1);
