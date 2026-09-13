@@ -586,6 +586,7 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
     pmcb->GetDensity();
     pmcb->GetTemperature();
     pmcb->GetNumberDensity();
+    pmcb->ComputeFreeFreePrefactor();
     if (boosts) {
       pmcb->GetVelocity();
       pmcb->ComputeTransformations();
@@ -1072,6 +1073,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       pmcb->GetDensity();
       pmcb->GetTemperature();
       pmcb->GetNumberDensity();
+      pmcb->ComputeFreeFreePrefactor();
       if (boosts) {
         pmcb->GetVelocity();
         pmcb->ComputeTransformations();

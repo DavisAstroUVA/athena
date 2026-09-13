@@ -19,6 +19,9 @@
 
 class MonteCarloBlock;
 
+//! Whether the Verlet is used and relevant quantities stored
+#define MC_VERLET_DK 0
+
 // photon status identifiers
 enum PhotonStatus {EVOLVING = 0, ESCAPED = 1, ABSORBED = 2, DESTROYED = 3, BUFFERED = 4, REMOVED = 5};
 enum {IMC0 = 0, IMC1 = 1, IMC2 = 2, IMC3 = 3};
@@ -44,6 +47,8 @@ public:
   void SetFourVector(int ip, bool unit_spatial, const Real k[4]);
   void PrintPhoton(int ip) const;
   bool IsNanPhoton(int ip);
+  //! the cheap subset of IsNanPhoton for a per-step check: weight, position, wavevector
+  bool IsNanTransport(int ip) const;
   void PolarizationToTetrad(std::complex<Real> ttet[4][4], Real ecov[4][4], const int ip);
   void PolarizationToCoord(std::complex<Real> ttet[4][4], Real econ[4][4], const int ip);
 
@@ -132,7 +137,11 @@ public:
   std::vector<int> &i1p, &i2p, &i3p;
   std::vector<Real> &x0p, &x1p, &x2p, &x3p;
   std::vector<Real> &k0p, &k1p, &k2p, &k3p;
+  //! Verlet's dk/dlambda; see MC_VERLET_DK.  With it off these are four references to
+  //! dk_scratch_, kept at least as long as the photon arrays so writes stay in bounds.
   std::vector<Real> &dk0p, &dk1p, &dk2p, &dk3p;
+  static std::vector<Real> dk_scratch_;
+  void EnsureScratch();
   std::vector<Real> &ep, &wp, &scp, &acp;
   std::vector<Real> &sip, &sqp, &sup, &svp;
   std::vector<Real> &dtp;

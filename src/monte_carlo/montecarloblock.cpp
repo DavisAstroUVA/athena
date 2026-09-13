@@ -348,6 +348,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   rho.NewAthenaArray(ncells3,ncells2,ncells1);
   species.NewAthenaArray(nspec,ncells3,ncells2,ncells1);
   tgas.NewAthenaArray(ncells3,ncells2,ncells1);
+  if (absorption_opac == ABSFF) ff_cell.NewAthenaArray(2,ncells3,ncells2,ncells1);
   // Tetrads only used in flat spacetime or when moments are requested
   cache_tetrads = (boosts || tetrads) && (call_moments || !GENERAL_RELATIVITY);
   if (cache_tetrads) {
@@ -461,6 +462,7 @@ MonteCarloBlock::~MonteCarloBlock() {
   rho.DeleteAthenaArray();
   species.DeleteAthenaArray();
   tgas.DeleteAthenaArray();
+  ff_cell.DeleteAthenaArray();
   if (cache_tetrads) {
     boost_cmv.DeleteAthenaArray();
     boost_lab.DeleteAthenaArray();
@@ -1942,8 +1944,12 @@ void MonteCarloBlock::FluidFourVelocity(Real x[4], int i3, int i2, int i1,
                                         Real ucon[4]) const {
 
   Real gcov[4][4], gcon[4][4];
-  pcoord->Metric(x, gcov);
-  pcoord->InverseMetric(x, gcon);
+  pcoord->MetricAndInverse(x, gcov, gcon);
+  FluidFourVelocity(gcov, gcon, i3, i2, i1, ucon);
+}
+
+void MonteCarloBlock::FluidFourVelocity(const Real gcov[4][4], const Real gcon[4][4],
+                                        int i3, int i2, int i1, Real ucon[4]) const {
 
   const Real uu1 = uprim(i3,i2,i1,0);
   const Real uu2 = uprim(i3,i2,i1,1);
@@ -2025,6 +2031,39 @@ void MonteCarloBlock::GetNumberDensity() {
         Real nhe = nh*heabund;
         species(1,k,j,i) = nh + 4. * nhe; // nion
         species(0,k,j,i) = nh + 2. * nhe; // nel
+      }
+    }
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::ComputeFreeFreePrefactor()
+//! \brief the cell-constant part of the free-free absorption coefficient
+//
+// chi_ff = ffnrm n_e n_ion T^{-1/2} nu^{-3} (1 - exp(-h nu / k T)).  Everything but the
+// frequency is a property of the cell, and the general pusher evaluates the coefficient
+// every step in a curved metric, so the cell part is done here once
+
+void MonteCarloBlock::ComputeFreeFreePrefactor() {
+
+  if (absorption_opac != ABSFF) return;
+
+  const Real ffnrm = 3.692146e8;
+  const Real kb = 1.380649e-16;
+
+  int il, iu, jl, ju, kl, ku;
+  FillBounds(il, iu, jl, ju, kl, ku);
+  for (int k=kl; k<=ku; ++k) {
+    for (int j=jl; j<=ju; ++j) {
+      for (int i=il; i<=iu; ++i) {
+        const Real t = tgas(k,j,i);
+        if (t > 0.) {
+          ff_cell(0,k,j,i) = ffnrm * species(0,k,j,i) * species(1,k,j,i) / std::sqrt(t);
+          ff_cell(1,k,j,i) = 1. / (kb * t);
+        } else {
+          ff_cell(0,k,j,i) = 0.;
+          ff_cell(1,k,j,i) = 0.;
+        }
       }
     }
   }
@@ -2475,21 +2514,33 @@ void MonteCarloBlock::TransformToCoordinate(Photon *pphot, int ips, int ipe) {
 Real  MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip) {
 
   if (GENERAL_RELATIVITY) {
-    // vel holds the fluid four-velocity when boosts are on and the normal observer
-    // otherwise, so the tetrad is well defined either way.  With boosts off the shift
-    // returned here is the purely gravitational one.
-    Real gcov[4][4];
+    // Evaluate the metric pair at the photon and hand it to the body below.  The general
+    // pusher calls the body directly with the pair it carries from step to step.
+    Real gcov[4][4], gcon[4][4];
     Real x[4];
     x[IMC0] = pphot->x0p[ip];
     x[IMC1] = pphot->x1p[ip];
     x[IMC2] = pphot->x2p[ip];
     x[IMC3] = pphot->x3p[ip];
-    pcoord->Metric(x, gcov);
+    pcoord->MetricAndInverse(x, gcov, gcon);
+    return FrequencyShiftComoving(pphot, ip, gcov, gcon);
+  } else {
+    return FrequencyShiftComoving(pphot, ip, nullptr, nullptr);
+  }
+}
 
+Real MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip, const Real gcov[4][4],
+                                             const Real gcon[4][4]) {
+
+  if (GENERAL_RELATIVITY) {
+    // vel holds the fluid four-velocity when boosts are on and the normal observer
+    // otherwise, so the tetrad is well defined either way.  With boosts off the shift
+    // returned here is the purely gravitational one.
+    //
     // Rebuilt at the photon rather than read from the cell center, so u.u = -1 holds
     // here, where it is about to be contracted with k.
     Real ucon[4];
-    FluidFourVelocity(x, pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip], ucon);
+    FluidFourVelocity(gcov, gcon, pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip], ucon);
 
     Real k0init = pphot->k0p[ip];
     // Called from the coordinate frame, where GR keeps dimensional components.
@@ -2502,7 +2553,12 @@ Real  MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip) {
     // roughly ten metric contractions and four square roots that never reach the answer.
     // This sits in the general pusher's inner loop through UpdateOpacities, so the saving
     // is what makes refreshing opacities more often than once per cell affordable.
-    return ObserverEnergy(ucon, kcopy, gcov)/k0init;
+    // ObserverEnergy takes a mutable array (it only reads it); copy rather than
+    // const-cast, sixteen doubles.
+    Real g[4][4];
+    for (int i = 0; i < 4; i++)
+      for (int j = 0; j < 4; j++) g[i][j] = gcov[i][j];
+    return ObserverEnergy(ucon, kcopy, g)/k0init;
   } else {
     int i1 = pphot->i1p[ip];
     int i2 = pphot->i2p[ip];

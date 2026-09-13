@@ -44,26 +44,20 @@ Real NoOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
 Real FreeFreeAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
-  Real &energy = pphot->ep[ip];
-  int &i1 = pphot->i1p[ip];
-  int &i2 = pphot->i2p[ip];
-  int &i3 = pphot->i3p[ip];
+  // chi_ff = [ffnrm n_e n_ion / sqrt(T)] nu^{-3} (1 - exp(-h nu / k T)).  The bracket
+  // and 1/(k T) are per cell and come from ff_cell, filled by
+  // MonteCarloBlock::ComputeFreeFreePrefactor.
+  
+  const Real energy = pphot->ep[ip];
+  const int i1 = pphot->i1p[ip];
+  const int i2 = pphot->i2p[ip];
+  const int i3 = pphot->i3p[ip];
 
-  Real ffnrm = 3.692146e8;
-  Real h = 6.62607015e-27;
-  Real kb = 1.380649e-16;
+  const Real h = 6.62607015e-27;
+  const Real nu = energy / h;
+  const Real ehnu = exp(-energy * pmcb->ff_cell(1,i3,i2,i1));
 
-  //ffnrm *= 12.;  // Added to match the Athena++ prescription
-
-  Real nu = energy / h;
-  Real tgas = pmcb->tgas(i3,i2,i1);
-  Real ehnu = exp(-energy / (kb * tgas) );
-
-  Real aff = ffnrm/sqrt(tgas)/pow(nu,3);
-  Real nel = pmcb->species(0,i3,i2,i1);
-  Real nion = pmcb->species(1,i3,i2,i1);
-
-  return nel * nion * aff * (1. - ehnu);
+  return pmcb->ff_cell(0,i3,i2,i1) * (1. - ehnu) / (nu * nu * nu);
 
 }
 

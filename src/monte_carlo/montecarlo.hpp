@@ -467,6 +467,8 @@ public:
   AthenaArray<Real> rho;
   AthenaArray<Real> species;
   AthenaArray<Real> tgas;
+  // Free-free prefactor
+  AthenaArray<Real> ff_cell;
   // Flat spacetime only: (gamma, gamma*beta^i) in the orthonormal frame, so consumers
   // divide by vel(...,0) to get beta^i. Unallocated in GR.
   AthenaArray<Real> vel;
@@ -522,9 +524,15 @@ public:
   // General relativity only.
   // x is not const because MCCoord::Metric and InverseMetric take a mutable Real[4].
   void FluidFourVelocity(Real x[4], int i3, int i2, int i1, Real ucon[4]) const;
+  // The same, given the metric pair at x by a caller that already has it (the general
+  // pusher carries the pair from step to step).  The first overload evaluates the pair
+  // and calls this one.
+  void FluidFourVelocity(const Real gcov[4][4], const Real gcon[4][4], int i3, int i2,
+                         int i1, Real ucon[4]) const;
 
   void GetDensity();
   void GetNumberDensity();
+  void ComputeFreeFreePrefactor();
   void GetScalars();
   void GetVelocity();
   void SetNormalObserver();
@@ -534,6 +542,11 @@ public:
   void TransformToComoving(Photon *pphot, int ips, int ipe);
   void TransformToCoordinate(Photon *pphot, int ips, int ipe);
   Real FrequencyShiftComoving(Photon *pphot, int ips);
+  // The same, given the metric pair at the photon; in general relativity this is the
+  // body and the first overload evaluates the pair, outside it the pair is not needed
+  // and the first overload is called.
+  Real FrequencyShiftComoving(Photon *pphot, int ip, const Real gcov[4][4],
+                              const Real gcon[4][4]);
   void UserWorkAfterTransfer(int etype);
 
 private:

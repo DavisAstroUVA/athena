@@ -1,8 +1,59 @@
 # Memory footprint and speed of general-relativistic Monte Carlo runs: plan
 
-Status: **Phase M implemented (M1 to M5), Phase S not started.** Written 2026-09-12 from
-a survey of the code as it stands on `polarization_update`; Phase M landed 2026-09-13 on
-`memory_reduction`. Measured on one rank, `/usr/bin/time -v` maximum resident set:
+Status: **Phase M implemented (M1 to M5) and merged; Phase S implemented (S1, S2, S4,
+S7, S8, plus a reciprocal pass on the Kerr-Schild kernels), S3b not done, S5 not needed,
+S6 measured and not adopted.** Written 2026-09-12 from a survey of the code as it stands
+on `polarization_update`; Phase M landed 2026-09-13 on `memory_reduction` (PR #12), Phase
+S the same day on `speed_improvements`.
+
+Phase S result, one rank, same decks and seeds throughout:
+
+| step | Kerr-Schild shell, polarized | snake atmosphere, polarized Thomson | output vs Phase M |
+|---|---|---|---|
+| Phase M tree | 20.1 s | 139 s | |
+| S1 fused metric evaluations, cached end-of-step pair | 17.0 s | 134 s | byte-identical |
+| S2 free-free per-cell prefactor | 17.0 s | 139 s | rounding level; kept for the NaN guard, no measurable time |
+| S4 Hermitian transport, zero time slice skipped, cheap NaN check | 14.7 s | 113 s | transport identical, Q/U at 1e-16 |
+| S7 hygiene, S8 `dl` fix | 14.3 s | 119 s | byte-identical to S4 |
+| reciprocals in both Kerr-Schild kernels | 13.3 s | 107 s | metric functions within 2e-15 of pristine at 10^4 points |
+| S6 `-march=native -flto` | 13.1 to 13.6 s | | no gain, `configure.py` unchanged |
+
+Snake times move by about 5 percent run to run; the Kerr-Schild ones by about 2 percent.
+
+gprof on the Kerr-Schild run directed the order.  Before S4 the two transport-operator
+calls were 25 percent of the step, the geodesic 43 percent, the connection 8 percent, the
+opacity refresh and frequency shift together 6 percent, and the per-step NaN check 3
+percent.  After S4 the geodesic was half the step, most of it divisions in the derivative
+kernels, which is what the reciprocal pass addressed.
+
+Per-call cost of the kernels the XRB run uses (Cartesian Kerr-Schild, standalone
+microbenchmark, `-O3`): inverse metric plus derivative 138 ns to 106 ns, metric plus
+inverse 82 ns to 44 ns, `Connect` 183 ns to 190 ns.  Per step that is roughly 1000 ns to
+660 ns of metric work.  Two rewrites of the Cartesian kernels into loop form with
+mirrored symmetric entries measured *slower* (derivative fill 112 ns, `Connect` 243 ns)
+and were reverted: the compiler does better with the unrolled expression lists.
+
+Not done: S3b, threading the frequency shift into the scattering-moment deposition, which
+only runs with `mom_flag_scat` and is absent from the XRB deck.  S5, de-virtualizing the
+metric calls, is not motivated by the profile after S1: the virtual dispatch is a few
+percent of bodies that themselves are now fifty to two hundred nanoseconds.  The XRB deck
+itself has not been timed before and after; that needs the production athinput.
+
+S1 as built: two new virtuals on `MCCoord`, `MetricAndInverse` and
+`InverseMetricAndDerivative`, defaulting to the two single calls; both Kerr-Schild classes
+override them through a private point-quantity struct that their single-purpose functions
+now also assemble from, so each formula has one home. `GeneralPusher` carries the
+end-of-step metric pair in `metric_x/metric_gcov/metric_gcon` (cleared with
+`acon_valid`), and `FrequencyShiftComoving` and `FluidFourVelocity` gained overloads
+that take the pair. Per step: five fused evaluations instead of fifteen single ones.
+Verified byte-identical to Phase M on the Kerr-Schild shell list and the snake spectrum
+after each of S1a, S1b, S1c, and by a standalone dump of all four metric functions of
+both Kerr-Schild classes at ten thousand points against the pristine tree
+(single-purpose calls identical, fused identical to single-purpose). Kerr-Schild shell,
+polarized, one rank: 20.1 s to 17.0 s. Snake: 139 s to 134 s (its metric is cheap, so
+the step there is dominated by the opacity and the tensor transport).
+
+Phase M numbers, measured on one rank, `/usr/bin/time -v` maximum resident set:
 
 | deck | baseline | after M1 to M3 | after M5 | photon list / spectrum |
 |---|---|---|---|---|
@@ -176,8 +227,15 @@ halves the exchange traffic per polarized photon and sets up S4.
 ### M6. Not done, and why
 
 - `dk0p..dk3p` (32 bytes per photon) are written only by `VerletStep`, which nothing
-  calls. Dropping them is easy but the header comment at `mccoord.hpp:106` says Verlet
-  may be revived; leave them until that is decided.
+  calls. **Done differently on `speed_improvements` (2026-09-13):** rather than removed,
+  they sit behind `MC_VERLET_DK` in `photon.hpp`, default 0. With 0 the four properties
+  are not registered and `VerletStep` is not compiled; the `dk*p` references bind to one
+  shared scratch column (`Photon::dk_scratch_`, grown in `AllocatePhotons` and after the
+  receive flush) so the thirteen problem generators that zero them at emission still
+  compile and run unchanged. Setting it to 1 restores the old layout exactly. The Verlet
+  decision itself is still open. Measured on the Kerr-Schild shell with a million photons
+  resident: 401 MB to 368 MB, the expected 32 bytes per photon, with a byte-identical
+  list; poltest, spherical_polarization and kerr_frames pass with it off.
 - The four Stokes columns duplicate the tensor during general-pusher transport but are
   the legacy pushers' only polarization state and are what the outputs read. Making them
   conditional on the pusher is a layout change across every output path; not worth it
