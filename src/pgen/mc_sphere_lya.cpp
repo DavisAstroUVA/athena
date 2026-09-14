@@ -54,7 +54,9 @@ namespace {
   constexpr int FREQUENCY_PATH_ENERGY_OFFSET = NUM_BASE_ESTIMATORS;
   constexpr int FREQUENCY_PATH_EXTINCTION_OFFSET =
       FREQUENCY_PATH_ENERGY_OFFSET + NUM_FREQUENCY_BINS;
-  constexpr int NUM_ESTIMATORS = FREQUENCY_PATH_EXTINCTION_OFFSET + NUM_FREQUENCY_BINS;
+  constexpr int SCATTERING_COUNT =
+      FREQUENCY_PATH_EXTINCTION_OFFSET + NUM_FREQUENCY_BINS;
+  constexpr int NUM_ESTIMATORS = SCATTERING_COUNT + 1;
 
   // Finite upper edges of the |x| bins.  Resolve the Doppler core at dx=0.5, the expected
   // escape-frequency range at dx=1, and retain a broad-wing bin before the final overflow.
@@ -304,6 +306,19 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
     pphot->scp[ip] = ScatteringOpacity(this,pphot,ip);
     // pphot->PrintPhoton(ip);
   } // loop over ip
+}
+
+//========================================================================================
+//! \fn void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip)
+//! \brief Copy the completed scattering count into the problem's photon-list user data
+//========================================================================================
+
+void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip) {
+
+  // The movement callback runs before the scatter associated with that movement, so it
+  // cannot record the final count reliably.  FinalizePhoton runs once after termination
+  // and before photon-list output, when nscp contains every completed scattering.
+  pphot->user[SCATTERING_COUNT][ip] = static_cast<Real>(pphot->nscp[ip]);
 }
 
 

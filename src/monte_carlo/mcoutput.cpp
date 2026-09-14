@@ -721,7 +721,7 @@ PhotonList::PhotonList(int list_size_init, MCPolarization pol, int nuser,
 
   // Allocate memory for photon list
   len_limit = list_size_init;
-  nparams = 11;
+  nparams = 10;
   polarized = pol;
   nparams += NumStokesStored(polarized); // stokes q and u, plus v when circular
   nparams += nuser;
