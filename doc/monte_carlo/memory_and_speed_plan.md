@@ -75,7 +75,7 @@ pristine and the modified source gives identical tallies (escaped, absorbed, des
 scatters) and byte-identical transport columns, with Q and U differing by at most 8e-12
 after some 80 scatters per photon. Polarization costs a factor 1.5 (free flight only) to
 1.7 (Thomson-dominated) in run time on the pristine build, measured for the Phase S
-baseline. Target run: `src/pgen/mc_xrb_hdf_gr.cpp` on `gr_user` with the
+baseline. Target run: `src/pgen/mc_readhdf_gr.cpp` on `gr_user` with the
 Cartesian Kerr-Schild metric, `emission = freefree`, `absorption = freefree`, Thomson or
 Compton scattering, `polarized = linear`, general pusher, MC post-processing (`dynamic =
 false`). Everything below is scoped to changes that leave the code structure alone: no

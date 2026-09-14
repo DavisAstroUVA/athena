@@ -220,7 +220,7 @@ guard, mirroring how `hdf5_reader.cpp` guards itself. See §8 for the alternativ
 | `MCGridFile::Requested(pin)`, `MCGridFile::InjectMeshParameters(pin)` | `monte_carlo/mcgrid.cpp` | in |
 | gated call to inject `<mesh>`/`<meshblock>` params before `new Mesh(...)` | `main.cpp` ~line 270 | **out, gated** |
 | gated branch replacing the `<refinement>` loop with the `loclist` replay | `mesh.cpp` ~383-519 | **out, gated** |
-| read cell data by `file_index[gid]` instead of `gid` | `pgen/mc_readhdf.cpp`, `pgen/mc_xrb_hdf_gr.cpp` | pgen, already MC-only |
+| read cell data by `file_index[gid]` instead of `gid` | `pgen/mc_readhdf.cpp`, `pgen/mc_readhdf_gr.cpp` | pgen, already MC-only |
 
 ---
 
