@@ -11,11 +11,133 @@
 // * inverse metric for spherical polar and cylindrical
 // * remove zeroing of metric,connection at top?
 // * remove extraneous variable definitions
-// * conversion to cgs units for black hole metrics?
 
 // Athena++ headers
 #include "../athena.hpp"
 #include "mccoord.hpp"
+
+//----------------------------------------------------------------------------------------
+//! \fn MCTopology GetMCTopology(MCCoordSystem c)
+//! \brief grid topology implied by a given metric
+//!
+//! Kept as a function of the metric rather than as an independently stored flag so the
+//! two cannot drift apart.  Note that both Kerr-Schild forms appear here: the spherical
+//! one shares a topology with spherical_polar, the Cartesian one with cartesian.
+
+MCTopology GetMCTopology(MCCoordSystem c) {
+  switch (c) {
+    case MCCOORD_CYLINDRICAL:
+      return MCTOPO_CYLINDRICAL;
+    case MCCOORD_SPHERICAL_POLAR:
+    case MCCOORD_KERR_SCHILD:
+    case MCCOORD_BOYER_LINDQUIST:
+      return MCTOPO_SPHERICAL;
+    default:
+      return MCTOPO_CARTESIAN;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool IsMCMetricCurved(MCCoordSystem c)
+//! \brief true when the metric is not flat in the coordinates being integrated
+//!
+//! Spherical and cylindrical are flat: they carry non-zero connection coefficients but
+//! zero curvature, and the places that ask this question are asking about the spacetime,
+//! not about whether the connection vanishes.
+
+bool IsMCMetricCurved(MCCoordSystem c) {
+  switch (c) {
+    case MCCOORD_KERR_SCHILD:
+    case MCCOORD_BOYER_LINDQUIST:
+    case MCCOORD_KERR_SCHILD_CARTESIAN:
+      return true;
+    default:
+      return false;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn const char *GetMCCoordSystemName(MCCoordSystem c)
+//! \brief human-readable name, used in error messages and for <montecarlo>/mc_coord
+
+const char *GetMCCoordSystemName(MCCoordSystem c) {
+  switch (c) {
+    case MCCOORD_CARTESIAN:              return "cartesian";
+    case MCCOORD_CYLINDRICAL:            return "cylindrical";
+    case MCCOORD_SPHERICAL_POLAR:        return "spherical_polar";
+    case MCCOORD_MINKOWSKI:              return "minkowski";
+    case MCCOORD_KERR_SCHILD:            return "kerr_schild";
+    case MCCOORD_BOYER_LINDQUIST:        return "boyer_lindquist";
+    case MCCOORD_KERR_SCHILD_CARTESIAN:  return "kerr_schild_cartesian";
+    case MCCOORD_SNAKE:                  return "snake";
+  }
+  return "unknown";
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool IsMCRelativistic(MCCoordSystem c)
+//! \brief true when the run integrates geodesics in a relativistic spacetime
+//!
+//! Distinct from IsMCMetricCurved: Minkowski and snake are flat spacetimes but are still
+//! built with -g and integrated as geodesics, so their photon lists carry the conserved
+//! -k_t rather than k^t.  This is the set of metrics that require a GR build.
+
+bool IsMCRelativistic(MCCoordSystem c) {
+  switch (c) {
+    case MCCOORD_MINKOWSKI:
+    case MCCOORD_KERR_SCHILD:
+    case MCCOORD_BOYER_LINDQUIST:
+    case MCCOORD_KERR_SCHILD_CARTESIAN:
+    case MCCOORD_SNAKE:
+      return true;
+    default:
+      return false;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool IsMCPusherAlwaysGeneral(MCCoordSystem c)
+//! \brief true when the coordinate system is integrated with GeneralPusher regardless of
+//!        <montecarlo>/general_pusher
+//!
+//! Mirrors the switch in the MonteCarloBlock constructor, which honours the input flag
+//! only for Cartesian and spherical-polar and picks GeneralPusher unconditionally for
+//! everything else.  Keep the two in step: general_pusher_flag does not select the
+//! pusher, it selects the four-vector storage convention and gates the polarization and
+//! frame machinery, so a coordinate system that forces GeneralPusher while the flag is
+//! false leaves the module in a split state.  MonteCarlo::SetCoordinateSystem rejects
+//! that combination.
+//!
+//! Distinct from IsMCRelativistic: cylindrical forces GeneralPusher but is not
+//! relativistic and needs no GR build.
+
+bool IsMCPusherAlwaysGeneral(MCCoordSystem c) {
+  switch (c) {
+    case MCCOORD_CARTESIAN:
+    case MCCOORD_SPHERICAL_POLAR:
+      return false;
+    default:
+      return true;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool HasFlatOrthonormalBasis(MCCoordSystem c)
+//! \brief true when the flat scale factors orthonormalize the coordinate basis
+//
+// Returns whether or not coordinate system has non diagonal tetrad.
+
+bool HasFlatOrthonormalBasis(MCCoordSystem c) {
+  switch (c) {
+    case MCCOORD_CARTESIAN:
+    case MCCOORD_CYLINDRICAL:
+    case MCCOORD_SPHERICAL_POLAR:
+    case MCCOORD_MINKOWSKI:
+      return true;
+    default:
+      return false;
+  }
+}
 
 //----------------------------------------------------------------------------------------
 //! MCCoord base class constructor, builds MCCoord from Coord and MonteCarloBlock
@@ -64,10 +186,13 @@ MCCoord::MCCoord(Coordinates *pcoord, MonteCarloBlock *pmcb) {
       for (int i=pmcb->is; i<=pmcb->ie; ++i) {
         // Volume in cgs units
         vol(k,j,i) = pcoord->GetCellVolume(k,j,i) * pow(pmcb->l_cgs,3);
-        if (std::isnan(vol(k,j,i)) && (COORDINATE_SYSTEM == "gr_user")) {
+        // Only a curved metric can put a coordinate singularity inside the domain; in a
+        // flat spacetime a NaN volume is a bug and should not be quietly zeroed.  This
+        // used to test for gr_user, which was a proxy for the same thing.
+        if (std::isnan(vol(k,j,i)) && pmcb->curved_metric) {
           // at the singularity set volume to zero
          vol(k,j,i) = 0.;
-        } 
+        }
       }}}
   computedmin = pmcb->computedmin;
   if (computedmin) {
@@ -204,6 +329,24 @@ void MCCoord::Connect(Real x[4], Real gamma[4][4][4]) {
       }
     }
   }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCCoord::MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4])
+//! \fn void MCCoord::InverseMetricAndDerivative(Real x[4], Real gcon[4][4],
+//!                                              Real dgcon[4][4][4])
+//! \brief the fused pairs, by default the two single calls in the order the general
+//!        pusher used to make them; see the declaration for why they exist
+
+void MCCoord::MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4]) {
+  Metric(x, gcov);
+  InverseMetric(x, gcon);
+}
+
+void MCCoord::InverseMetricAndDerivative(Real x[4], Real gcon[4][4],
+                                         Real dgcon[4][4][4]) {
+  InverseMetric(x, gcon);
+  InverseMetricDerivative(x, dgcon);
 }
 
 //----------------------------------------------------------------------------------------
@@ -489,10 +632,42 @@ MCKerrSchild::~MCKerrSchild() {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MCKerrSchild::Metric(Real x[4], Real gcov[4][4])
-//! \brief compute metric in spherical polar Kerr-Schild
+//! \fn void MCKerrSchild::PointQuantities(const Real x[4], Point &p) const
+//! \brief everything the spherical Kerr-Schild metric functions share at one point
+//
+// One sin, one cos and the handful of products below used to be recomputed by each of
+// Metric, InverseMetric and InverseMetricDerivative, which the general pusher calls at
+// the same point several times per step.  The expressions are kept exactly as those
+// functions had them, so assembling from this struct reproduces their values bit for bit.
 
-void MCKerrSchild::Metric(Real x[4], Real gcov[4][4]) {
+void MCKerrSchild::PointQuantities(const Real x[4], Point &p) const {
+  p.a = bh_spin_;
+  p.r = x[IMC1];
+  p.r2 = SQR(p.r);
+  p.sth = sin(x[IMC2]);
+  p.cth = cos(x[IMC2]);
+  p.cth2 = SQR(p.cth);
+  p.sth2 = SQR(p.sth);
+  p.s2th = 2.*p.sth*p.cth;
+  p.c2th = p.cth2 - p.sth2;
+  p.a2 = SQR(p.a);
+  p.sigma = p.r2 + p.a2 * p.cth2;
+  p.sigma2 = SQR(p.sigma);
+  p.delta = p.r2 - 2 * p.r + p.a2;
+  p.A = SQR(p.r2 + p.a2) - p.a2 * p.delta * p.sth2;
+  p.alts = p.r2 - p.a2 * p.cth2;
+  p.inv_sigma = 1. / p.sigma;
+  p.inv_sigma2 = 1. / p.sigma2;
+  p.inv_sigma3 = p.inv_sigma2 * p.inv_sigma;
+  p.inv_sth = 1. / p.sth;
+  p.inv_sth2 = 1. / p.sth2;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCKerrSchild::FillMetric(const Point &p, Real gcov[4][4])
+//! \brief assemble the spherical Kerr-Schild metric from the point quantities
+
+void MCKerrSchild::FillMetric(const Point &p, Real gcov[4][4]) {
 
   for (int i = 0; i < 4; i++) {
     for (int j = 0; j < 4; j++) {
@@ -500,41 +675,30 @@ void MCKerrSchild::Metric(Real x[4], Real gcov[4][4]) {
     }
   }
 
-  Real a = bh_spin_;
-  Real r = x[IMC1];
-  Real r2 = SQR(r);
-  Real th = x[IMC2];
-  Real sth = sin(th);
-  Real cth = cos(th);
-  Real cth2 = SQR(cth);
-  Real sth2 = SQR(sth);
-  Real a2 = SQR(a);
+  const Real a = p.a, sth2 = p.sth2, sigma = p.sigma, A = p.A;
+  const Real tr = 2. * p.r * p.inv_sigma;  // 2 r / sigma
 
-  Real sigma = r2 + a2 * cth2;
-  Real delta = r2 - 2 * r + a2;
-  Real A = SQR(r2 + a2) - a2 * delta * sth2;
-
-  gcov[IMC0][IMC0] = -1. * (1. - 2. * r / sigma);
-  gcov[IMC0][IMC1] = 2 * r / sigma;
-  gcov[IMC0][IMC3] = -2. * a * r * sth2 / sigma;
+  gcov[IMC0][IMC0] = -(1. - tr);
+  gcov[IMC0][IMC1] = tr;
+  gcov[IMC0][IMC3] = -a * sth2 * tr;
 
   gcov[IMC1][IMC0] = gcov[IMC0][IMC1];
-  gcov[IMC1][IMC1] = 1. + 2. * r / sigma;
-  gcov[IMC1][IMC3] = -a * sth2 * (1. + 2. * r / sigma);
+  gcov[IMC1][IMC1] = 1. + tr;
+  gcov[IMC1][IMC3] = -a * sth2 * (1. + tr);
 
   gcov[IMC2][IMC2] = sigma;
 
   gcov[IMC3][IMC0] = gcov[IMC0][IMC3];
   gcov[IMC3][IMC1] = gcov[IMC1][IMC3];
-  gcov[IMC3][IMC3] = A * sth2 / sigma;
+  gcov[IMC3][IMC3] = A * sth2 * p.inv_sigma;
 
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MCKerrSchild::InverseMetric(Real x[4], Real gcon[4][4])
-//! \brief compute inverse metric in spherical polar Kerr-Schild
+//! \fn void MCKerrSchild::FillInverse(const Point &p, Real gcon[4][4])
+//! \brief assemble the spherical Kerr-Schild inverse metric from the point quantities
 
-void MCKerrSchild::InverseMetric(Real x[4], Real gcon[4][4]) {
+void MCKerrSchild::FillInverse(const Point &p, Real gcon[4][4]) {
 
   // equations come from Takahasi (2007) Appendix
   for (int i = 0; i < 4; i++) {
@@ -543,31 +707,99 @@ void MCKerrSchild::InverseMetric(Real x[4], Real gcon[4][4]) {
     }
   }
 
-  Real a = bh_spin_;
-  Real r = x[IMC1];
-  Real r2 = SQR(r);
-  Real th = x[IMC2];
-  Real sth = sin(th);
-  Real cth = cos(th);
-  Real cth2 = SQR(cth);
-  Real sth2 = SQR(sth);
-  Real a2 = SQR(a);
+  const Real inv_sigma = p.inv_sigma;
+  const Real tr = 2. * p.r * inv_sigma;  // 2 r / sigma
 
-  Real sigma = r2 + a2 * cth2;
-  Real delta = r2 - 2 * r + a2;
-
-  gcon[IMC0][IMC0] = -(1. + (2. * r / sigma));
-  gcon[IMC0][IMC1] = 2. * r / sigma;
+  gcon[IMC0][IMC0] = -(1. + tr);
+  gcon[IMC0][IMC1] = tr;
 
   gcon[IMC1][IMC0] = gcon[IMC0][IMC1];
-  gcon[IMC1][IMC1] = delta / sigma;
-  gcon[IMC1][IMC3] = a / sigma;
+  gcon[IMC1][IMC1] = p.delta * inv_sigma;
+  gcon[IMC1][IMC3] = p.a * inv_sigma;
 
-  gcon[IMC2][IMC2] = 1. / sigma;
+  gcon[IMC2][IMC2] = inv_sigma;
 
   gcon[IMC3][IMC1] = gcon[IMC1][IMC3];
-  gcon[IMC3][IMC3] = 1. / (sigma * sth2);
+  gcon[IMC3][IMC3] = inv_sigma * p.inv_sth2;
 
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCKerrSchild::FillInverseDerivative(const Point &p, Real dgcon[4][4][4])
+//! \brief assemble the derivative of the spherical Kerr-Schild inverse metric
+
+void MCKerrSchild::FillInverseDerivative(const Point &p, Real dgcon[4][4][4]) {
+
+  for(int i = 0; i < 4; i++) {
+    for(int j = 0; j < 4; j++) {
+      for(int k = 0; k < 4; k++) {
+        dgcon[i][j][k]=0;
+      }
+    }
+  }
+
+  const Real a = p.a, a2 = p.a2, r = p.r, r2 = p.r2, cth = p.cth;
+  const Real sth2 = p.sth2, s2th = p.s2th, c2th = p.c2th, alts = p.alts;
+  const Real inv_sigma2 = p.inv_sigma2, inv_sth2 = p.inv_sth2, inv_sth = p.inv_sth;
+
+  dgcon[IMC1][IMC0][IMC0] = 2. * alts * inv_sigma2;
+  dgcon[IMC1][IMC0][IMC1] = -dgcon[IMC1][IMC0][IMC0];
+  dgcon[IMC1][IMC1][IMC0] = dgcon[IMC1][IMC0][IMC1];
+  dgcon[IMC1][IMC1][IMC1] = 2.*(alts-a2*r*sth2) * inv_sigma2;
+  dgcon[IMC1][IMC1][IMC3] = -2*a*r * inv_sigma2;
+  dgcon[IMC1][IMC2][IMC2] = -2*r * inv_sigma2;
+  dgcon[IMC1][IMC3][IMC1] = dgcon[IMC1][IMC1][IMC3];
+  dgcon[IMC1][IMC3][IMC3] = -2*r * inv_sth2 * inv_sigma2;
+
+  dgcon[IMC2][IMC0][IMC0] = -2.*a2*r*s2th * inv_sigma2;
+  dgcon[IMC2][IMC0][IMC1] = -dgcon[IMC2][IMC0][IMC0];
+  dgcon[IMC2][IMC1][IMC0] = dgcon[IMC2][IMC0][IMC1];
+  dgcon[IMC2][IMC1][IMC1] = a2*(a2+r*(r-2.))*s2th * inv_sigma2;
+  dgcon[IMC2][IMC1][IMC3] = a*a2*s2th * inv_sigma2;
+  dgcon[IMC2][IMC2][IMC2] = a2*s2th * inv_sigma2;
+  dgcon[IMC2][IMC3][IMC1] = dgcon[IMC2][IMC1][IMC3];
+  dgcon[IMC2][IMC3][IMC3] = -2*(r2+a2*c2th)*cth*inv_sth*inv_sth2 * inv_sigma2;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCKerrSchild::Metric(Real x[4], Real gcov[4][4])
+//! \brief compute metric in spherical polar Kerr-Schild
+
+void MCKerrSchild::Metric(Real x[4], Real gcov[4][4]) {
+  Point p;
+  PointQuantities(x, p);
+  FillMetric(p, gcov);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCKerrSchild::InverseMetric(Real x[4], Real gcon[4][4])
+//! \brief compute inverse metric in spherical polar Kerr-Schild
+
+void MCKerrSchild::InverseMetric(Real x[4], Real gcon[4][4]) {
+  Point p;
+  PointQuantities(x, p);
+  FillInverse(p, gcon);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCKerrSchild::MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4])
+//! \fn void MCKerrSchild::InverseMetricAndDerivative(Real x[4], Real gcon[4][4],
+//!                                                   Real dgcon[4][4][4])
+//! \brief the fused pairs: one sin, one cos, one set of products for both outputs
+
+void MCKerrSchild::MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4]) {
+  Point p;
+  PointQuantities(x, p);
+  FillMetric(p, gcov);
+  FillInverse(p, gcon);
+}
+
+void MCKerrSchild::InverseMetricAndDerivative(Real x[4], Real gcon[4][4],
+                                              Real dgcon[4][4][4]) {
+  Point p;
+  PointQuantities(x, p);
+  FillInverse(p, gcon);
+  FillInverseDerivative(p, dgcon);
 }
 
 //----------------------------------------------------------------------------------------
@@ -584,83 +816,77 @@ void MCKerrSchild::Connect(Real x[4], Real gamma[4][4][4]) {
     }
   }
 
-  Real a = bh_spin_;
-  Real r = x[IMC1];
-  Real r2 = SQR(r);
-  Real sth = sin(x[IMC2]);
-  Real cth = cos(x[IMC2]);
-  Real cth2 = SQR(cth);
-  Real sth2 = SQR(sth);
-  Real s2th = 2.*sth*cth;
-  Real c2th = cth2 - sth2;
+  // The same point quantities the metric functions use; see PointQuantities.
+  Point p;
+  PointQuantities(x, p);
+  const Real a = p.a, r = p.r, r2 = p.r2, sth = p.sth, cth = p.cth, cth2 = p.cth2;
+  const Real sth2 = p.sth2, s2th = p.s2th, c2th = p.c2th, a2 = p.a2;
+  const Real sigma = p.sigma, delta = p.delta;
+  const Real is = p.inv_sigma, is2 = p.inv_sigma2, is3 = p.inv_sigma3;
+  const Real cot = cth * p.inv_sth;
+  // the three factors the table repeats, each once
+  const Real q = 1. - 2. * r2 * is;      // 1 - 2 r^2 / sigma
+  const Real pr = 1. + 2. * r * is;      // 1 + 2 r / sigma
+  const Real pd = 1. - delta * is;       // 1 - delta / sigma
+  const Real w = r + a2 * sth2 * is * q; // r + a^2 sin^2 / sigma (1 - 2 r^2 / sigma)
 
-  Real a2 = SQR(a);
-  Real sigma = r2 + a2 * cth2;
-  Real sigma2 = SQR(sigma);
-  Real delta = r2 - 2 * r + a2;
-  Real A = SQR(r2 + a2) - a2 * delta * sth2;
-
-  gamma[IMC0][IMC0][IMC0] = -2. * r / sigma2 * (1. - 2. * r2 / sigma);
-  gamma[IMC0][IMC0][IMC1] = -1. / sigma * (1. + 2. * r / sigma) * (1. - 2. * r2 / sigma);
-  gamma[IMC0][IMC0][IMC2] = -a2 * r * s2th / sigma2;
-  gamma[IMC0][IMC0][IMC3] = 2. * a * r * sth2 / sigma2 * (1. - 2. * r2 / sigma);
+  gamma[IMC0][IMC0][IMC0] = -2. * r * is2 * q;
+  gamma[IMC0][IMC0][IMC1] = -is * pr * q;
+  gamma[IMC0][IMC0][IMC2] = -a2 * r * s2th * is2;
+  gamma[IMC0][IMC0][IMC3] = 2. * a * r * sth2 * is2 * q;
 
   gamma[IMC0][IMC1][IMC0] = gamma[IMC0][IMC0][IMC1];
-  gamma[IMC0][IMC1][IMC1] = -2. / sigma * (1. + r / sigma) * (1. - 2. * r2 / sigma);
-  gamma[IMC0][IMC1][IMC2] = -a2 * r * s2th / sigma2;
-  gamma[IMC0][IMC1][IMC3] = a * sth2 / sigma * (1. + 2. * r / sigma) *
-                            (1. - 2. * r2 / sigma);
+  gamma[IMC0][IMC1][IMC1] = -2. * is * (1. + r * is) * q;
+  gamma[IMC0][IMC1][IMC2] = -a2 * r * s2th * is2;
+  gamma[IMC0][IMC1][IMC3] = a * sth2 * is * pr * q;
 
   gamma[IMC0][IMC2][IMC0] = gamma[IMC0][IMC0][IMC2];
   gamma[IMC0][IMC2][IMC1] = gamma[IMC0][IMC1][IMC2];
-  gamma[IMC0][IMC2][IMC2] = -2. * r2 / sigma;
-  gamma[IMC0][IMC2][IMC3] = a2 * a * r / sigma2 * sth2 * s2th;
+  gamma[IMC0][IMC2][IMC2] = -2. * r2 * is;
+  gamma[IMC0][IMC2][IMC3] = a2 * a * r * is2 * sth2 * s2th;
 
   gamma[IMC0][IMC3][IMC0] = gamma[IMC0][IMC0][IMC3];
   gamma[IMC0][IMC3][IMC1] = gamma[IMC0][IMC1][IMC3];
   gamma[IMC0][IMC3][IMC2] = gamma[IMC0][IMC2][IMC3];
-  gamma[IMC0][IMC3][IMC3] = -2. * r * sth2 / sigma * (r + a2 * sth2 / sigma *
-                            (1. - 2. * r2 / sigma));
+  gamma[IMC0][IMC3][IMC3] = -2. * r * sth2 * is * w;
 
-  gamma[IMC1][IMC0][IMC0] = -delta / sigma2 * (1. - 2. * r2 / sigma);
-  gamma[IMC1][IMC0][IMC1] = 1. / sigma * (1. - 2. * r2 / sigma) * (1. - delta / sigma);
+  gamma[IMC1][IMC0][IMC0] = -delta * is2 * q;
+  gamma[IMC1][IMC0][IMC1] = is * q * pd;
   gamma[IMC1][IMC0][IMC2] = 0.;
-  gamma[IMC1][IMC0][IMC3] = a * delta * sth2 / sigma2 * (1. - 2. * r2 / sigma);
+  gamma[IMC1][IMC0][IMC3] = a * delta * sth2 * is2 * q;
 
   gamma[IMC1][IMC1][IMC0] = gamma[IMC1][IMC0][IMC1];
-  gamma[IMC1][IMC1][IMC1] = 1. / sigma * (1. - 2. * r2 / sigma) * (2. - delta / sigma);
-  gamma[IMC1][IMC1][IMC2] = -a2 / (2. * sigma) * s2th;
-  gamma[IMC1][IMC1][IMC3] = a / sigma * sth2 * (r - (1. - 2. * r2 / sigma) *
-                            (1. - delta / sigma));
+  gamma[IMC1][IMC1][IMC1] = is * q * (2. - delta * is);
+  gamma[IMC1][IMC1][IMC2] = -a2 * 0.5 * is * s2th;
+  gamma[IMC1][IMC1][IMC3] = a * is * sth2 * (r - q * pd);
 
   gamma[IMC1][IMC2][IMC0] = gamma[IMC1][IMC0][IMC2];
   gamma[IMC1][IMC2][IMC1] = gamma[IMC1][IMC1][IMC2];
-  gamma[IMC1][IMC2][IMC2] = -r * delta / sigma;
+  gamma[IMC1][IMC2][IMC2] = -r * delta * is;
   gamma[IMC1][IMC2][IMC3] = 0.;
 
   gamma[IMC1][IMC3][IMC0] = gamma[IMC1][IMC0][IMC3];
   gamma[IMC1][IMC3][IMC1] = gamma[IMC1][IMC1][IMC3];
   gamma[IMC1][IMC3][IMC2] = gamma[IMC1][IMC2][IMC3];
-  gamma[IMC1][IMC3][IMC3] = -delta / sigma * sth2 * (r + a2 * sth2 / sigma *
-                            (1. - 2. * r2 / sigma));
+  gamma[IMC1][IMC3][IMC3] = -delta * is * sth2 * w;
 
-  gamma[IMC2][IMC0][IMC0] = -a2 * r * s2th / (sigma2 * sigma);
-  gamma[IMC2][IMC0][IMC1] = -a2 * r * s2th / (sigma2 * sigma);
+  gamma[IMC2][IMC0][IMC0] = -a2 * r * s2th * is3;
+  gamma[IMC2][IMC0][IMC1] = -a2 * r * s2th * is3;
   gamma[IMC2][IMC0][IMC2] = 0.;
-  gamma[IMC2][IMC0][IMC3] = a * r * (r2 + a2) * s2th / (sigma2 * sigma);
+  gamma[IMC2][IMC0][IMC3] = a * r * (r2 + a2) * s2th * is3;
 
   gamma[IMC2][IMC1][IMC0] = gamma[IMC2][IMC0][IMC1];
-  gamma[IMC2][IMC1][IMC1] = -a2 * r * s2th / (sigma2 * sigma);
-  gamma[IMC2][IMC1][IMC2] = r / sigma;
+  gamma[IMC2][IMC1][IMC1] = -a2 * r * s2th * is3;
+  gamma[IMC2][IMC1][IMC2] = r * is;
 
   // from Shane's notebook -- not equal to Takahashi+07 (SWD: ?)
-  gamma[IMC2][IMC1][IMC3] = ((a * cth * sth) / (sigma2 * sigma)) *
+  gamma[IMC2][IMC1][IMC3] = (a * cth * sth * is3) *
     (r2 * r * (r + 2.) + 2. * a2 * r * (r + 1.) * cth2 + a2 * a2 * cth2 * cth2
     + 2. * a2 * r * sth2);
 
   gamma[IMC2][IMC2][IMC0] = gamma[IMC2][IMC0][IMC2];
   gamma[IMC2][IMC2][IMC1] = gamma[IMC2][IMC1][IMC2];
-  gamma[IMC2][IMC2][IMC2] = -a2 * s2th / (2. * sigma);
+  gamma[IMC2][IMC2][IMC2] = -a2 * s2th * 0.5 * is;
   gamma[IMC2][IMC2][IMC3] = 0.;
 
   gamma[IMC2][IMC3][IMC0] = gamma[IMC2][IMC0][IMC3];
@@ -669,38 +895,37 @@ void MCKerrSchild::Connect(Real x[4], Real gamma[4][4][4]) {
   /*gamma[IMC2][IMC3][IMC3] = -s2th / (2. * sigma) * (delta + 2. * r *
     SQR((r2 + a2) / sigma));*/
   // from Shane's notebook -- not equal to Takahashi+07 (SWD: ?)
-  gamma[IMC2][IMC3][IMC3] = -(cth * sth / (sigma2 * sigma)) *
+  gamma[IMC2][IMC3][IMC3] = -(cth * sth * is3) *
     (a2 * a2 * a2 * cth2 * cth2 * cth2 +
      cth2 * cth2 * (3. * a2 * a2 * r2 + a2 * a2 * a2 * sth2) +
      cth2 * (3. * a2 * r2 * r2 + 2. * a2 * a2 * r2 * sth2) +
      r * (r2 * r2 * r + a2 * r2 * (r + 4.) * sth2 + 2. * a2 * a2 * sth2 * sth2 +
      a2 * a2 * s2th * s2th));
 
-  gamma[IMC3][IMC0][IMC0] = -a / sigma2 * (1. - 2. * r2 / sigma);
-  gamma[IMC3][IMC0][IMC1] = -a / sigma2 * (1. - 2. * r2 / sigma);
-  gamma[IMC3][IMC0][IMC2] = -2. * a * r / sigma2 * cth / sth;
-  gamma[IMC3][IMC0][IMC3] = a2 * sth2 / sigma2 * (1. - 2. * r2 / sigma);
+  gamma[IMC3][IMC0][IMC0] = -a * is2 * q;
+  gamma[IMC3][IMC0][IMC1] = -a * is2 * q;
+  gamma[IMC3][IMC0][IMC2] = -2. * a * r * is2 * cot;
+  gamma[IMC3][IMC0][IMC3] = a2 * sth2 * is2 * q;
 
   gamma[IMC3][IMC1][IMC0] = gamma[IMC3][IMC0][IMC1];
-  gamma[IMC3][IMC1][IMC1] = -a / sigma2 * (1. - 2. * r2 / sigma);
-  gamma[IMC3][IMC1][IMC2] = -a / sigma * (1. + 2. * r / sigma) * cth / sth;
-  gamma[IMC3][IMC1][IMC3] = 1. / sigma * (r + a2 * sth2 / sigma *
-                            (1. - 2. * r2 / sigma));
+  gamma[IMC3][IMC1][IMC1] = -a * is2 * q;
+  gamma[IMC3][IMC1][IMC2] = -a * is * pr * cot;
+  gamma[IMC3][IMC1][IMC3] = is * w;
 
   gamma[IMC3][IMC2][IMC0] = gamma[IMC3][IMC0][IMC2];
   gamma[IMC3][IMC2][IMC1] = gamma[IMC3][IMC1][IMC2];
-  gamma[IMC3][IMC2][IMC2] = -a * r / sigma;
+  gamma[IMC3][IMC2][IMC2] = -a * r * is;
   //gamma[IMC3][IMC2][IMC3] = (1. + 2. * r / sigma * ((r2 + a2) / sigma - 1.)) *
   // cth / sth;
   // from Shane's notebook -- not equal to Takahashi+07 (SWD: ?)
-  gamma[IMC3][IMC2][IMC3] = ((1. / 4.) * SQR(a2 + 2. * r2 + a2 * c2th) * cth / sth +
-    a2 * r * s2th) / (sigma2);
+  gamma[IMC3][IMC2][IMC3] = ((1. / 4.) * SQR(a2 + 2. * r2 + a2 * c2th) * cot +
+    a2 * r * s2th) * is2;
 
   gamma[IMC3][IMC3][IMC0] = gamma[IMC3][IMC0][IMC3];
   gamma[IMC3][IMC3][IMC1] = gamma[IMC3][IMC1][IMC3];
   gamma[IMC3][IMC3][IMC2] = gamma[IMC3][IMC2][IMC3];
-  gamma[IMC3][IMC3][IMC3] = -a / sigma * sth2 * (r + a2 * sth2 / sigma *
-                            (1. - 2. * r2 / sigma));
+  gamma[IMC3][IMC3][IMC3] = -a * is * sth2 * w;
+  (void)sigma;
 
 }
 
@@ -709,47 +934,9 @@ void MCKerrSchild::Connect(Real x[4], Real gamma[4][4][4]) {
 //! \brief compute derivative of the inverse metric in spherical polar Kerr-Schild
 
 void MCKerrSchild::InverseMetricDerivative(Real x[4], Real dgcon[4][4][4]) {
-
-  for(int i = 0; i < 4; i++) {
-    for(int j = 0; j < 4; j++) {
-      for(int k = 0; k < 4; k++) {
-        dgcon[i][j][k]=0;
-      }
-    }
-  }
-
-  Real a = bh_spin_;
-  Real r = x[IMC1];
-  Real r2 = SQR(r);
-  Real sth = sin(x[IMC2]);
-  Real cth = cos(x[IMC2]);
-  Real cth2 = SQR(cth);
-  Real sth2 = SQR(sth);
-  Real s2th = 2.*sth*cth;
-  Real c2th = cth2 - sth2;
-
-  Real a2 = SQR(a);
-  Real sigma = r2 + a2 * cth2;
-  Real sigma2 = SQR(sigma);
-  Real alts = r2 - a2 * cth2;
-
-  dgcon[IMC1][IMC0][IMC0] = 2. * alts / sigma2;
-  dgcon[IMC1][IMC0][IMC1] = -dgcon[IMC1][IMC0][IMC0];
-  dgcon[IMC1][IMC1][IMC0] = dgcon[IMC1][IMC0][IMC1];
-  dgcon[IMC1][IMC1][IMC1] = 2.*(alts-a2*r*sth2) / sigma2;
-  dgcon[IMC1][IMC1][IMC3] = -2*a*r / sigma2;
-  dgcon[IMC1][IMC2][IMC2] = -2*r / sigma2;
-  dgcon[IMC1][IMC3][IMC1] = dgcon[IMC1][IMC1][IMC3];
-  dgcon[IMC1][IMC3][IMC3] = -2*r / sth2 / sigma2;
-
-  dgcon[IMC2][IMC0][IMC0] = -2.*a2*r*s2th / sigma2;
-  dgcon[IMC2][IMC0][IMC1] = -dgcon[IMC2][IMC0][IMC0];
-  dgcon[IMC2][IMC1][IMC0] = dgcon[IMC2][IMC0][IMC1];
-  dgcon[IMC2][IMC1][IMC1] = a2*(a2+r*(r-2.))*s2th / sigma2;
-  dgcon[IMC2][IMC1][IMC3] = a*a2*s2th / sigma2;
-  dgcon[IMC2][IMC2][IMC2] = a2*s2th / sigma2;
-  dgcon[IMC2][IMC3][IMC1] = dgcon[IMC2][IMC1][IMC3];
-  dgcon[IMC2][IMC3][IMC3] = -2*(r2+a2*c2th)*cth/sth/sth2 / sigma2;
+  Point p;
+  PointQuantities(x, p);
+  FillInverseDerivative(p, dgcon);
 }
 
 //----------------------------------------------------------------------------------------
@@ -776,10 +963,70 @@ MCKerrSchildCartesian::~MCKerrSchildCartesian() {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MCKerrSchildCartesian::Metric(Real x[4], Real gcov[4][4])
-//! \brief compute metric in cartesian Kerr-Schild
+//! \fn void MCKerrSchildCartesian::PointQuantities(const Real x[4], Point &p) const
+//! \fn void MCKerrSchildCartesian::PointDerivatives(const Real x[4], Point &p) const
+//! \brief the shared point quantities of the Cartesian Kerr-Schild metric
+//
+// g = eta + f l l with l null; every metric function of this class starts from the Kerr
+// radius r, f and the spatial null vector, and the derivative also needs their gradients.
+// Metric, InverseMetric and InverseMetricDerivative used to recompute the hypot, the sqrt
+// and the divisions independently, several times per step at the same point.  The
+// expressions are exactly the ones those functions had, so assembling from this struct
+// reproduces their values bit for bit.  PointDerivatives includes PointQuantities.
 
-void MCKerrSchildCartesian::Metric(Real x[4], Real gcov[4][4]) {
+void MCKerrSchildCartesian::PointQuantities(const Real x[4], Point &p) const {
+  p.a = bh_spin_;
+  p.m = bh_mass_;
+  p.a2 = p.a * p.a;
+  p.rr2 = x[IMC1] * x[IMC1] + x[IMC2] * x[IMC2] + x[IMC3] * x[IMC3];
+  p.r2 = 0.5 * (p.rr2 - p.a2 + std::hypot(p.rr2 - p.a2, 2.0 * p.a * x[IMC3]));
+  p.r = std::sqrt(p.r2);
+  // Three reciprocals here replace some twenty divisions across the derivatives.
+  p.inv_den = 1.0 / (p.r2 * p.r2 + p.a2 * x[IMC3] * x[IMC3]);
+  p.inv_ra2 = 1.0 / (p.r2 + p.a2);
+  p.inv_r = 1.0 / p.r;
+  p.f = 2.0 * p.m * p.r2 * p.r * p.inv_den;
+  p.l1 = (p.r * x[IMC1] + p.a * x[IMC2]) * p.inv_ra2;
+  p.l2 = (p.r * x[IMC2] - p.a * x[IMC1]) * p.inv_ra2;
+  p.l3 = x[IMC3] * p.inv_r;
+}
+
+void MCKerrSchildCartesian::PointDerivatives(const Real x[4], Point &p) const {
+  PointQuantities(x, p);
+  const Real a = p.a, a2 = p.a2, rr2 = p.rr2, r2 = p.r2, r = p.r, f = p.f;
+  const Real l1 = p.l1, l2 = p.l2, inv_r = p.inv_r, inv_ra2 = p.inv_ra2;
+  const Real z = x[IMC3], z2 = z * z;
+
+  // Calculate scalar derivatives: dr/dx^i, then df/dx^i
+  const Real inv_rden = 1.0 / (2.0 * r2 - rr2 + a2);
+  p.dr_dx = r * x[IMC1] * inv_rden;
+  p.dr_dy = r * x[IMC2] * inv_rden;
+  p.dr_dz = (r * z + a2 * z * inv_r) * inv_rden;
+  const Real fc = -(r2 * r2 - 3.0 * a2 * z2) * inv_r * p.inv_den * f;
+  p.df_dx = fc * p.dr_dx;
+  p.df_dy = fc * p.dr_dy;
+  p.df_dz = fc * p.dr_dz - 2.0 * a2 * r * z * inv_r * p.inv_den * f;
+
+  // Calculate vector derivatives
+  const Real c1 = x[IMC1] - 2.0 * r * l1;
+  const Real c2 = x[IMC2] - 2.0 * r * l2;
+  const Real zr2 = z * inv_r * inv_r;
+  p.dl1_dx = (c1 * p.dr_dx + r) * inv_ra2;
+  p.dl1_dy = (c1 * p.dr_dy + a) * inv_ra2;
+  p.dl1_dz = c1 * p.dr_dz * inv_ra2;
+  p.dl2_dx = (c2 * p.dr_dx - a) * inv_ra2;
+  p.dl2_dy = (c2 * p.dr_dy + r) * inv_ra2;
+  p.dl2_dz = c2 * p.dr_dz * inv_ra2;
+  p.dl3_dx = -zr2 * p.dr_dx;
+  p.dl3_dy = -zr2 * p.dr_dy;
+  p.dl3_dz = -zr2 * p.dr_dz + inv_r;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCKerrSchildCartesian::FillMetric(const Point &p, Real gcov[4][4])
+//! \brief assemble the cartesian Kerr-Schild metric from the point quantities
+
+void MCKerrSchildCartesian::FillMetric(const Point &p, Real gcov[4][4]) {
 
   for (int i = 0; i < 4; i++) {
     for (int j = 0; j < 4; j++) {
@@ -787,20 +1034,8 @@ void MCKerrSchildCartesian::Metric(Real x[4], Real gcov[4][4]) {
     }
   }
 
-  // Calculate useful quantities
-  Real a = bh_spin_;
-  Real m = bh_mass_;
-  Real a2 = a * a;
-  Real rr2 = x[IMC1] * x[IMC1] + x[IMC2] * x[IMC2] + x[IMC3] * x[IMC3];
-  Real r2 = 0.5 * (rr2 - a2 + std::hypot(rr2 - a2, 2.0 * a * x[IMC3]));
-  Real r = std::sqrt(r2);
-  Real f = 2.0 * m * r2 * r / (r2 * r2 + a2 * x[IMC3] * x[IMC3]);
-
-  // Calculate null vector
-  Real l_0 = 1.0;
-  Real l_1 = (r * x[IMC1] + a * x[IMC2]) / (r2 + a2);
-  Real l_2 = (r * x[IMC2] - a * x[IMC1]) / (r2 + a2);
-  Real l_3 = x[IMC3] / r;
+  const Real f = p.f;
+  const Real l_0 = 1.0, l_1 = p.l1, l_2 = p.l2, l_3 = p.l3;
 
   // Calculate metric components
   gcov[IMC0][IMC0] = f * l_0 * l_0 - 1.0;
@@ -826,10 +1061,10 @@ void MCKerrSchildCartesian::Metric(Real x[4], Real gcov[4][4]) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MCKerrSchildCartesian::InverseMetric(Real x[4], Real gcov[4][4])
-//! \brief compute metric in cartesian Kerr-Schild
+//! \fn void MCKerrSchildCartesian::FillInverse(const Point &p, Real gcon[4][4])
+//! \brief assemble the cartesian Kerr-Schild inverse metric from the point quantities
 
-void MCKerrSchildCartesian::InverseMetric(Real x[4], Real gcon[4][4]) {
+void MCKerrSchildCartesian::FillInverse(const Point &p, Real gcon[4][4]) {
 
   for (int i = 0; i < 4; i++) {
     for (int j = 0; j < 4; j++) {
@@ -837,20 +1072,8 @@ void MCKerrSchildCartesian::InverseMetric(Real x[4], Real gcon[4][4]) {
     }
   }
 
-  // Calculate useful quantities
-  Real a = bh_spin_;
-  Real m = bh_mass_;
-  Real a2 = a * a;
-  Real rr2 = x[IMC1] * x[IMC1] + x[IMC2] * x[IMC2] + x[IMC3] * x[IMC3];
-  Real r2 = 0.5 * (rr2 - a2 + std::hypot(rr2 - a2, 2.0 * a * x[IMC3]));
-  Real r = std::sqrt(r2);
-  Real f = 2.0 * m * r2 * r / (r2 * r2 + a2 * x[IMC3] * x[IMC3]);
-
-  // Calculate null vector
-  Real l0 = -1.0;
-  Real l1 = (r * x[IMC1] + a * x[IMC2]) / (r2 + a2);
-  Real l2 = (r * x[IMC2] - a * x[IMC1]) / (r2 + a2);
-  Real l3 = x[IMC3] / r;
+  const Real f = p.f;
+  const Real l0 = -1.0, l1 = p.l1, l2 = p.l2, l3 = p.l3;
 
   // Calculate metric components
   gcon[IMC0][IMC0] = -f * l0 * l0 - 1.0;
@@ -876,11 +1099,12 @@ void MCKerrSchildCartesian::InverseMetric(Real x[4], Real gcon[4][4]) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MCKerrSchildCartesian::InverseMetricDerivative(Real x[4],
-//           Real dgcon[4][4][4])
-//! \brief compute derivative of inverse metric in cartesian Kerr-Schild
+//! \fn void MCKerrSchildCartesian::FillInverseDerivative(const Point &p,
+//                                                        Real dgcon[4][4][4])
+//! \brief assemble the derivative of the cartesian Kerr-Schild inverse metric; p must
+//!        have been through PointDerivatives
 
-void MCKerrSchildCartesian::InverseMetricDerivative(Real x[4], Real dgcon[4][4][4]) {
+void MCKerrSchildCartesian::FillInverseDerivative(const Point &p, Real dgcon[4][4][4]) {
 
   for(int i = 0; i < 4; i++) {
     for(int j = 0; j < 4; j++) {
@@ -890,44 +1114,17 @@ void MCKerrSchildCartesian::InverseMetricDerivative(Real x[4], Real dgcon[4][4][
     }
   }
 
-  // Calculate useful quantities
-  Real a = bh_spin_;
-  Real m = bh_mass_;
-  Real a2 = a * a;
-  Real rr2 = x[IMC1] * x[IMC1] + x[IMC2] * x[IMC2] + x[IMC3] * x[IMC3];
-  Real r2 = 0.5 * (rr2 - a2 + std::hypot(rr2 - a2, 2.0 * a * x[IMC3]));
-  Real r = std::sqrt(r2);
-  Real f = 2.0 * m * r2 * r / (r2 * r2 + a2 * x[IMC3] * x[IMC3]);
+  const Real f = p.f;
+  const Real l0 = -1.0, l1 = p.l1, l2 = p.l2, l3 = p.l3;
+  const Real df_dx = p.df_dx, df_dy = p.df_dy, df_dz = p.df_dz;
+  const Real dl0_dx = 0.0, dl0_dy = 0.0, dl0_dz = 0.0;
+  const Real dl1_dx = p.dl1_dx, dl1_dy = p.dl1_dy, dl1_dz = p.dl1_dz;
+  const Real dl2_dx = p.dl2_dx, dl2_dy = p.dl2_dy, dl2_dz = p.dl2_dz;
+  const Real dl3_dx = p.dl3_dx, dl3_dy = p.dl3_dy, dl3_dz = p.dl3_dz;
 
-  // Calculate null vector
-  Real l0 = -1.0;
-  Real l1 = (r * x[IMC1] + a * x[IMC2]) / (r2 + a2);
-  Real l2 = (r * x[IMC2] - a * x[IMC1]) / (r2 + a2);
-  Real l3 = x[IMC3] / r;
-
-  // Calculate scalar derivatives
-  Real dr_dx = r * x[IMC1] / (2.0 * r2 - rr2 + a2);
-  Real dr_dy = r * x[IMC2] / (2.0 * r2 - rr2 + a2);
-  Real dr_dz = (r * x[IMC3] + a2 * x[IMC3] / r) / (2.0 * r2 - rr2 + a2);
-  Real df_dx = -(r2 * r2 - 3.0 * a2 * x[IMC3] * x[IMC3]) * dr_dx / (r * (r2 * r2 + a2 * x[IMC3] * x[IMC3])) * f;
-  Real df_dy = -(r2 * r2 - 3.0 * a2 * x[IMC3] * x[IMC3]) * dr_dy / (r * (r2 * r2 + a2 * x[IMC3] * x[IMC3])) * f;
-  Real df_dz =
-      -((r2 * r2 - 3.0 * a2 * x[IMC3] * x[IMC3]) * dr_dz + 2.0 * a2 * r * x[IMC3]) / (r * (r2 * r2 + a2 * x[IMC3] * x[IMC3])) * f;
-
-  // Calculate vector derivatives
-  Real dl0_dx = 0.0;
-  Real dl0_dy = 0.0;
-  Real dl0_dz = 0.0;
-  Real dl1_dx = ((x[IMC1] - 2.0 * r * l1) * dr_dx + r) / (r2 + a2);
-  Real dl1_dy = ((x[IMC1] - 2.0 * r * l1) * dr_dy + a) / (r2 + a2);
-  Real dl1_dz = (x[IMC1] - 2.0 * r * l1) * dr_dz / (r2 + a2);
-  Real dl2_dx = ((x[IMC2] - 2.0 * r * l2) * dr_dx - a) / (r2 + a2);
-  Real dl2_dy = ((x[IMC2] - 2.0 * r * l2) * dr_dy + r) / (r2 + a2);
-  Real dl2_dz = (x[IMC2] - 2.0 * r * l2) * dr_dz / (r2 + a2);
-  Real dl3_dx = -x[IMC3] / r2 * dr_dx;
-  Real dl3_dy = -x[IMC3] / r2 * dr_dy;
-  Real dl3_dz = -x[IMC3] / r2 * dr_dz + 1.0 / r;
-
+  // Written out entry by entry on purpose: a loop over (k,a,b) with mirrored stores
+  // measured slower than this unrolled list (112 ns against 104 ns per call), and the
+  // reciprocals in PointDerivatives are where the saving was.
   // Calculate metric component x-derivatives
   dgcon[IMC1][IMC0][IMC0] = -(df_dx * l0 * l0 + f * dl0_dx * l0 + f * l0 * dl0_dx);
   dgcon[IMC1][IMC0][IMC1] = -(df_dx * l0 * l1 + f * dl0_dx * l1 + f * l0 * dl1_dx);
@@ -985,12 +1182,148 @@ void MCKerrSchildCartesian::InverseMetricDerivative(Real x[4], Real dgcon[4][4][
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MCKerrSchildCartesian::Connect(Real x[4], Real gcov[4][4])
-//! \brief compute metric in cartesian Kerr-Schild
+//! \fn void MCKerrSchildCartesian::Metric(Real x[4], Real gcov[4][4])
+//! \fn void MCKerrSchildCartesian::InverseMetric(Real x[4], Real gcon[4][4])
+//! \fn void MCKerrSchildCartesian::InverseMetricDerivative(Real x[4],
+//!                                                          Real dgcon[4][4][4])
+//! \brief the single-purpose entry points, each one point evaluation plus one assembly
+
+void MCKerrSchildCartesian::Metric(Real x[4], Real gcov[4][4]) {
+  Point p;
+  PointQuantities(x, p);
+  FillMetric(p, gcov);
+}
+
+void MCKerrSchildCartesian::InverseMetric(Real x[4], Real gcon[4][4]) {
+  Point p;
+  PointQuantities(x, p);
+  FillInverse(p, gcon);
+}
+
+void MCKerrSchildCartesian::InverseMetricDerivative(Real x[4], Real dgcon[4][4][4]) {
+  Point p;
+  PointDerivatives(x, p);
+  FillInverseDerivative(p, dgcon);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCKerrSchildCartesian::MetricAndInverse(Real x[4], Real gcov[4][4],
+//!                                                   Real gcon[4][4])
+//! \fn void MCKerrSchildCartesian::InverseMetricAndDerivative(Real x[4], Real gcon[4][4],
+//!                                                            Real dgcon[4][4][4])
+//! \brief the fused pairs: one hypot, one sqrt, one null vector for both outputs
+
+void MCKerrSchildCartesian::MetricAndInverse(Real x[4], Real gcov[4][4],
+                                             Real gcon[4][4]) {
+  Point p;
+  PointQuantities(x, p);
+  FillMetric(p, gcov);
+  FillInverse(p, gcon);
+}
+
+void MCKerrSchildCartesian::InverseMetricAndDerivative(Real x[4], Real gcon[4][4],
+                                                       Real dgcon[4][4][4]) {
+  Point p;
+  PointDerivatives(x, p);
+  FillInverse(p, gcon);
+  FillInverseDerivative(p, dgcon);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCKerrSchildCartesian::Connect(Real x[4], Real gamma[4][4][4])
+//! \brief compute the connection in cartesian Kerr-Schild
+//
+// Kerr-Schild is g_{mn} = eta_{mn} + f l_m l_n with l null in eta, and in cartesian
+// coordinates eta is constant, so the whole connection comes from the f l l piece and
+// vanishes with f.  There is no flat-background curvilinear part to carry. Writing
+// G_{lmn} = 1/2 (d_m h_{ln} + d_n h_{lm} - d_l h_{mn}) with h = f l l and grouping,
+//
+//   G_{lmn} = 1/2 [ f_,m l_l l_n + f_,n l_l l_m - f_,l l_m l_n
+//                   + f ( l_n F_{ml} + l_m F_{nl} + l_l S_{mn} ) ],
+//
+// where F and S are the antisymmetric and symmetric parts of d_a l_b.  Raising the first
+// index is exact and cheap because the inverse is linear in f,
+// g^{ls} = eta^{ls} - f l^l l^s, so it is a diagonal scaling plus one rank-one correction
+// instead of a matrix multiply.
+//
+// The scalar and vector derivatives below are the same expressions the gr_user metric
+// function in the problem generators uses; r is defined implicitly by
+// r^4 - (R^2 - a^2) r^2 - a^2 z^2 = 0.
 
 void MCKerrSchildCartesian::Connect(Real x[4], Real gamma[4][4][4]) {
 
+  Real eta[4];
+  eta[IMC0] = -1.0;
+  eta[IMC1] = 1.0;
+  eta[IMC2] = 1.0;
+  eta[IMC3] = 1.0;
 
+  // The same point quantities and gradients the metric functions use.
+  Point p;
+  PointDerivatives(x, p);
+  const Real f = p.f;
+
+  // null vector; l^mu = eta^{mu nu} l_nu, so only the time component changes sign
+  Real lcov[4], lcon[4];
+  lcov[IMC0] = 1.0;
+  lcov[IMC1] = p.l1;
+  lcov[IMC2] = p.l2;
+  lcov[IMC3] = p.l3;
+  for (int i = 0; i < 4; i++) lcon[i] = eta[i]*lcov[i];
+
+  // df/dx^mu
+  Real df[4];
+  df[IMC0] = 0.0;
+  df[IMC1] = p.df_dx;
+  df[IMC2] = p.df_dy;
+  df[IMC3] = p.df_dz;
+
+  // dl[alpha][beta] = d_alpha l_beta; l_0 is constant so its column stays zero
+  Real dl[4][4];
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++) dl[i][j] = 0.0;
+  dl[IMC1][IMC1] = p.dl1_dx;
+  dl[IMC2][IMC1] = p.dl1_dy;
+  dl[IMC3][IMC1] = p.dl1_dz;
+  dl[IMC1][IMC2] = p.dl2_dx;
+  dl[IMC2][IMC2] = p.dl2_dy;
+  dl[IMC3][IMC2] = p.dl2_dz;
+  dl[IMC1][IMC3] = p.dl3_dx;
+  dl[IMC2][IMC3] = p.dl3_dy;
+  dl[IMC3][IMC3] = p.dl3_dz;
+
+  // connection with the first index down.  Kept as the plain triple loop: a version
+  // with F and S formed once and the (mu,nu) symmetry mirrored measured slower (243 ns
+  // against 188 ns per call), the compiler doing better with the regular form.
+  Real gl[4][4][4];
+  for (int l = 0; l < 4; l++) {
+    for (int mu = 0; mu < 4; mu++) {
+      for (int nu = 0; nu < 4; nu++) {
+        Real fml = dl[mu][l]  - dl[l][mu];   // F_{mu l}
+        Real fnl = dl[nu][l]  - dl[l][nu];   // F_{nu l}
+        Real smn = dl[mu][nu] + dl[nu][mu];  // S_{mu nu}
+        gl[l][mu][nu] = 0.5*(df[mu]*lcov[l]*lcov[nu]
+                           + df[nu]*lcov[l]*lcov[mu]
+                           - df[l]*lcov[mu]*lcov[nu]
+                           + f*(lcov[nu]*fml + lcov[mu]*fnl + lcov[l]*smn));
+      }
+    }
+  }
+
+  // l^s G_{s mu nu}, the only contraction the raising needs
+  Real lg[4][4];
+  for (int mu = 0; mu < 4; mu++) {
+    for (int nu = 0; nu < 4; nu++) {
+      Real sum = 0.0;
+      for (int sig = 0; sig < 4; sig++) sum += lcon[sig]*gl[sig][mu][nu];
+      lg[mu][nu] = sum;
+    }
+  }
+
+  for (int l = 0; l < 4; l++)
+    for (int mu = 0; mu < 4; mu++)
+      for (int nu = 0; nu < 4; nu++)
+        gamma[l][mu][nu] = eta[l]*gl[l][mu][nu] - f*lcon[l]*lg[mu][nu];
 }
 
 //----------------------------------------------------------------------------------------
@@ -1174,6 +1507,194 @@ void MCBoyerLindquist::Connect(Real x[4], Real gamma[4][4][4]) {
 
   gamma[IMC3][IMC3][IMC1] = gamma[IMC3][IMC1][IMC3];
   gamma[IMC3][IMC3][IMC2] = gamma[IMC3][IMC2][IMC3];
+}
+
+//----------------------------------------------------------------------------------------
+//! MCSnake constructor, built from Coord and MonteCarloBlock
+//!
+//! snake_a_ and snake_k_ are set afterwards by the MonteCarloBlock dispatch, which is the
+//! only place with the ParameterInput in hand.  They default to zero, which degenerates
+//! to Minkowski rather than to something ill-formed.
+
+MCSnake::MCSnake(Coordinates *pcoord, MonteCarloBlock *pmcb)
+  : MCCoord(pcoord,pmcb), snake_a_(0.0), snake_k_(0.0) {
+
+}
+
+//----------------------------------------------------------------------------------------
+//! MCSnake constructor for processes without own MeshBlock
+
+MCSnake::MCSnake(int ncells1, int ncells2, int ncells3, bool acc)
+  : MCCoord(ncells1,ncells2,ncells3,acc), snake_a_(0.0), snake_k_(0.0) {
+
+}
+
+//----------------------------------------------------------------------------------------
+//! destructor
+
+MCSnake::~MCSnake() {
+
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCSnake::Metric(Real x[4], Real gcov[4][4])
+//! \brief covariant metric for sinusoidal ("snake") coordinates
+//!
+//! From y = y_M + a sin(k x_M), so dy_M = dy - beta dx with beta = a k cos(k x), and
+//!   ds^2 = -dt^2 + dx^2 + (dy - beta dx)^2 + dz^2.
+
+void MCSnake::Metric(Real x[4], Real gcov[4][4]) {
+
+  for (int i = 0; i < 4; i++) {
+    for (int j = 0; j < 4; j++) {
+      gcov[i][j] = 0.;
+    }
+  }
+
+  Real beta = snake_a_ * snake_k_ * cos(snake_k_ * x[IMC1]);
+
+  gcov[IMC0][IMC0] = -1.;
+  gcov[IMC1][IMC1] = 1. + SQR(beta);
+  gcov[IMC1][IMC2] = -beta;
+  gcov[IMC2][IMC1] = -beta;
+  gcov[IMC2][IMC2] = 1.;
+  gcov[IMC3][IMC3] = 1.;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCSnake::InverseMetric(Real x[4], Real gcon[4][4])
+//! \brief contravariant metric for snake coordinates
+//!
+//! The spatial block has unit determinant ((1+beta^2) - beta^2 = 1), so the inverse is
+//! obtained by swapping the diagonal and flipping the sign of the off-diagonal.
+
+void MCSnake::InverseMetric(Real x[4], Real gcon[4][4]) {
+
+  for (int i = 0; i < 4; i++) {
+    for (int j = 0; j < 4; j++) {
+      gcon[i][j] = 0.;
+    }
+  }
+
+  Real beta = snake_a_ * snake_k_ * cos(snake_k_ * x[IMC1]);
+
+  gcon[IMC0][IMC0] = -1.;
+  gcon[IMC1][IMC1] = 1.;
+  gcon[IMC1][IMC2] = beta;
+  gcon[IMC2][IMC1] = beta;
+  gcon[IMC2][IMC2] = 1. + SQR(beta);
+  gcon[IMC3][IMC3] = 1.;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCSnake::MetricDerivative(Real x[4], Real dgcov[4][4][4])
+//! \brief derivative of the covariant metric, dgcov[c][a][b] = d_c g_ab
+//!
+//! beta depends on x alone, so only the x derivatives survive.
+
+void MCSnake::MetricDerivative(Real x[4], Real dgcov[4][4][4]) {
+
+  for (int i = 0; i < 4; i++) {
+    for (int j = 0; j < 4; j++) {
+      for (int k = 0; k < 4; k++) {
+        dgcov[i][j][k] = 0.;
+      }
+    }
+  }
+
+  Real beta = snake_a_ * snake_k_ * cos(snake_k_ * x[IMC1]);
+  Real dbeta = -snake_a_ * SQR(snake_k_) * sin(snake_k_ * x[IMC1]);
+
+  dgcov[IMC1][IMC1][IMC1] = 2. * beta * dbeta;
+  dgcov[IMC1][IMC1][IMC2] = -dbeta;
+  dgcov[IMC1][IMC2][IMC1] = -dbeta;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCSnake::InverseMetricDerivative(Real x[4], Real dgcon[4][4][4])
+//! \brief derivative of the contravariant metric, dgcon[c][a][b] = d_c g^ab
+
+void MCSnake::InverseMetricDerivative(Real x[4], Real dgcon[4][4][4]) {
+
+  for (int i = 0; i < 4; i++) {
+    for (int j = 0; j < 4; j++) {
+      for (int k = 0; k < 4; k++) {
+        dgcon[i][j][k] = 0.;
+      }
+    }
+  }
+
+  Real beta = snake_a_ * snake_k_ * cos(snake_k_ * x[IMC1]);
+  Real dbeta = -snake_a_ * SQR(snake_k_) * sin(snake_k_ * x[IMC1]);
+
+  dgcon[IMC1][IMC1][IMC2] = dbeta;
+  dgcon[IMC1][IMC2][IMC1] = dbeta;
+  dgcon[IMC1][IMC2][IMC2] = 2. * beta * dbeta;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCSnake::Connect(Real x[4], Real gamma[4][4][4])
+//! \brief connection coefficients, gamma[a][b][c] = Gamma^a_bc
+//!
+//! Exactly one is non-zero.  Fastest seen from the coordinate map rather than from the
+//! metric: Gamma^mu_ab = (dx^mu/dx_M^rho)(d^2 x_M^rho / dx^a dx^b), and the only non-zero
+//! second derivative is d^2 y_M/dx^2 = a k^2 sin(k x), which feeds only the y row.
+
+void MCSnake::Connect(Real x[4], Real gamma[4][4][4]) {
+
+  for (int i = 0; i < 4; i++) {
+    for (int j = 0; j < 4; j++) {
+      for (int k = 0; k < 4; k++) {
+        gamma[i][j][k] = 0.;
+      }
+    }
+  }
+
+  gamma[IMC2][IMC1][IMC1] = snake_a_ * SQR(snake_k_) * sin(snake_k_ * x[IMC1]);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCSnake::Tetrad(Real x[4], Real tetrad[4][4])
+//! \brief orthonormal components to coordinate components
+//!
+//! The orthonormal legs aligned with the underlying Minkowski axes are
+//!   e_(t) = d_t,  e_(x) = d_x + beta d_y,  e_(y) = d_y,  e_(z) = d_z,
+//! which is orthonormal by construction: g(e_x,e_x) = (1+beta^2) - 2beta^2 + beta^2 = 1
+//! and g(e_x,e_y) = -beta + beta = 0.
+//!
+//! Unlike every other supported system this matrix is not diagonal, because the snake
+//! coordinate basis is not orthogonal.  Callers apply it as kf[j] = tetrad[j][i] * ki[i].
+
+void MCSnake::Tetrad(Real x[4], Real tetrad[4][4]) {
+
+  for (int l = 0; l < 4; l++) {
+    for (int m = 0; m < 4; m++) {
+      tetrad[l][m] = 0.;
+    }
+    tetrad[l][l] = 1.;
+  }
+
+  Real beta = snake_a_ * snake_k_ * cos(snake_k_ * x[IMC1]);
+  tetrad[IMC2][IMC1] = beta;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCSnake::InverseTetrad(Real x[4], Real invtet[4][4])
+//! \brief coordinate components to orthonormal components
+//!
+//! Inverse of Tetrad: k^(y) = k^y - beta k^x, the rest unchanged.
+
+void MCSnake::InverseTetrad(Real x[4], Real invtet[4][4]) {
+
+  for (int l = 0; l < 4; l++) {
+    for (int m = 0; m < 4; m++) {
+      invtet[l][m] = 0.;
+    }
+    invtet[l][l] = 1.;
+  }
+
+  Real beta = snake_a_ * snake_k_ * cos(snake_k_ * x[IMC1]);
+  invtet[IMC2][IMC1] = -beta;
 }
 
 //----------------------------------------------------------------------------------------

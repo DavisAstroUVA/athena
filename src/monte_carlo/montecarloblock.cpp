@@ -7,11 +7,15 @@
 //! \brief implementation of functions in class MonteCarloBlock
 
 // C++ headers
+#include <cstring>   // strcmp
 #include <iostream>
 #include <stdexcept>  // runtime_error
 
 // Athena++ headers
 #include "montecarlo.hpp"
+#include "polarization.hpp"
+#include "tetrad.hpp"
+#include "photon_frames.hpp"
 #include "photon.hpp"
 #include "photonpusher.hpp"
 #include "../athena.hpp"
@@ -21,6 +25,7 @@
 #include "../hydro/hydro.hpp"
 #include "../globals.hpp"
 #include "../scalars/scalars.hpp"
+
 
 //----------------------------------------------------------------------------------------
 //! MonteCarloBlock constructor, builds MonteCarloBlock from parameter input
@@ -39,7 +44,6 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   }
 
   // Construct pointer to photon
-  //pphot  = new Photon(this,pmy_mc->nuser_var,pmy_mc->max_phots_init);
   pphot  = new Photon(this,pin);
 
   // Initialize to nullptr and set below
@@ -49,7 +53,6 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   // get seed and intitialize randon number generator
   int rank = Globals::my_rank;
   int iseed = pmy_mc->iseed+pmy_block->gid*10;  // temporary solution
-  //printf(" MonteCarloBlock gid %d rank %d iseed %d\n",pmy_block->gid,rank,iseed);
 
   pran = new MCRandom(iseed);
 
@@ -57,7 +60,9 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
 
   // SWD: eliminate some or all of these?
   // set local flags based on monte_carlo
-  // set in monte carlo
+  coord_system = pmy_mc->coord_system;
+  topology = pmy_mc->topology;
+  curved_metric = pmy_mc->curved_metric;
   boosts = pmy_mc->boosts;
   coupled = pmy_mc->coupled;
   acceleration = pmy_mc->acceleration;
@@ -65,49 +70,28 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   // set in mcoutput if output requested
   mom_flag_lab = pmy_mc->pmcout->mom_flag_lab;
   mom_flag_com = pmy_mc->pmcout->mom_flag_com;
+  mom_flag_coord = pmy_mc->pmcout->mom_flag_coord;
+  // Comoving moments currently computed from lab moments. This flag accumulates them directly
+  accumulate_com = pin->GetOrAddBoolean("montecarlo","accumulate_comoving",false);
   if (mom_flag_com && !boosts) {
     std::stringstream msg;
     msg << "FATAL ERROR: comoving frame moments requested but booosts set to false."
         << std::endl;
     ATHENA_ERROR(msg);
   }
+  // DeriveComovingMoments() builds the comoving moments by transforming the lab ones, so
+  // asking for the comoving moments alone still requires the lab array to be allocated
+  // and filled.  Without this, <output>/variable = mccom with no mclab output reads an
+  // array that was never allocated.
+  need_lab_moments = mom_flag_lab || (mom_flag_com && !accumulate_com);
   mom_flag_src = pmy_mc->pmcout->mom_flag_src;
   mom_flag_usr = pmy_mc->pmcout->mom_flag_usr || (pmy_mc->nuser_mom > 0);
   mom_flag_scat = pmy_mc->pmcout->mom_flag_scat;
 
   call_srcterms = coupled || mom_flag_src;
-  call_moments = mom_flag_lab || mom_flag_com || call_srcterms || mom_flag_usr;
-  // Set boundary values for this block
-  SetBoundaryValues(pmy_mc->mc_bcs);
-
-  // Initialize pbval after mcb_bcs is set
-  pbval = new MCBoundaryValues(this,pin);
-
-  // Setup outputs
-  pspec = pmy_mc->pmcout->pspec;
-  pphlist = pmy_mc->pmcout->pphlist;
-  ptraj = pmy_mc->pmcout->ptraj;
-
-  // set local mesh parameters to correspond to mesh block
-  if (pmb != nullptr) {
-    is = pmb->is; ie = pmb->ie;
-    js = pmb->js; je = pmb->je;
-    ks = pmb->ks; ke = pmb->ke;
-    nx1 = pmb->block_size.nx1;
-    nx2 = pmb->block_size.nx2;
-    nx3 = pmb->block_size.nx3;
-  } else {
-    if (pblsize == nullptr) {
-      std::stringstream msg;
-      std::cout << "Warning: comoving frame moments requested but booosts set to false.\n"
-                << "S" << std::endl;
-    }
-  }
-  mom_flag_src = pmy_mc->pmcout->mom_flag_src;
-  mom_flag_usr = pmy_mc->pmcout->mom_flag_usr || (pmy_mc->nuser_mom > 0);
-
-  call_srcterms = coupled || mom_flag_src;
-  call_moments = mom_flag_lab || mom_flag_com || call_srcterms || mom_flag_usr;
+  // Call UpdateMoments if any of these moments flags are set or source terms requested
+  call_moments = mom_flag_lab || mom_flag_com || mom_flag_coord || call_srcterms
+                 || mom_flag_usr || mom_flag_scat;
   // Set boundary values for this block
   SetBoundaryValues(pmy_mc->mc_bcs);
 
@@ -156,8 +140,8 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   // SWD:  stepsize control needs to be modified
   stepsize = pin->GetOrAddReal("montecarlo","stepsize",1.0e-3);
 
-  // Flags for handling photon steps
-  boyerlindquist_flag = pin->GetOrAddBoolean("montecarlo","boyerlindquist",false);
+  // Flags for handling photon steps.  boyerlindquist is not read here any more: it is one
+  // of the inputs SetCoordinateSystem folds into coord_system.
   orthotet_flag = pin->GetOrAddBoolean("montecarlo", "orthotet", false);
   varystep_flag = pin->GetOrAddBoolean("montecarlo", "varystep", false);
 
@@ -167,16 +151,17 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   if (scattering_meth == SCATUSER) {
     ScatteringOpacity = pmy_mc->UserScatteringOpacity;
     Scatter = pmy_mc->UserScattering;
+    coherent_scattering = pin->GetOrAddBoolean("montecarlo","coherent_scattering",true);
   } else if (scattering_meth == SCATNONE) {
     ScatteringOpacity = NoOpacity;
     Scatter = NoScatter;  // should not be called
     coherent_scattering = true;
   } else if (scattering_meth == SCATISO) {
-    if (pmy_mc->polarized) {
+    if (IsPolarized(pmy_mc->polarized)) {
       std::stringstream msg;
       msg << "### ERROR in MonteCarloBlock constructor" << std::endl
           << "Istropic scattering not suppored for polarized = "
-          << pmy_mc->polarized << std::endl;
+          << GetMCPolarizationName(pmy_mc->polarized) << std::endl;
       ATHENA_ERROR(msg);
     } else {
       ScatteringOpacity = ThomsonOpacity;
@@ -185,7 +170,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     }
   } else if (scattering_meth == SCATTHOM) {
     ScatteringOpacity = ThomsonOpacity;
-    if (pmy_mc->polarized) {
+    if (IsPolarized(pmy_mc->polarized)) {
       Scatter = ScatterThomsonPolarized;
     } else
       Scatter = ScatterThomsonUnpolarized;
@@ -198,9 +183,10 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       else
         std::cout << "Reading in table for Compton cross section." << std::endl;
     }
+    // Builds at most once per process, not once per block; see the note on the function.
     GenerateComptonTable(comptonio);
     ScatteringOpacity = ComptonOpacity;
-    if (pmy_mc->polarized) {
+    if (IsPolarized(pmy_mc->polarized)) {
       Scatter = ScatterComptonPolarized;
     } else {
       Scatter = ScatterComptonUnpolarized;
@@ -208,11 +194,11 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     coherent_scattering = false;
   } else if (scattering_meth == SCATRES) {
     ScatteringOpacity = ResonanceLineOpacity;
-    if (pmy_mc->polarized) {
+    if (IsPolarized(pmy_mc->polarized)) {
       std::stringstream msg;
       msg << "### ERROR in MonteCarloBlock constructor" << std::endl
           << "Lyman alpha scattering not suppored for polarized = "
-          << pmy_mc->polarized << std::endl;
+          << GetMCPolarizationName(pmy_mc->polarized) << std::endl;
       ATHENA_ERROR(msg);
     } else {
       Scatter = ScatterResonanceLine;
@@ -220,14 +206,14 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     }
   } else if (scattering_meth == SCATDUST) {
     ScatteringOpacity = DustScatteringOpacity;
-    if (pmy_mc->polarized) {
+    if (IsPolarized(pmy_mc->polarized)) {
       Scatter = ScatterDust;
       coherent_scattering = true;
     } else {
       std::stringstream msg;
       msg << "### ERROR in MonteCarloBlock constructor" << std::endl
           << "Dust scattering not suppored for polarized = "
-          << pmy_mc->polarized << std::endl;
+          << GetMCPolarizationName(pmy_mc->polarized) << std::endl;
       ATHENA_ERROR(msg);
     }
   }
@@ -239,94 +225,101 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     computedmin = true;
   pmy_mc->computedmin = computedmin;
   tetrads = true;
-  if (COORDINATE_SYSTEM == "cartesian") {
-    tetrads = false;
-    GetZonePosition = GetZonePositionCartesian;
-    if (pmy_mc->general_pusher_flag) {
-      ppusher = new GeneralPusher(this);
-      if (pmb != nullptr)
-        pcoord = new MCCartesian(pmb->pcoord,this);
-      else
-        pcoord = new MCCartesian(nx1+2*(NGHOST),nx2+2*(NGHOST),nx3+2*(NGHOST),
-                                 computedmin);
-    } else {
-      ppusher = new CartesianPusher(this);
-      if (pmb != nullptr)
-        pcoord = new MCCoord(pmb->pcoord,this);
-      else
-        pcoord = new MCCoord(nx1+2*(NGHOST),nx2+2*(NGHOST),nx3+2*(NGHOST),
-                             computedmin);
-    }
-  } else if (COORDINATE_SYSTEM == "spherical_polar") {
-    GetZonePosition = GetZonePositionSphericalPolar;
-    if (pmy_mc->general_pusher_flag) {
-      ppusher = new GeneralPusher(this);
-      if (pmb != nullptr)
-        pcoord = new MCSphericalPolar(pmb->pcoord,this);
-      else
-        pcoord = new MCSphericalPolar(nx1+2*(NGHOST),nx2+2*(NGHOST),nx3+2*(NGHOST),
-                                      computedmin);
-    } else {
-      tetrads = false;
-      ppusher = new SphericalPolarPusher(this);
-      if (pmb != nullptr)
-        pcoord = new MCCoord(pmb->pcoord,this);
-      else
-        pcoord = new MCCoord(nx1+2*(NGHOST),nx2+2*(NGHOST),nx3+2*(NGHOST),
-                             computedmin);
-    }
-  } else if (COORDINATE_SYSTEM == "cylindrical") {
-    GetZonePosition = GetZonePositionCylindrical;
-    ppusher = new GeneralPusher(this);
-    if (pmb != nullptr)
-      pcoord = new MCCylindrical(pmb->pcoord,this);
-    else
-      pcoord = new MCCylindrical(nx1+2*(NGHOST),nx2+2*(NGHOST),nx3+2*(NGHOST),
-                                 computedmin);
-  } else if (COORDINATE_SYSTEM == "kerr-schild") {
-    GetZonePosition = GetZonePositionSphericalPolar;//approximate
-    ppusher = new GeneralPusher(this);
-    if (boyerlindquist_flag) {
-     if (pmb != nullptr)
-       pcoord = new MCBoyerLindquist(pmb->pcoord,this);
-     else {
-       pcoord = new MCBoyerLindquist(nx1+2*(NGHOST),nx2+2*(NGHOST),nx3+2*(NGHOST),
-                                     computedmin);
-       pcoord->SetSpin(pin->GetReal("coord", "a"));
-       pcoord->SetMass(pin->GetReal("coord", "m"));
-     }
-    } else {
-      if (pmb != nullptr)
-        pcoord = new MCKerrSchild(pmb->pcoord,this);
-      else {
-        pcoord = new MCKerrSchild(nx1+2*(NGHOST),nx2+2*(NGHOST),nx3+2*(NGHOST),
-                                  computedmin);
-        pcoord->SetSpin(pin->GetReal("coord", "a"));
-        pcoord->SetMass(pin->GetReal("coord", "m"));
+  // Number of cells including ghosts, for the standalone (pmb == nullptr) constructors.
+  const int mc1 = nx1+2*(NGHOST), mc2 = nx2+2*(NGHOST), mc3 = nx3+2*(NGHOST);
+  // The MCCoord(Coordinates*, ...) constructors copy mass and spin off the Athena
+  // coordinate object, so they only have to be read from the input when there is no
+  // MeshBlock to copy from.
+  bool set_bh_params = false;
+
+  switch (coord_system) {
+    case MCCOORD_CARTESIAN:
+      GetZonePosition = GetZonePositionCartesian;
+      if (pmy_mc->general_pusher_flag) {
+        ppusher = new GeneralPusher(this);
+        pcoord = (pmb != nullptr) ? new MCCartesian(pmb->pcoord,this)
+                                  : new MCCartesian(mc1,mc2,mc3,computedmin);
+      } else {
+        tetrads = false;
+        ppusher = new CartesianPusher(this);
+        pcoord = (pmb != nullptr) ? new MCCoord(pmb->pcoord,this)
+                                  : new MCCoord(mc1,mc2,mc3,computedmin);
       }
-    }
-  } else if (COORDINATE_SYSTEM == "minkowski") {
-    GetZonePosition = GetZonePositionCartesian;
-    ppusher = new GeneralPusher(this);
-    if (pmb != nullptr)
-      pcoord = new MCMinkowski(pmb->pcoord,this);
-    else
-      pcoord = new MCMinkowski(nx1+2*(NGHOST),nx2+2*(NGHOST),nx3+2*(NGHOST),
-                               computedmin);
-  } else if (COORDINATE_SYSTEM == "gr_user") {
-    GetZonePosition = GetZonePositionCartesian;
-    ppusher = new GeneralPusher(this);
-    if (pmb != nullptr)
-        pcoord = new MCKerrSchildCartesian(pmb->pcoord,this);
+      break;
+
+    case MCCOORD_SPHERICAL_POLAR:
+      GetZonePosition = GetZonePositionSphericalPolar;
+      if (pmy_mc->general_pusher_flag) {
+        ppusher = new GeneralPusher(this);
+        pcoord = (pmb != nullptr) ? new MCSphericalPolar(pmb->pcoord,this)
+                                  : new MCSphericalPolar(mc1,mc2,mc3,computedmin);
+      } else {
+        tetrads = false;
+        ppusher = new SphericalPolarPusher(this);
+        pcoord = (pmb != nullptr) ? new MCCoord(pmb->pcoord,this)
+                                  : new MCCoord(mc1,mc2,mc3,computedmin);
+      }
+      break;
+
+    case MCCOORD_CYLINDRICAL:
+      GetZonePosition = GetZonePositionCylindrical;
+      ppusher = new GeneralPusher(this);
+      pcoord = (pmb != nullptr) ? new MCCylindrical(pmb->pcoord,this)
+                                : new MCCylindrical(mc1,mc2,mc3,computedmin);
+      break;
+
+    case MCCOORD_MINKOWSKI:
+      GetZonePosition = GetZonePositionCartesian;
+      ppusher = new GeneralPusher(this);
+      pcoord = (pmb != nullptr) ? new MCMinkowski(pmb->pcoord,this)
+                                : new MCMinkowski(mc1,mc2,mc3,computedmin);
+      break;
+
+    case MCCOORD_KERR_SCHILD:
+      GetZonePosition = GetZonePositionSphericalPolar;//approximate
+      ppusher = new GeneralPusher(this);
+      pcoord = (pmb != nullptr) ? new MCKerrSchild(pmb->pcoord,this)
+                                : new MCKerrSchild(mc1,mc2,mc3,computedmin);
+      set_bh_params = (pmb == nullptr);
+      break;
+
+    case MCCOORD_BOYER_LINDQUIST:
+      GetZonePosition = GetZonePositionSphericalPolar;//approximate
+      ppusher = new GeneralPusher(this);
+      pcoord = (pmb != nullptr) ? new MCBoyerLindquist(pmb->pcoord,this)
+                                : new MCBoyerLindquist(mc1,mc2,mc3,computedmin);
+      set_bh_params = (pmb == nullptr);
+      break;
+
+    case MCCOORD_KERR_SCHILD_CARTESIAN:
+      GetZonePosition = GetZonePositionCartesian;
+      ppusher = new GeneralPusher(this);
+      // Previously this branch built no coordinate object at all when pmb was nullptr and
+      // then dereferenced it for SetSpin, and read coord/a and coord/m unconditionally
+      // even though the MeshBlock path already supplies them.
+      pcoord = (pmb != nullptr) ? new MCKerrSchildCartesian(pmb->pcoord,this)
+                                : new MCKerrSchildCartesian(mc1,mc2,mc3,computedmin);
+      set_bh_params = (pmb == nullptr);
+      break;
+
+    case MCCOORD_SNAKE:
+      GetZonePosition = GetZonePositionCartesian;
+      ppusher = new GeneralPusher(this);
+      pcoord = (pmb != nullptr) ? new MCSnake(pmb->pcoord,this)
+                                : new MCSnake(mc1,mc2,mc3,computedmin);
+      // Not <coord>/a: gr_user requires that name for the black hole spin and GRUser
+      // reads it unconditionally, so the shear amplitude needs its own key.  Set on both
+      // paths, since the MCCoord(Coordinates*) constructor has no snake parameters to
+      // copy the way it copies mass and spin.
+      static_cast<MCSnake*>(pcoord)->SetSnakeParams(
+          pin->GetOrAddReal("coord", "snake_a", 0.0),
+          pin->GetOrAddReal("coord", "snake_k", 0.0));
+      break;
+  }
+
+  if (set_bh_params) {
     pcoord->SetSpin(pin->GetReal("coord", "a"));
     pcoord->SetMass(pin->GetReal("coord", "m"));
-  } else {
-      std::stringstream msg;
-      msg << "### ERROR in MonteCarloBlock constructor" << std::endl
-          << COORDINATE_SYSTEM
-          << " coordinates not currently supported with Monte Carlo"
-          << std::endl;
-      ATHENA_ERROR(msg);
   }
   pmy_mc->tetrads = tetrads;
 
@@ -356,17 +349,53 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   rho.NewAthenaArray(ncells3,ncells2,ncells1);
   species.NewAthenaArray(nspec,ncells3,ncells2,ncells1);
   tgas.NewAthenaArray(ncells3,ncells2,ncells1);
-  if (boosts || tetrads) {
+  if (absorption_opac == ABSFF) ff_cell.NewAthenaArray(2,ncells3,ncells2,ncells1);
+  // Tetrads only used in flat spacetime or when moments are requested
+  cache_tetrads = (boosts || tetrads) && (call_moments || !GENERAL_RELATIVITY);
+  if (cache_tetrads) {
     boost_cmv.NewAthenaArray(ncells3,ncells2,ncells1,4,4);
     boost_lab.NewAthenaArray(ncells3,ncells2,ncells1,4,4);
   }
-  if (boosts) vel.NewAthenaArray(ncells3,ncells2,ncells1,4);
+  // The two storage conventions, which are deliberately not the same thing and used to
+  // share one array name:
+  //
+  //   flat spacetime -- vel holds (gamma, gamma*beta^i) in the orthonormal frame.  The
+  //     metric is constant across a cell, so a vector normalized at the cell center is
+  //     still normalized anywhere in it and there is nothing to reconstruct.  Consumers
+  //     divide by vel(...,0) to recover beta^i.
+  //
+  //   general relativity -- uprim holds the primitive uu^i and there is no stored
+  //     four-velocity at all.  FluidFourVelocity assembles one on demand at whatever
+  //     point it is asked about, which is the only way to get u.u = -1 where the vector
+  //     is used rather than only where it was built.
+  if (GENERAL_RELATIVITY) {
+    uprim.NewAthenaArray(ncells3,ncells2,ncells1,3);
+  } else if (boosts || IsPolarized(pmy_mc->polarized)) {
+    vel.NewAthenaArray(ncells3,ncells2,ncells1,4);
+    if (!boosts) {
+      // Value is constant in time, unlike the fluid velocity, so it is set once rather than
+      // refreshed each cycle. g_tt = -1 in every flat metric the module supports, so
+      // u = (1,0,0,0) is already normalized; ConstructTetrad renormalizes regardless.
+      for (int k=0; k<ncells3; ++k) {
+        for (int j=0; j<ncells2; ++j) {
+          for (int i=0; i<ncells1; ++i) {
+            vel(k,j,i,0) = 1.0;
+            vel(k,j,i,1) = 0.0;
+            vel(k,j,i,2) = 0.0;
+            vel(k,j,i,3) = 0.0;
+          }
+        }
+      }
+    }
+  }
   if (NSCALARS > 0) scalars.NewAthenaArray(ncells3,ncells2,ncells1);
   // moments is 1 (Er) + 3 (Fr) + 9 (Pr) + 1 (Eave) + 1 (net cool)
   nmom = 13;
   int ntype = pmy_mc->ntype;
-  if (mom_flag_lab) moments.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
+  if (need_lab_moments) moments.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
   if (mom_flag_com) moments_com.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
+  if (mom_flag_coord)
+    moments_coord.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
   if (pmy_mc->nuser_mom > 0)
     moments_user.NewAthenaArray(pmy_mc->nuser_mom,ncells3,ncells2,ncells1);
   nsrc = 10;
@@ -377,15 +406,17 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     emin_scat = pin->GetReal("montecarlo","emin_scat") * everg;
     emax_scat = pin->GetReal("montecarlo","emax_scat") * everg;
     moments_scat.NewAthenaArray(nf_scat,ncells3,ncells2,ncells1);
+    moments_scat_error.NewAthenaArray(nf_scat,ncells3,ncells2,ncells1);
     dloge_scat = (std::log10(emax_scat/emin_scat))/static_cast<Real>(nf_scat);
     energy_scat.NewAthenaArray(nf_scat+1);
     freq_scat_mid.NewAthenaArray(nf_scat);
     Real h_cgs = 6.62607015e-27;
     for (int i=0; i<=nf_scat; i++) {
       energy_scat(i) = std::log10(emin_scat) + static_cast<Real>(i)*dloge_scat; // keep log
-      if (i > 0)
-        freq_scat_mid(i-1) = 0.5*( pow(10.,energy_scat(i-1)) + pow(10.,energy_scat(i)) )/h_cgs;
-;
+      if (i > 0) {
+        //        freq_scat_mid(i-1) = 0.5*( pow(10.,energy_scat(i-1)) + pow(10.,energy_scat(i)) )/h_cgs;
+        freq_scat_mid(i-1) = pow(10.,0.5*(energy_scat(i-1) + energy_scat(i)))/h_cgs;
+      }
     }
     if ((Globals::my_rank ==0) && (pmy_block->lid == 0)) {
       FILE *pfile;
@@ -432,14 +463,20 @@ MonteCarloBlock::~MonteCarloBlock() {
   rho.DeleteAthenaArray();
   species.DeleteAthenaArray();
   tgas.DeleteAthenaArray();
-  if (boosts || tetrads) {
+  ff_cell.DeleteAthenaArray();
+  if (cache_tetrads) {
     boost_cmv.DeleteAthenaArray();
     boost_lab.DeleteAthenaArray();
   }
-  if (boosts) vel.DeleteAthenaArray();
+  // Unconditional: DeleteAthenaArray handles the never-allocated case, and matching the
+  // allocation conditions by hand is how vel came to be leaked on flat polarized runs,
+  // where it was allocated but not freed.
+  vel.DeleteAthenaArray();
+  uprim.DeleteAthenaArray();
   if (NSCALARS > 0) scalars.DeleteAthenaArray();
-  if (mom_flag_lab) moments.DeleteAthenaArray();
+  if (need_lab_moments) moments.DeleteAthenaArray();
   if (mom_flag_com) moments_com.DeleteAthenaArray();
+  if (mom_flag_coord) moments_coord.DeleteAthenaArray();
   if (pmy_mc->nuser_mom > 0) moments_user.DeleteAthenaArray();
   if (call_srcterms) sourceterms.DeleteAthenaArray();
   if (pmy_mc->emission_array) emission.DeleteAthenaArray();
@@ -489,6 +526,9 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
     if (pphot->statp[ip] != EVOLVING) {
 
       if (pphot->statp[ip] != BUFFERED) {
+        // Bring the Stokes parameters up to date with the transported coherency tensor
+        // before finalizing the photon, writing outputs
+        if (IsPolarized(pmy_mc->polarized)) CoherencyToObserverStokes(this, pphot, ip);
         // User defined completion work
         FinalizePhoton(pphot,ip);
 
@@ -517,6 +557,9 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == BUFFERED) {
         nbuf++;
+      } else if (pphot->statp[ip] == REMOVED) {
+        pphot->RemoveOneParticle(ip);
+        nrem++;
       }
     }
   } // end loop over ip
@@ -560,10 +603,13 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
     // user definied photon initialization
     InitializePhoton(pphot,nold,pphot->nphot-1,etype);
 
-    // Lorentz transform E, k to Eulerian frame and update opacities
-    // only for newly emitted samples
-
-    if ((boosts || tetrads) && pmy_mc->initialze_comoving[etype]) {
+    // Convert the emitted state from the comoving frame to the coordinate frame, and
+    // update opacities.  Only for newly emitted samples.
+    if ((boosts || tetrads) && pmy_mc->initialize_comoving[etype]) {
+      if (IsPolarized(pmy_mc->polarized)) {
+        for (int ip = nold; ip < pphot->nphot; ip++)
+          ScatteringStokesToCoherency(this, pphot, ip);
+      }
       TransformToCoordinate(pphot,nold,pphot->nphot-1);
     }
 
@@ -616,16 +662,29 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
 
     // account for scattering if not absorbed
     if (pphot->statp[ip] == EVOLVING) {
-      // Lorentz transform to comoving frame for scattering
-      if (boosts || tetrads) {
+      // Lorentz transform to comoving frame for scattering.  The polarized scattering
+      // routines need the wavevector in cartesian components, and on a spherical grid
+      // TransformToComoving/TransformToCoordinate are what supply that, by way of
+      // ToScatteringBasis and FromScatteringBasis.  Both are skipped entirely when there
+      // is nothing to transform.
+      const bool comoving = (boosts || tetrads);
+      if (comoving) {
         TransformToComoving(pphot,ip,ip);
+      } else if (IsPolarized(pmy_mc->polarized)) {
+        ToScatteringBasis(this, pphot, ip);
       }
+      // Convert coherency tensor to Stokes parameters for scattering (if needed)
+      if (IsPolarized(pmy_mc->polarized)) CoherencyToScatteringStokes(this, pphot, ip);
       // call scattering function and update counters
       Scatter(this,pphot,ip,ip);
+      if (IsPolarized(pmy_mc->polarized)) ScatteringStokesToCoherency(this, pphot, ip);
+      if (!comoving && IsPolarized(pmy_mc->polarized))
+        FromScatteringBasis(this, pphot, ip);
       nscat++;
       pphot->nscp[ip]++;
+      // Scattering starts a new free flight, so the capmove counter resets
+      pphot->nmvp[ip] = 0;
       if (pphot->nscp[ip] % pmy_mc->checkscat == 0) {
-      //if ((pphot->nscp[ip] % pmy_mc->checkscat == 0) && (pphot->nscp[ip] > 100000)) {
         pphot->PrintPhoton("check scat",ip);
         printf("nu/nu0 - 1 = %g\n", pphot->ep[ip]/(MCConstants::nu_lya * MCConstants::h_cgs) - 1.);
         // Check for possible infinite loop due to NaN in photon
@@ -662,7 +721,9 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
   for (int ip=pphot->nphot-1; ip >= 0; ip--) {
     if (pphot->statp[ip] != EVOLVING) {
       if (pphot->statp[ip] != BUFFERED) {
-        // User defined completion work
+        // Bring the Stokes parameters up to date with the transported coherency tensor
+        // before finalizing the photon, writing outputs
+        if (IsPolarized(pmy_mc->polarized)) CoherencyToObserverStokes(this, pphot, ip);
         FinalizePhoton(pphot,ip);
       }
 
@@ -684,8 +745,9 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       } else if (pphot->statp[ip] == DESTROYED) {
         pphot->RemoveOneParticle(ip);
         ndes++;
-      //} else if (pphot->statp[ip] == BUFFERED) {
-      //  nbuf++;
+      } else if (pphot->statp[ip] == REMOVED) {
+        pphot->RemoveOneParticle(ip);
+        nrem++;
       }
     }
   } // End loop over ip
@@ -756,7 +818,7 @@ void MonteCarloBlock::LorentzTransform(Photon *pphot, const Real sign, int ips,
     Real beta2= SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]);
 
     if(beta2 > 0.) {
-      // SWD: pretabulate gamma for each zone?
+      // SWD: pretabulate gamma for each cell?
       Real gamma = 1. / sqrt(1. - beta2); // assumes v^2 < c^2 checked elsewhere
       Real bdk = k1 * beta[0] + k2 * beta[1] + k3 * beta[2];
       Real gonembdk = gamma * (1. - bdk);
@@ -807,91 +869,6 @@ Real MonteCarloBlock::LorentzTransformFrequencyShift(Photon *pphot, int ip) {
   return gonembdk;
 }
 
-// SWD: This is an untested modification of Eric's original method, unfinished
-//----------------------------------------------------------------------------------------
-//! \fn void MonteCarloBlock::TetradTransform(Photon *pphot, const Real sign, int ips,
-//!                                           int ipe)
-//!  \brief Tetrad transform photon packet
-//
-// Does not transform stokes vectors..
-// weight is not transformed either as weight represents number of photons
-// in the packet which is invariant.
-// to_comv: sign = 1.0;
-// to_eulr: sign = -1.0;
-
-void MonteCarloBlock::TetradTransform(Photon *pphot, const Real sign, int ips, int ipe) {
-
-  for (int ip=ips; ip<=ipe; ip++) {
-    // Get velocity of cell
-    int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
-    Real beta[3];
-    for (int i=0; i<3; ++i) {
-      beta[i] = sign * vel(i3,i2,i1,i+1);
-    }
-    Real beta2= SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]);
-    Real gamma = 1. / sqrt(1. - beta2);
-
-    // Define velocity four vector for cell
-    Real ucon[NCOORD];
-    ucon[IMC0] = gamma;
-    ucon[IMC1] = gamma * beta[0];
-    ucon[IMC2] = gamma * beta[1];
-    ucon[IMC3] = gamma * beta[2];
-
-    // get metric values for current position
-    Real gcov[NCOORD][NCOORD];
-    Real x[NCOORD];
-    x[IMC0] = pphot->x0p[ip];
-    x[IMC1] = pphot->x1p[ip];
-    x[IMC2] = pphot->x2p[ip];
-    x[IMC3] = pphot->x3p[ip];
-    pcoord->Metric(x, gcov);
-
-    // create tetrad basis
-    Real econ[NCOORD][NCOORD], ecov[NCOORD][NCOORD];
-    ConstructTetrad(ucon, gcov, econ, ecov);
-
-    if (sign > 0) { // tranforming to comoving frame
-
-      Real kcopy[NCOORD];
-      kcopy[IMC0] = pphot->k0p[ip];
-      kcopy[IMC1] = pphot->k1p[ip];
-      kcopy[IMC2] = pphot->k2p[ip];
-      kcopy[IMC3] = pphot->k3p[ip];
-      Real k[NCOORD];
-      CoordinateToTetrad(kcopy, k, ecov);
-      pphot->k0p[ip] = k[IMC0];
-      pphot->k1p[ip] = k[IMC1];
-      pphot->k2p[ip] = k[IMC2];
-      pphot->k3p[ip] = k[IMC3];
-
-      Real energy_shift = kcopy[IMC0] / k[IMC0];
-      // transform energy and extinction coefficients
-      pphot->ep[ip] *= energy_shift;
-      pphot->acp[ip] *= energy_shift;
-      pphot->scp[ip] *= energy_shift;
-
-    } else { // transforming to coordinate frame
-
-      Real kcopy[NCOORD];
-      kcopy[IMC0] = pphot->k0p[ip];
-      kcopy[IMC1] = pphot->k1p[ip];
-      kcopy[IMC2] = pphot->k2p[ip];
-      kcopy[IMC3] = pphot->k3p[ip];
-      Real k[NCOORD];
-      TetradToCoordinate(kcopy, k, econ); // updates pphot->k
-
-      Real energy_shift = kcopy[IMC0] / pphot->k0p[ip]; // new calculation
-
-      // transform energy and opacities
-      pphot->ep[ip] *= energy_shift;
-      pphot->acp[ip] *= energy_shift;
-      pphot->scp[ip] *= energy_shift;
-    }
-  } // loop over ip
-}
-
-
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, Real etau, int ip)
 //! \brief Overload for UpdateMoments with additional extinction argument
@@ -910,193 +887,104 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, Real etau, int ip) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip)
-//! \brief add contribution to radiation moments in current zone
+//! \brief add contribution to radiation moments in current cell
+//
+// In general relativity the frame transformations -- FrequencyShiftComoving,
+// TransformToComoving, TransformToCoordinate -- rebuild the fluid four-velocity at the
+// photon's own position, so that u.u = -1 exactly where it is contracted with k.  The
+// moments do not: boost_lab and boost_cmv are built once per cell at the cell center by
+// ComputeTransformations, and PhotonFrames applies those same matrices to every photon
+// crossing the cell.
+//
+// Two related approximations: the cell-center tetrad is applied to a wavevector carried
+// at the photon without parallel transport, and the opacity is refreshed only at cell
+// face crossings.
 
 void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
 
-  // SWD Needs to add support for moments in three bases:
-  // comoving frame (supported already)
-  // tetrad frame  (currently lab frame)
-  // coordinate frame
-
   int type = pphot->type[ip];
-
-  //dl *= pphot->ep[ip];
   int i1 = pphot->i1p[ip];
   int i2 = pphot->i2p[ip];
   int i3 = pphot->i3p[ip];
 
-  Real k0,k1,k2,k3,weight;
-  const Real c_cgs = 2.99792458e10;
-  if (pmy_mc->general_pusher_flag) {
-    Real ki[4];
-    ki[0] = pphot->k0p[ip];
-    ki[1] = pphot->k1p[ip];
-    ki[2] = pphot->k2p[ip];
-    ki[3] = pphot->k3p[ip];
-    Real x[4];
-    x[0] = pphot->x0p[ip];
-    x[1] = pphot->x1p[ip];
-    x[2] = pphot->x2p[ip];
-    x[3] = pphot->x3p[ip];
-    Real invtet[4][4], kf[4];
-    pcoord->InverseTetrad(x,invtet);
-    for (int j=0; j<4; j++) {
-      kf[j] = 0.;
-      for (int i=0; i<4; i++) {
-        kf[j] += invtet[j][i] * ki[i];
-      }
-    }
-    Real ep = pphot->ep[ip];
-    k0 = kf[0]/ep;
-    k1 = kf[1]/ep;
-    k2 = kf[2]/ep;
-    k3 = kf[3]/ep;
+  const Real c_cgs = MCConstants::c_cgs;
+  const Real wp = pphot->wp[ip];
 
-    // Weight moments by time spent in domain
-    weight = pphot->wp[ip] * pphot->ep[ip] / k0 * dl / c_cgs;
-  } else {
-    k0 = pphot->k0p[ip];
-    k1 = pphot->k1p[ip];
-    k2 = pphot->k2p[ip];
-    k3 = pphot->k3p[ip];
+  // Projects this photon into whichever frames are asked for below, at most once each
+  // to avoid repated transformations to same basis.
+  PhotonFrames frames(this, pphot, ip, dl);
 
-    if (COORDINATE_SYSTEM == "spherical_polar") {
-      Real theta = pphot->x2p[ip];
-      Real phi = pphot->x3p[ip];
-      Real sth = sin(theta);
-      Real cth = cos(theta);
-      Real sph = sin(phi);
-      Real cph = cos(phi);
-      Real nx = sth * cph * k1 + cth * cph * k2 - sph * k3;
-      Real ny = sth * sph * k1 + cth * sph * k2 + cph * k3;
-      Real nz = cth * k1 - sth * k2;
-      theta = pmy_block->pcoord->x2v(i2);
-      phi = pmy_block->pcoord->x3v(i3);
-      sth = sin(theta);
-      cth = cos(theta);
-      sph = sin(phi);
-      cph = cos(phi);
-      k1 = sth * cph * nx + sth * sph * ny + cth * nz;
-      k2 = cth * cph * nx + cth * sph * ny - sth * nz;
-      k3 = -sph * nx + cph * ny;
-      //printf("k: %g %g %g %g %g %g %g %g %g\n",k1,k2,k3,nx,ny,nz,pphot->k1p[ip],pphot->k2p[ip],pphot->k3p[ip]);
-
-      //printf("k: %g %g %g %g %g %g\n",k1,k2,k3,pphot->k1p[ip],pphot->k2p[ip],pphot->k3p[ip]);
-      // SWD: this could be simplified since only phi_1-phi_2 enters,
-      // but would only save two sin/cos evalutations 
-    }
-    // Weight moments by time spent in domain
-    weight = pphot->wp[ip] * pphot->ep[ip] * dl / c_cgs;
-  }
-
-  if (mom_flag_lab) {
-    if (std::isinf(weight) || std::isnan(weight) || std::isnan(k0) || std::isnan(k1) ||
-        std::isnan(k2) || std::isnan(k3)) {
+  // need_lab_moments, not mom_flag_lab: the comoving moments are derived from these when
+  // they are not accumulated directly, so they have to be filled even when the lab
+  // moments themselves are not being written out.
+  if (need_lab_moments) {
+    const PhotonFrameState &s = frames.Get(MCFRAME_LAB);
+    if (!s.Finite(wp)) {
       pphot->statp[ip] = DESTROYED;
       if (pmy_mc->verbose) {
-        pphot->PrintPhoton ("Warning: Nan/Inf encountered in UpdateMoments(),"
-                            " photon destroyed",ip);
+        pphot->PrintPhoton("Warning: Nan/Inf encountered in UpdateMoments(),"
+                           " photon destroyed",ip);
       }
       return;
-    } else {
-      // Add contribution to corresponding moments
-      // Energy density
-      moments(type,MCIER,i3,i2,i1) += weight * k0 * k0;
-      if (std::isnan(moments(type,MCIER,i3,i2,i1))) {
-        printf("k0: %e weight: %e dl: %e %g\n",k0,weight,dl,moments(type,MCIER,i3,i2,i1));
-      }
-      // Flux
-      moments(type,MCIFR1,i3,i2,i1) += weight * k0 * k1 * c_cgs;
-      moments(type,MCIFR2,i3,i2,i1) += weight * k0 * k2 * c_cgs;
-      moments(type,MCIFR3,i3,i2,i1) += weight * k0 * k3 * c_cgs;
-      // Radiation Pressure
-      moments(type,MCIPR11,i3,i2,i1) += weight * k1 * k1;
-      moments(type,MCIPR22,i3,i2,i1) += weight * k2 * k2;
-      moments(type,MCIPR33,i3,i2,i1) += weight * k3 * k3;
-      moments(type,MCIPR12,i3,i2,i1) += weight * k1 * k2;
-      moments(type,MCIPR13,i3,i2,i1) += weight * k1 * k3;
-      moments(type,MCIPR23,i3,i2,i1) += weight * k2 * k3;
     }
+    AccumulateMoments(moments, type, i3, i2, i1, s, wp);
   }
 
-  // add contribution to scattering source terms
-  // SWD: Ultimately want comoving frame values
+  // Coordinate basis moments. Note that only the general pusher stores the coordinate four-vector
+  // it is built from.
+  if (mom_flag_coord && frames.Available(MCFRAME_COORD)) {
+    const PhotonFrameState &s = frames.Get(MCFRAME_COORD);
+    if (s.Finite(wp))
+      AccumulateMoments(moments_coord, type, i3, i2, i1, s, wp);
+  }
+
+  // Mean intensities for evaluating scattering source terms
   if (mom_flag_scat) {
-    Real loge = std::log10(pphot->ep[ip]);
+    Real weight_scat, e_scat;
+    if (frames.GRTetrad() && boosts) {
+      // Only the comoving energy is needed so FrequencyShiftComoving
+      // rebuilds the fluid four-velocity at the photon and contracts it with k locally,
+      // in contrast to the cell-center projection used for other moments.
+      Real shift = FrequencyShiftComoving(pphot, ip);
+      e_scat = pphot->ep[ip] * shift;
+      weight_scat = wp * e_scat * dl * shift / c_cgs;
+    } else {
+      const PhotonFrameState &sl = frames.Get(MCFRAME_LAB);
+      e_scat = pphot->ep[ip];
+      weight_scat = wp * sl.e * sl.dl / c_cgs;
+    }
+
+    Real loge = std::log10(e_scat);
     Real log10 = 2.302585092994046;
     int n = std::floor((loge-energy_scat(0))/dloge_scat);
+
     if (n >= 0 && n < nf_scat) {
       Real norm = c_cgs/(4.*PI*freq_scat_mid(n)*dloge_scat*log10);
-      moments_scat(n,i3,i2,i1) += norm * pphot->scp[ip] * weight * k0 * k0;
+      moments_scat(n,i3,i2,i1) += norm * weight_scat;
+      moments_scat_error(n,i3,i2,i1) += SQR(norm) * SQR(weight_scat);
+      //moments_scat(n,i3,i2,i1) += norm * pphot->scp[ip] * weight * k0 * k0;
     }
   }
 
-  if (mom_flag_com) {
-    // boost relevant quanitities to comoving frame
-    //FrequencyAngleShiftComoving(pphot,ip,shift,k1c,k2c,k3c);
-
-    Real ki[4],kc[4];
-    ki[0] = k0;
-    ki[1] = k1;
-    ki[2] = k2;
-    ki[3] = k3;
-    for (int j=0; j<4; j++) {
-      kc[j] = 0.;
-      for (int i=0; i<4; i++) {
-        kc[j] += boost_cmv(i3,i2,i1,j,i) * ki[i];
-       }
-    }
-    Real k0c,k1c,k2c,k3c,weight;
-    if (pmy_mc->general_pusher_flag) {
-      k0c = kc[0];
-      k1c = kc[1];
-      k2c = kc[2];
-      k3c = kc[3];
-      weight = pphot->wp[ip] * pphot->ep[ip] / k0c * dl / c_cgs;
-    } else {
-      Real shift = kc[0]/k0;
-      k1c = kc[1]/kc[0];
-      k2c = kc[2]/kc[0];
-      k3c = kc[3]/kc[0];
-      weight = pphot->wp[ip] * pphot->ep[ip] * dl * SQR(shift) / c_cgs;
-    }
-
-    //Real dlcom = dl * shift;
-    //Real ecom = pphot->ep[ip] * shift;
-
-    //Real weight = pphot->wp[ip] * ecom * dlcom / c_cgs;
-    if (std::isinf(weight) || std::isnan(weight) ||
-        std::isinf(k1c) || std::isnan(k1c) ||
-        std::isinf(k2c) || std::isnan(k2c) ||
-        std::isinf(k3c) || std::isnan(k3c) ) {
+  if (mom_flag_com && accumulate_com) {
+    const PhotonFrameState &s = frames.Get(MCFRAME_COMOVING);
+    if (!s.Finite(wp)) {
       pphot->statp[ip] = DESTROYED;
       if (pmy_mc->verbose) {
         pphot->PrintPhoton("Warning: Nan/Inf encountered in UpdateMoments(),"
                            " comoving frame",ip);
       }
       return;
-    } else {
-      // Add contribution to corresponding moments
-      // Energy density
-      moments_com(type,MCIER,i3,i2,i1) += weight * k0c * k0c;
-      // Flux
-      moments_com(type,MCIFR1,i3,i2,i1) += weight * k0c * k1c * c_cgs;
-      moments_com(type,MCIFR2,i3,i2,i1) += weight * k0c * k2c * c_cgs;
-      moments_com(type,MCIFR3,i3,i2,i1) += weight * k0c * k3c * c_cgs;
-      // Radiation Pressure
-      moments_com(type,MCIPR11,i3,i2,i1) += weight * k1c * k1c;
-      moments_com(type,MCIPR22,i3,i2,i1) += weight * k2c * k2c;
-      moments_com(type,MCIPR33,i3,i2,i1) += weight * k3c * k3c;
-      moments_com(type,MCIPR12,i3,i2,i1) += weight * k1c * k2c;
-      moments_com(type,MCIPR13,i3,i2,i1) += weight * k1c * k3c;
-      moments_com(type,MCIPR23,i3,i2,i1) += weight * k2c * k3c;
     }
+    AccumulateMoments(moments_com, type, i3, i2, i1, s, wp);
   }
 
   if (mom_flag_usr) {
+    // PhotonFrames caches, so several user moments sharing a frame cost one projection.
     for (int i=0; i<pmy_mc->nuser_mom; i++) {
-      pmy_mc->user_moment_func[i](this,pphot,dl,ip,i);
+      MCFrame f = pmy_mc->user_moment_frame[i];
+      if (!frames.Available(f)) continue;
+      pmy_mc->user_moment_func[i](this,pphot,ip,i,frames.Get(f));
     }
   }
 
@@ -1105,13 +993,14 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
     Real weight = pphot->wp[ip] * pphot->ep[ip] * dl / c_cgs;
     Real abs_coef = pphot->acp[ip];
     Real sct_coef = pphot->scp[ip];
-    sourceterms(MCRF1,i3,i2,i1) += (sct_coef+abs_coef) * weight * k1;
-    sourceterms(MCRF2,i3,i2,i1) += (sct_coef+abs_coef) * weight * k2;
-    sourceterms(MCRF3,i3,i2,i1) += (sct_coef+abs_coef) * weight * k3;
+    // radiative force follows the lab-frame propagation direction
+    const Real *nl = frames.Get(MCFRAME_LAB).n;
+    sourceterms(MCRF1,i3,i2,i1) += (sct_coef+abs_coef) * weight * nl[0];
+    sourceterms(MCRF2,i3,i2,i1) += (sct_coef+abs_coef) * weight * nl[1];
+    sourceterms(MCRF3,i3,i2,i1) += (sct_coef+abs_coef) * weight * nl[2];
 
     if (pmy_mc->absorption_method[pphot->type[ip]] == ABSTAU) {
-        Real hplanck = 6.62607015e-27;
-        Real threshold = 3.28808816e+15 * hplanck;
+        Real threshold = 3.28808816e+15 * MCConstants::h_cgs;
         // Update soucterms for ionizing radiation
         if (pphot->ep[ip] > threshold) {
           Real weight = pphot->wp[ip] * dl * abs_coef;
@@ -1128,7 +1017,7 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl,
 //        Real k1, Real k2, Real k3,Real etau, int ip)
-//! \brief add contribution to radiation moments in current zone for acceleration
+//! \brief add contribution to radiation moments in current cell for acceleration
 
 void MonteCarloBlock::UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl, Real k1,
                                                 Real k2, Real k3, Real etau, int ip) {
@@ -1139,22 +1028,32 @@ void MonteCarloBlock::UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl,
   Real k2p = pphot->k2p[ip];
   Real k3p = pphot->k3p[ip];
 
-  // Normalize k vector if using general pusher in spherical polar coords
+  // Normalize k vector if using general pusher in spherical polar coords.
+  // See UpdateSourceTerms: keyed on the metric, not the topology, because r and
+  // r sin(theta) are the flat orthonormalization factors.
 
-  if ((COORDINATE_SYSTEM == "spherical_polar") && (pphot->general_pusher_flag)) {
+  if ((coord_system == MCCOORD_SPHERICAL_POLAR) && (pphot->general_pusher_flag)) {
     k2p *= pphot->x1p[ip];
     k3p *= pphot->x1p[ip] * sin(pphot->x2p[ip]);
   }
 
-  Real energy, abs_coef, sct_coef, step;
+  // Start from the Eulerian values so that every path below leaves all four defined.
+  // The comoving branch used to assign abs_coef, sct_coef and step only inside
+  // if (beta2 > 0.), with no else, so a cell with a fluid exactly at rest fell through
+  // and leff = (1.-etau)/abs_coef read uninitialized stack.
+  Real energy = pphot->ep[ip];
+  Real abs_coef = pphot->acp[ip];
+  Real sct_coef = pphot->scp[ip];
+  Real step = dl;
   // BCM: Comoving moments currently do not work with code acceleration
   if (mom_flag_com) {
     // boost relevant quanitities to comoving frame
-    energy = pphot->ep[ip];
     int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+    // vel holds a four-velocity, so the three-velocity needs the u^0 division -- the
+    // same convention GetDopplerFactor() uses.
     Real beta[3];
     for (int i=0; i<3; ++i) {
-      beta[i] = vel(i3,i2,i1,i+1);
+      beta[i] = vel(i3,i2,i1,i+1)/vel(i3,i2,i1,0);
     }
     Real beta2= SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]);
 
@@ -1172,12 +1071,6 @@ void MonteCarloBlock::UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl,
       sct_coef = pphot->scp[ip] / gonembdk;
       step = dl * gonembdk;
     }
-  } else {
-    // Use eulerian values
-    energy = pphot->ep[ip];
-    abs_coef = pphot->acp[ip];
-    sct_coef = pphot->scp[ip];
-    step = dl;
   }
   // Account for attenuation along ray
   Real leff;
@@ -1245,7 +1138,13 @@ void MonteCarloBlock::UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl,
 //! \fn void MonteCarloBlock::NormalizeMoments(bool normalize)
 //! \brief (un)normalized moments for output and copy symmetric elements
 
+
 void MonteCarloBlock::NormalizeMoments(bool normalize) {
+
+  // Derive the comoving moments from the lab accumulation unless they were accumulated
+  // directly.  Done before the normalization factor is applied; it is a scalar so the two
+  // commute, but doing it here keeps the derived array in step with what is written out.
+  if (mom_flag_com && !accumulate_com && normalize) DeriveComovingMoments();
 
   // Get integration time
   // Fix for dynamic MC
@@ -1311,6 +1210,36 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
         }
       }
     }
+  }
+
+  if (mom_flag_coord) {
+    for (int m=0; m<pmy_mc->ntype; ++m) {
+      for (int n=0; n<nmom-3; ++n) {
+        for (int k=ks; k<=ke; ++k) {
+          for (int j=js; j<=je; ++j) {
+            for (int i=is; i<=ie; ++i) {
+              if (normalize)
+                norm = 1./ (tint * pcoord->vol(k,j,i));
+              else
+                norm = tint * pcoord->vol(k,j,i);
+              moments_coord(m,n,k,j,i) *= norm;
+            }
+          }
+        }
+      }
+    }
+    // Copy normalized moments to symmetric elements
+    for (int m=0; m<pmy_mc->ntype; ++m) {
+      for (int k=ks; k<=ke; ++k) {
+        for (int j=js; j<=je; ++j) {
+          for (int i=is; i<=ie; ++i) {
+            moments_coord(m,MCIPR21,k,j,i) = moments_coord(m,MCIPR12,k,j,i);
+            moments_coord(m,MCIPR31,k,j,i) = moments_coord(m,MCIPR13,k,j,i);
+            moments_coord(m,MCIPR32,k,j,i) = moments_coord(m,MCIPR23,k,j,i);
+          }
+        }
+      }
+    }
   } // end if (mom_flag_com)
 
   if (mom_flag_scat) {
@@ -1323,6 +1252,12 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
             else
               norm = tint * pcoord->vol(k,j,i);
             moments_scat(n,k,j,i) *= norm;
+            if (normalize) {
+              moments_scat_error(n,k,j,i) = std::sqrt(moments_scat_error(n,k,j,i))*norm;
+            } else {
+              Real mom2 = moments_scat_error(n,k,j,i)*norm;
+              moments_scat_error(n,k,j,i) = SQR(mom2);
+            }
           }
         }
       }
@@ -1389,8 +1324,12 @@ void MonteCarloBlock::UpdateSourceTerms(Photon *pphot, Real energy0,
   Real k2 = pphot->k2p[ip];
   Real k3 = pphot->k3p[ip];
 
-  // Normalize k vector if using general pusher in spherical polar coords
-  if ((COORDINATE_SYSTEM == "spherical_polar") && (pphot->general_pusher_flag)) {
+  // Normalize k vector if using general pusher in spherical polar coords.
+  // Keyed on the metric rather than on the topology: r and r sin(theta) are the flat
+  // orthonormalization factors, exact only for the spherical_polar metric.  Kerr-Schild
+  // shares the topology but not the scale factors, so it is deliberately excluded here;
+  // doing it properly means going through pcoord->InverseTetrad as UpdateMoments does.
+  if ((coord_system == MCCOORD_SPHERICAL_POLAR) && (pphot->general_pusher_flag)) {
     k2 *= pphot->x1p[ip];
     k3 *= pphot->x1p[ip] * sin(pphot->x2p[ip]);
     k2p0 *= pphot->x1p[ip];
@@ -1669,7 +1608,7 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
               area = pbcoord->GetFace3Area(k+1,j,i);
             area *= l_cgs*l_cgs; // convert area to cgs
             emission(k,j,i) = GetEmission(this,k,j,i,etype) * tint * area;
-            
+
             //printf("emission[%d %d %d %d]: %g %g %g %g\n",pmy_block->gid,i,j,k,tint,area,emission(k,j,i),pmy_mc->GetEmission[etype](this,k,j,i,etype));
             em_tot += emission(k,j,i);
             if (emission(k,j,i) > em_max) em_max = emission(k,j,i);
@@ -1745,7 +1684,7 @@ void MonteCarloBlock::ComputeEmissionSampleArray() {
 void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
 
   if (pmy_mc->emission_eqwt[0]) {
-    // Set intial zone based on probability within zone
+    // Set intial cell based on probability within cell
 
     for (int ip=ips; ip<=ipe; ip++) {
       bool this_zone = false;
@@ -1760,7 +1699,7 @@ void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
           this_zone = true;
           emit_count_(k,j,i) -= 1;
         } else {
-          // Update zone
+          // Update cell
           this_zone = false;
           i3_++;
           if (i3_ >= nx3) {
@@ -1781,7 +1720,7 @@ void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
     } // end loop over ip
   } else {
     for (int ip=ips; ip<=ipe; ip++) {
-      // Randomly assign emission zone
+      // Randomly assign emission cell
       pphot->i1p[ip] = static_cast<int>(pran->uniform()*nx1)+is;
       pphot->i2p[ip] = static_cast<int>(pran->uniform()*nx2)+js;
       pphot->i3p[ip] = static_cast<int>(pran->uniform()*nx3)+ks;
@@ -1803,7 +1742,7 @@ void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face
                                                 int ipe) {
 
   if (pmy_mc->emission_eqwt[0]) {
-    // Set intial zone based on probability within zone
+    // Set intial cell based on probability within cell
     for (int ip=ips; ip<=ipe; ip++) {
       bool i1flag = true;
       bool i2flag = true;
@@ -1853,7 +1792,7 @@ void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face
           this_zone = true;
           emit_count_(k,j,i) -= 1;
         } else {
-          // Update zone
+          // Update cell
           this_zone = false;
           if (!i3flag) {
             i2_++;
@@ -1890,7 +1829,7 @@ void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face
   } else {
 
     for (int ip=ips; ip<=ipe; ip++) {
-      // Randomly assign emission zone
+      // Randomly assign emission cell
       Real weight_reduce;
       switch(face) {
         case BoundaryFace::inner_x1:
@@ -1952,15 +1891,98 @@ void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face
 //! \brief Make hard copy of density from MeshBlock to MonteCarloBlock.
 //  Uses hard copy so that rho is always in cgs units
 
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::FillBounds(int &il, int &iu, int &jl, int &ju,
+//!                                      int &kl, int &ku) const
+//! \brief index range the fluid-derived arrays are filled over
+//
+// Active cells plus ghosts, widened only in the dimensions the block actually has, which
+// is the same rule MeshBlock::ProblemGenerator and Mesh::Initialize use.
+//
+// The ghosts matter because a photon can sit in one: it keeps its old cell indices while
+// it waits to be handed to the neighboring block, and the pusher goes on reading rho,
+// tgas, vel and the boost matrices at those indices.  Filling active cells only left each
+// of those reads returning zero, which for vel meant a null four-velocity reaching
+// FrequencyShiftComoving and the two transform routines.
+//
+// This assumes the source primitives are themselves valid in the ghosts.  They are for a
+// problem generator that fills its full range, which is the Athena++ convention, and for
+// non-GR runs Mesh::Initialize refreshes them via ConservedToPrimitive.  Note that
+// ConservedToPrimitive is deliberately skipped when MONTE_CARLO_ENABLED and
+// GENERAL_RELATIVITY are both on, so in that case the ghosts are exactly what the problem
+// generator wrote and nothing else.
+
+void MonteCarloBlock::FillBounds(int &il, int &iu, int &jl, int &ju,
+                                 int &kl, int &ku) const {
+  il = is - NGHOST;
+  iu = ie + NGHOST;
+  jl = js;
+  ju = je;
+  if (nx2 > 1) {
+    jl -= NGHOST;
+    ju += NGHOST;
+  }
+  kl = ks;
+  ku = ke;
+  if (nx3 > 1) {
+    kl -= NGHOST;
+    ku += NGHOST;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::FluidFourVelocity(Real x[4], int i3, int i2, int i1,
+//!                                             Real ucon[4]) const
+//! \brief four-velocity of cell (i3,i2,i1)'s frame, evaluated at the position x
+//
+// The normal uu^i carries no normalization constraint, so covariant velocities can
+// be obtained via the metric at specific x. The fluid state is assumed to be
+// piecewise constant.
+//
+// With boosts off uprim is zero and this returns the normal observer at x, which is both
+// the right answer and an exact one, since no cell-center quantity enters at all.
+
+void MonteCarloBlock::FluidFourVelocity(Real x[4], int i3, int i2, int i1,
+                                        Real ucon[4]) const {
+
+  Real gcov[4][4], gcon[4][4];
+  pcoord->MetricAndInverse(x, gcov, gcon);
+  FluidFourVelocity(gcov, gcon, i3, i2, i1, ucon);
+}
+
+void MonteCarloBlock::FluidFourVelocity(const Real gcov[4][4], const Real gcon[4][4],
+                                        int i3, int i2, int i1, Real ucon[4]) const {
+
+  const Real uu1 = uprim(i3,i2,i1,0);
+  const Real uu2 = uprim(i3,i2,i1,1);
+  const Real uu3 = uprim(i3,i2,i1,2);
+
+  const Real gamma2 = 1. + gcov[IMC1][IMC1]*uu1*uu1 + gcov[IMC2][IMC2]*uu2*uu2
+                    + gcov[IMC3][IMC3]*uu3*uu3
+                    + 2.*gcov[IMC1][IMC2]*uu1*uu2 + 2.*gcov[IMC1][IMC3]*uu1*uu3
+                    + 2.*gcov[IMC2][IMC3]*uu2*uu3;
+  const Real gamma = std::sqrt(gamma2);
+  const Real alpha = 1.0/std::sqrt(-gcon[IMC0][IMC0]);
+
+  ucon[IMC0] = -gamma*alpha*gcon[IMC0][IMC0];
+  ucon[IMC1] = uu1 - gamma*alpha*gcon[IMC0][IMC1];
+  ucon[IMC2] = uu2 - gamma*alpha*gcon[IMC0][IMC2];
+  ucon[IMC3] = uu3 - gamma*alpha*gcon[IMC0][IMC3];
+}
+
+//----------------------------------------------------------------------------------------
+
 void MonteCarloBlock::GetDensity() {
 
   if (pmy_mc->UserGetDensity != nullptr) {
     pmy_mc->UserGetDensity(this);
     return;
   }
-  for (int k=ks; k<=ke; ++k) {
-    for (int j=js; j<=je; ++j) {
-      for (int i=is; i<=ie; ++i) {
+  int il, iu, jl, ju, kl, ku;
+  FillBounds(il, iu, jl, ju, kl, ku);
+  for (int k=kl; k<=ku; ++k) {
+    for (int j=jl; j<=ju; ++j) {
+      for (int i=il; i<=iu; ++i) {
         rho(k,j,i) = rho_cgs * pmy_block->phydro->w(IDN,k,j,i);
       }
     }
@@ -1982,9 +2004,11 @@ void MonteCarloBlock::GetNumberDensity() {
     // Default for resonant scattering assumes pure hydrogen
     // with 100% neutral fraction.
     Real mp = 1.67262192369e-24;
-    for (int k=ks; k<=ke; ++k) {
-      for (int j=js; j<=je; ++j) {
-        for (int i=is; i<=ie; ++i) {
+    int il, iu, jl, ju, kl, ku;
+    FillBounds(il, iu, jl, ju, kl, ku);
+    for (int k=kl; k<=ku; ++k) {
+      for (int j=jl; j<=ju; ++j) {
+        for (int i=il; i<=iu; ++i) {
           species(0,k,j,i) = rho(k,j,i) / mp;
         }
       }
@@ -2000,13 +2024,48 @@ void MonteCarloBlock::GetNumberDensity() {
   Real heabund = 0.09; //hardcode for now (should be parameter)
   Real mp = 1.67262192369e-24;
 
-  for (int k=ks; k<=ke; ++k) {
-    for (int j=js; j<=je; ++j) {
-      for (int i=is; i<=ie; ++i) {
+  int il, iu, jl, ju, kl, ku;
+  FillBounds(il, iu, jl, ju, kl, ku);
+  for (int k=kl; k<=ku; ++k) {
+    for (int j=jl; j<=ju; ++j) {
+      for (int i=il; i<=iu; ++i) {
         Real nh = rho(k,j,i) / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
         species(1,k,j,i) = nh + 4. * nhe; // nion
         species(0,k,j,i) = nh + 2. * nhe; // nel
+      }
+    }
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::ComputeFreeFreePrefactor()
+//! \brief the cell-constant part of the free-free absorption coefficient
+//
+// chi_ff = ffnrm n_e n_ion T^{-1/2} nu^{-3} (1 - exp(-h nu / k T)).  Everything but the
+// frequency is a property of the cell, and the general pusher evaluates the coefficient
+// every step in a curved metric, so the cell part is done here once
+
+void MonteCarloBlock::ComputeFreeFreePrefactor() {
+
+  if (absorption_opac != ABSFF) return;
+
+  const Real ffnrm = 3.692146e8;
+  const Real kb = 1.380649e-16;
+
+  int il, iu, jl, ju, kl, ku;
+  FillBounds(il, iu, jl, ju, kl, ku);
+  for (int k=kl; k<=ku; ++k) {
+    for (int j=jl; j<=ju; ++j) {
+      for (int i=il; i<=iu; ++i) {
+        const Real t = tgas(k,j,i);
+        if (t > 0.) {
+          ff_cell(0,k,j,i) = ffnrm * species(0,k,j,i) * species(1,k,j,i) / std::sqrt(t);
+          ff_cell(1,k,j,i) = 1. / (kb * t);
+        } else {
+          ff_cell(0,k,j,i) = 0.;
+          ff_cell(1,k,j,i) = 0.;
+        }
       }
     }
   }
@@ -2019,9 +2078,11 @@ void MonteCarloBlock::GetNumberDensity() {
 
 void MonteCarloBlock::GetScalars() {
 
-  for (int k=ks; k<=ke; ++k) {
-    for (int j=js; j<=je; ++j) {
-      for (int i=is; i<=ie; ++i) {
+  int il, iu, jl, ju, kl, ku;
+  FillBounds(il, iu, jl, ju, kl, ku);
+  for (int k=kl; k<=ku; ++k) {
+    for (int j=jl; j<=ju; ++j) {
+      for (int i=il; i<=iu; ++i) {
         scalars(k,j,i) = pmy_block->pscalars->s(0,k,j,i);
       }
     }
@@ -2035,40 +2096,36 @@ void MonteCarloBlock::GetScalars() {
 
 void MonteCarloBlock::GetVelocity() {
 
+  int il, iu, jl, ju, kl, ku;
+  FillBounds(il, iu, jl, ju, kl, ku);
+
   if (GENERAL_RELATIVITY) {
-
-    AthenaArray<Real> g, gi;
-    g.NewAthenaArray(NMETRIC,ie+1);
-    gi.NewAthenaArray(NMETRIC,ie+1);
-    for (int k=ks; k<=ke; ++k) {
-      for (int j=js; j<=je; ++j) {
-        pmy_block->pcoord->CellMetric(k,j,is,ie,g,gi);
-        for (int i=is; i<=ie; ++i) {
-          Real alpha = 1.0/std::sqrt(-gi(I00,i));
-          Real uu1 = pmy_block->phydro->w(IVX,k,j,i);
-          Real uu2 = pmy_block->phydro->w(IVY,k,j,i);
-          Real uu3 = pmy_block->phydro->w(IVZ,k,j,i);
-
-          Real gamma2 = 1. + g(I11,i)*uu1*uu1 + g(I22,i)*uu2*uu2 + g(I33,i)*uu3*uu3 +
-                        2.0*g(I12,i)*uu1*uu2 + 2.*g(I13,i)*uu1*uu3 + 2.*g(I23,i)*uu2*uu3;
-          Real gamma = std::sqrt(gamma2);
-
-          vel(k,j,i,0) = -gamma*alpha*gi(I00,i);
-          vel(k,j,i,1) = uu1 - gamma*alpha*gi(I01,i);
-          vel(k,j,i,2) = uu2 - gamma*alpha*gi(I02,i);
-          vel(k,j,i,3) = uu3 - gamma*alpha*gi(I03,i);
-          Real beta0 = std::sqrt(SQR(vel(k,j,i,1)/vel(k,j,i,0))+SQR(vel(k,j,i,2)/vel(k,j,i,0))+SQR(vel(k,j,i,3)/vel(k,j,i,0)));
-          if (beta0 >= betamax)
-            printf("beta > betamax: %g\n", beta0);
+    // Only the primitives are stored. They carry no normalization constraint, so
+    // FluidFourVelocity can assemble the four-velocity at any x.
+    for (int k=kl; k<=ku; ++k) {
+      for (int j=jl; j<=ju; ++j) {
+        for (int i=il; i<=iu; ++i) {
+          uprim(k,j,i,0) = pmy_block->phydro->w(IVX,k,j,i);
+          uprim(k,j,i,1) = pmy_block->phydro->w(IVY,k,j,i);
+          uprim(k,j,i,2) = pmy_block->phydro->w(IVZ,k,j,i);
         }
       }
     }
   } else {
     Real c_cgs = 2.99792458e10;
-    for (int k=ks; k<=ke; ++k) {
-      for (int j=js; j<=je; ++j) {
-        for (int i=is; i<=ie; ++i) {
+    for (int k=kl; k<=ku; ++k) {
+      for (int j=jl; j<=ju; ++j) {
+        for (int i=il; i<=iu; ++i) {
           Real rho = pmy_block->phydro->u(IDN,k,j,i);
+          if (!(rho > 0.)) {
+            // Empty ghost cell: leave the fluid at rest rather than dividing by zero.
+            // vel must still be a valid four-velocity, since consumers contract it.
+            vel(k,j,i,0) = 1.0;
+            vel(k,j,i,1) = 0.0;
+            vel(k,j,i,2) = 0.0;
+            vel(k,j,i,3) = 0.0;
+            continue;
+          }
           vel(k,j,i,1) = vel_cgs * pmy_block->phydro->u(IM1,k,j,i) / (rho * c_cgs);
           vel(k,j,i,2) = vel_cgs * pmy_block->phydro->u(IM2,k,j,i) / (rho * c_cgs);
           vel(k,j,i,3) = vel_cgs * pmy_block->phydro->u(IM3,k,j,i) / (rho * c_cgs);
@@ -2086,6 +2143,35 @@ void MonteCarloBlock::GetVelocity() {
       }
     }
   } // end if (GENERAL_RELATIVITY) else
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::SetNormalObserver()
+//! \brief declare the frame to be that of the normal (Eulerian) observer.
+//
+// Used for general relativistic problems run without boosts.  There is no fluid
+// velocity to define a comoving frame, but the GR frame transformations still need a
+// four-velocity to build the tetrad on, and the natural choice is the observer normal
+// to the spatial slices: n^mu = -alpha g^{mu t} with lapse alpha = 1/sqrt(-g^{tt}).
+// This is the zero-three-velocity limit of GetVelocity(), and unlike the static
+// observer it stays well defined inside the ergosphere.
+
+void MonteCarloBlock::SetNormalObserver() {
+
+  // Zero primitives are the normal observer: with uu^i = 0 the Lorentz factor in
+  // FluidFourVelocity is 1 and it returns u^mu = -alpha g^{mu t}, evaluated wherever it
+  // is asked for.
+  int il, iu, jl, ju, kl, ku;
+  FillBounds(il, iu, jl, ju, kl, ku);
+  for (int k=kl; k<=ku; ++k) {
+    for (int j=jl; j<=ju; ++j) {
+      for (int i=il; i<=iu; ++i) {
+        uprim(k,j,i,0) = 0.0;
+        uprim(k,j,i,1) = 0.0;
+        uprim(k,j,i,2) = 0.0;
+      }
+    }
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -2120,13 +2206,18 @@ void MonteCarloBlock::GetTemperature() {
     tconv = tgas_cgs;
 
   // compute temperature from pressure and density
-  for (int k=ks; k<=ke; ++k) {
-    for (int j=js; j<=je; ++j) {
-      for (int i=is; i<=ie; ++i) {
-	//if (pmy_block->gid == 61) {
-	//  printf("%d %d %d %g %g\n",k,j,i,phydro->w(IEN,k,j,i),phydro->w(IDN,k,j,i));
-	//}
-        Real temp = tconv * phydro->w(IEN,k,j,i) / phydro->w(IDN,k,j,i);
+  int il, iu, jl, ju, kl, ku;
+  FillBounds(il, iu, jl, ju, kl, ku);
+  for (int k=kl; k<=ku; ++k) {
+    for (int j=jl; j<=ju; ++j) {
+      for (int i=il; i<=iu; ++i) {
+
+        // A ghost cell a problem generator never wrote leaves both of these at zero, and
+        // 0/0 is a NaN that the floor and ceiling below cannot clamp -- every comparison
+        // against a NaN is false, so it would propagate into the opacities.  Fall back to
+        // the floor instead, which is what an empty cell should read as anyway.
+        Real dens = phydro->w(IDN,k,j,i);
+        Real temp = (dens > 0.) ? tconv * phydro->w(IEN,k,j,i) / dens : tfloor_cgs;
         // apply temperature floor
         temp = (temp > tfloor_cgs) ? temp : tfloor_cgs;
         temp = (temp < tceiling_cgs) ? temp : tceiling_cgs;
@@ -2142,16 +2233,112 @@ void MonteCarloBlock::GetTemperature() {
 
 void MonteCarloBlock::ComputeTransformations() {
 
+  int il, iu, jl, ju, kl, ku;
+  FillBounds(il, iu, jl, ju, kl, ku);
+
+  // Decide whether the comoving frequency shift is identically one, which lets the
+  // general pusher skip its per-step opacity refresh.  Two conditions, both needed:
+  //
+  //   flat metric   -- the shift for an observer at rest is the lapse, and alpha = 1 for
+  //                    every flat metric the module supports (g_tt = -1, no time cross
+  //                    terms).  In a curved metric alpha varies from point to point.
+  //   fluid at rest -- otherwise there is a Doppler term, and it varies within a cell
+  //                    whenever the flow has a component along a direction the metric
+  //                    depends on.  Snake is a poor test of that because its metric
+  //                    depends on x1 alone while mc_snake only drives flow along x3, so
+  //                    k_3 is conserved and the shift comes out constant; spherical polar
+  //                    with any radial flow is the case that does vary.
+  //
+  // The test is for exact zeros.  A pgen that sets a tiny but nonzero velocity gets the
+  // refresh, which costs time but cannot be wrong.
+  bool fluid_at_rest = true;
+  for (int k=kl; k<=ku && fluid_at_rest; ++k) {
+    for (int j=jl; j<=ju && fluid_at_rest; ++j) {
+      for (int i=il; i<=iu && fluid_at_rest; ++i) {
+        if (GENERAL_RELATIVITY) {
+          if (uprim(k,j,i,0) != 0. || uprim(k,j,i,1) != 0. || uprim(k,j,i,2) != 0.)
+            fluid_at_rest = false;
+        } else {
+          if (vel(k,j,i,1) != 0. || vel(k,j,i,2) != 0. || vel(k,j,i,3) != 0.)
+            fluid_at_rest = false;
+        }
+      }
+    }
+  }
+  shift_unity = fluid_at_rest && !curved_metric;
+
+  // Everything below fills boost_cmv and boost_lab, which exist only when something will
+  // read them; the constructor records that decision.
+  if (!cache_tetrads) return;
+
+  if (GENERAL_RELATIVITY) {
+    // In GR the map to an orthonormal frame is not a flat Lorentz boost.  vel holds a
+    // coordinate-frame four-velocity, so treating its components as gamma and
+    // gamma*beta -- which is what the flat branch below does -- is not a Lorentz
+    // transformation at all: for a static observer in Kerr-Schild the spatial part picks
+    // up the shift vector and the components fail the Minkowski norm.  Instead store the
+    // covariant legs of two tetrads, so that one matrix multiply carries a coordinate
+    // four-vector straight to orthonormal components:
+    //
+    //   boost_lab -> normal (Eulerian) observer; the basis lab moments are reported in.
+    //   boost_cmv -> the frame vel is built on: the fluid with boosts enabled, and the
+    //                normal observer without, in which case the two agree by construction.
+    //
+    // Both are evaluated at the cell center, which is where the fluid velocity already
+    // lives, so the moments are built in a single well defined per-cellframe.
+    AthenaArray<Real> g, gi;
+    g.NewAthenaArray(NMETRIC,iu+1);
+    gi.NewAthenaArray(NMETRIC,iu+1);
+    for (int k=kl; k<=ku; k++) {
+      for (int j=jl; j<=ju; j++) {
+        pmy_block->pcoord->CellMetric(k,j,il,iu,g,gi);
+        for (int i=il; i<=iu; i++) {
+          Real x[4];
+          x[IMC0] = 0.;
+          x[IMC1] = pmy_block->pcoord->x1v(i);
+          x[IMC2] = pmy_block->pcoord->x2v(j);
+          x[IMC3] = pmy_block->pcoord->x3v(k);
+          Real gcov[4][4];
+          pcoord->Metric(x, gcov);
+          Real econ[4][4], ecov[4][4];
+          // gcov defined at x, g, gi defined at cell center
+          // normal observer, n^mu = -alpha g^{mu t}
+          Real alpha = 1.0/std::sqrt(-gi(I00,i));
+          Real ncon[4];
+          ncon[IMC0] = -alpha*gi(I00,i);
+          ncon[IMC1] = -alpha*gi(I01,i);
+          ncon[IMC2] = -alpha*gi(I02,i);
+          ncon[IMC3] = -alpha*gi(I03,i);
+          ConstructTetrad(ncon, gcov, econ, ecov);
+          for (int a=0; a<4; a++)
+            for (int m=0; m<4; m++)
+              boost_lab(k,j,i,a,m) = ecov[a][m];
+
+          // The frame the fluid is at rest in, rebuilt at the cell center.  Deliberately
+          // the cell center and not the photon: these matrices are per cell and back the
+          // moments, which are cell averages.  See DeriveComovingMoments.
+          Real ucon[4];
+          FluidFourVelocity(x, k, j, i, ucon);
+          ConstructTetrad(ucon, gcov, econ, ecov);
+          for (int a=0; a<4; a++)
+            for (int m=0; m<4; m++)
+              boost_cmv(k,j,i,a,m) = ecov[a][m];
+        }
+      }
+    }
+    g.DeleteAthenaArray();
+    gi.DeleteAthenaArray();
+    return;
+  }
+
   // loop over all cells on block
-  for (int k=ks; k<=ke; k++) {
-    for (int j=js; j<=je; j++) {
-      for (int i=is; i<=ie; i++) {
+  for (int k=kl; k<=ku; k++) {
+    for (int j=jl; j<=ju; j++) {
+      for (int i=il; i<=iu; i++) {
         boost_cmv(k,j,i,0,0) = vel(k,j,i,0);
         boost_lab(k,j,i,0,0) = vel(k,j,i,0);
         for (int m=1; m<4; m++) {
           boost_cmv(k,j,i,0,m) = -vel(k,j,i,m);
-          //if (std::isnan(boost_cmv(k,j,i,0,m)))
-          //    printf("boost: %d %d %d %g\n",k,j,i,vel(k,j,i,m));
           boost_lab(k,j,i,0,m) = vel(k,j,i,m);
         }
         for (int l=1; l<4; l++) {
@@ -2164,15 +2351,6 @@ void MonteCarloBlock::ComputeTransformations() {
           boost_cmv(k,j,i,l,l) += 1.;
           boost_lab(k,j,i,l,l) += 1.;
         }
-        /*for (int l=0; l<4; l++) {
-          for (int m=0; m<4; m++) {
-            Real sum = 0.;
-            for (int n=0; n<4; n++) {
-              sum += boost_cmv(k,j,i,l,n)*boost_lab(k,j,i,n,m);
-            }
-            printf("%d %d %g\n",l,m,sum);
-          }
-          }*/
       } // loop over i
     } // loop over j
   } // loop over k
@@ -2186,41 +2364,25 @@ void MonteCarloBlock::TransformToComoving(Photon *pphot, int ips, int ipe) {
 
   if (GENERAL_RELATIVITY) {
     for(int ip=ips; ip<=ipe; ip++) {
-      // Construct the tetrad
-      Real gcov[4][4];
-      Real x[4];
-      x[IMC0] = pphot->x0p[ip];
-      x[IMC1] = pphot->x1p[ip];
-      x[IMC2] = pphot->x2p[ip];
-      x[IMC3] = pphot->x3p[ip];
-      pcoord->Metric(x, gcov);
-
-      // Create tetrad basis
-      Real ucon[4];
-      ucon[IMC0] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],0);
-      ucon[IMC1] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],1);
-      ucon[IMC2] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],2);
-      ucon[IMC3] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],3);
+      // The comoving frame at the photon, from the one definition shared with the
+      // polarized scattering basis.  This is the inverse of TransformToCoordinate and the
+      // two are called around Scatter, which does not move the photon, so both see the
+      // same x
       Real econ[4][4], ecov[4][4];
-      ConstructTetrad(ucon, gcov, econ, ecov);
+      ComovingFrame(this, pphot, ip, econ, ecov);
 
       Real k0init = pphot->k0p[ip];
-      // Transform to comoving tetrad
-      Real kcopy[4];
-      kcopy[IMC0] = pphot->k0p[ip];
-      kcopy[IMC1] = pphot->k1p[ip];
-      kcopy[IMC2] = pphot->k2p[ip];
-      kcopy[IMC3] = pphot->k3p[ip];
-      Real k[4];
+      // Transform to comoving tetrad.  In GR the coordinate-frame spatial components are
+      // dimensional, the comoving ones are a unit direction.
+      Real kcopy[4], k[4];
+      pphot->GetFourVector(ip, false, kcopy);
       CoordinateToTetrad(kcopy, k, ecov);
-      pphot->k0p[ip] = 1.;
-      pphot->k1p[ip] = k[IMC1]/k[IMC0];
-      pphot->k2p[ip] = k[IMC2]/k[IMC0];
-      pphot->k3p[ip] = k[IMC3]/k[IMC0];
 
+      // nufact must be taken from the local array: k0p is the energy, so writing it
+      // below also writes ep.
       Real nufact = k[IMC0]/k0init;
-      //printf("com: %g %g %g %g %g\n",nufact,pphot->k0p[ip],pphot->k1p[ip],pphot->k2p[ip],pphot->k3p[ip]);
-      pphot->ep[ip] *= nufact;
+      pphot->SetFourVector(ip, true, k);
+
       pphot->acp[ip] /= nufact;
       pphot->scp[ip] /= nufact;
     }
@@ -2232,76 +2394,39 @@ void MonteCarloBlock::TransformToComoving(Photon *pphot, int ips, int ipe) {
       int i3 = pphot->i3p[ip];
 
       Real k0init = pphot->k0p[ip];
+      // The general pusher stores dimensional spatial components in the coordinate
+      // frame; the legacy pushers store a unit direction.
       Real ki[4], kf[4];
-      if (pmy_mc->general_pusher_flag) {
-        ki[0] = pphot->k0p[ip];
-        ki[1] = pphot->k1p[ip];
-        ki[2] = pphot->k2p[ip];
-        ki[3] = pphot->k3p[ip];
+      pphot->GetFourVector(ip, !pmy_mc->general_pusher_flag, kf);
 
-        Real x[4], invtet[4][4];
-        x[0] = pphot->x0p[ip];
-        x[1] = pphot->x1p[ip];
-        x[2] = pphot->x2p[ip];
-        x[3] = pphot->x3p[ip];
-        pcoord->InverseTetrad(x,invtet);
-        for (int j=0; j<4; j++) {
-          kf[j] = 0.;
-          for (int i=0; i<4; i++) {
-            kf[j] += invtet[j][i] * ki[i];
-          }
-        }
-        pphot->k0p[ip] = kf[0];
-        pphot->k1p[ip] = kf[1];
-        pphot->k2p[ip] = kf[2];
-        pphot->k3p[ip] = kf[3];
-      }
-      if (boosts) {
-        ki[0] = pphot->k0p[ip];
-        ki[1] = pphot->k1p[ip];
-        ki[2] = pphot->k2p[ip];
-        ki[3] = pphot->k3p[ip];
+      if (pmy_mc->general_pusher_flag) {
+        // One projection through the frame ComovingFrame defines, shared with
+        // MeridianBasis; it already carries the fluid velocity, so the boosts branch
+        // below is for the legacy pushers only.
+        Real econ[4][4], ecov[4][4];
+        ComovingFrame(this, pphot, ip, econ, ecov);
+        for (int i=0; i<4; i++) ki[i] = kf[i];
+        CoordinateToTetrad(ki, kf, ecov);
+      } else if (boosts) {
+        for (int i=0; i<4; i++) ki[i] = kf[i];
         for (int j=0; j<4; j++) {
           kf[j] = 0.;
           for (int i=0; i<4; i++) {
             kf[j] += boost_cmv(i3,i2,i1,j,i) * ki[i];
           }
         }
-        pphot->k0p[ip] = kf[0];
-        pphot->k1p[ip] = kf[1];
-        pphot->k2p[ip] = kf[2];
-        pphot->k3p[ip] = kf[3];
       }
 
-      //pphot->PrintPhoton("to com",ip);
-      Real nufact = pphot->k0p[ip]/k0init;
+      // Take nufact before storing: k0p is the energy, so the store also writes ep.
+      Real nufact = kf[IMC0]/k0init;
+      // comoving frame always keeps a unit propagation direction
+      pphot->SetFourVector(ip, true, kf);
 
-      pphot->k0p[ip] = 1.;
-      // SWD: maybe better to renormalize
-      if ((COORDINATE_SYSTEM == "spherical_polar") && pmy_mc->polarized) {
-        Real k3[3];
-        Real cth = cos(pphot->x2p[ip]);
-        Real sth = sin(pphot->x2p[ip]);
-        Real cph = cos(pphot->x3p[ip]);
-        Real sph = sin(pphot->x3p[ip]);
-        k3[0] = pphot->k1p[ip];
-        k3[1] = pphot->k2p[ip];
-        k3[2] = pphot->k3p[ip];
-        pphot->k1p[ip] = k3[0]*sth*cph + k3[1]*cth*cph - k3[2]*sph;
-        pphot->k2p[ip] = k3[0]*sth*sph + k3[1]*cth*sph + k3[2]*cph;
-        pphot->k3p[ip] = k3[0]*cth     - k3[1]*sth;
-        Real knorm = std::sqrt(SQR(pphot->k1p[ip])+SQR(pphot->k2p[ip])+SQR(pphot->k3p[ip]));
-        pphot->k1p[ip] /= knorm;
-        pphot->k2p[ip] /= knorm;
-        pphot->k3p[ip] /= knorm;
-      } else {
-        pphot->k1p[ip] = kf[1]/kf[0];
-        pphot->k2p[ip] = kf[2]/kf[0];
-        pphot->k3p[ip] = kf[3]/kf[0];
-      }
-      //if (std::isinf(nufact) || std::isnan(nufact))
-      //  pphot->PrintPhoton("to com: nan in boost",ip);
-      pphot->ep[ip] *= nufact;
+      // Into the basis the polarized scattering routines assume; see polarization.hpp.
+      // Legacy pushers only.
+      if (!pmy_mc->general_pusher_flag && IsPolarized(pmy_mc->polarized))
+        ToScatteringBasis(this, pphot, ip);
+  
       pphot->acp[ip] /= nufact;
       pphot->scp[ip] /= nufact;
 
@@ -2319,44 +2444,24 @@ void MonteCarloBlock::TransformToCoordinate(Photon *pphot, int ips, int ipe) {
 
   if (GENERAL_RELATIVITY) {
     for(int ip=ips; ip<=ipe; ip++) {
-      Real gcov[4][4];
-      Real x[4];
-      x[IMC0] = pphot->x0p[ip];
-      x[IMC1] = pphot->x1p[ip];
-      x[IMC2] = pphot->x2p[ip];
-      x[IMC3] = pphot->x3p[ip];
-      pcoord->Metric(x, gcov);
-
-      // Create tetrad basis
-      Real ucon[4];
-      ucon[IMC0] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],0);
-      ucon[IMC1] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],1);
-      ucon[IMC2] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],2);
-      ucon[IMC3] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],3);
+      // The same frame TransformToComoving projected into; see ComovingFrame.
       Real econ[4][4], ecov[4][4];
-      ConstructTetrad(ucon, gcov, econ, ecov);
+      ComovingFrame(this, pphot, ip, econ, ecov);
 
-      // Transform to comoving tetrad
-      Real kcopy[4];
-      kcopy[IMC0] = pphot->k0p[ip] * pphot->ep[ip];
-      kcopy[IMC1] = pphot->k1p[ip] * pphot->ep[ip];
-      kcopy[IMC2] = pphot->k2p[ip] * pphot->ep[ip];
-      kcopy[IMC3] = pphot->k3p[ip] * pphot->ep[ip];
+      // Transform out of the comoving tetrad.  Comoving stores a unit direction, the GR
+      // coordinate frame stores dimensional components.
+      Real kcopy[4], k[4];
+      pphot->GetFourVector(ip, true, kcopy);
       Real k0init = kcopy[IMC0];
 
-      Real k[4];
-      TetradToCoordinate(kcopy, k, ecov);
-      pphot->k0p[ip] = k[IMC0];
-      pphot->k1p[ip] = k[IMC1];
-      pphot->k2p[ip] = k[IMC2];
-      pphot->k3p[ip] = k[IMC3];
+      TetradToCoordinate(kcopy, k, econ);
 
-      Real nufact = pphot->k0p[ip]/k0init;
-      //printf("coord: %g %g %g %g %g\n",nufact,pphot->k0p[ip],pphot->k1p[ip],pphot->k2p[ip],pphot->k3p[ip]);
-      pphot->ep[ip] *= nufact;
+      // nufact must be taken before storing: writing k0p also writes ep.
+      Real nufact = k[IMC0]/k0init;
+      pphot->SetFourVector(ip, false, k);
+
       pphot->acp[ip] /= nufact;
       pphot->scp[ip] /= nufact;
-      //pphot->PrintPhoton("to cord",ip);
     }
   } else {
     for(int ip=ips; ip<=ipe; ip++) {
@@ -2364,86 +2469,39 @@ void MonteCarloBlock::TransformToCoordinate(Photon *pphot, int ips, int ipe) {
       int i2 = pphot->i2p[ip];
       int i3 = pphot->i3p[ip];
 
-      if (pmy_mc->general_pusher_flag) {
-        pphot->k0p[ip] *= pphot->ep[ip];
-        pphot->k1p[ip] *= pphot->ep[ip];
-        pphot->k2p[ip] *= pphot->ep[ip];
-        pphot->k3p[ip] *= pphot->ep[ip];
-      } else if ((pmy_mc->polarized) && (COORDINATE_SYSTEM == "spherical_polar")) {
-        // rotate cartesian to to spherical polar
-        Real k3[3];
-        Real cth = cos(pphot->x2p[ip]);
-        Real sth = sin(pphot->x2p[ip]);
-        Real cph = cos(pphot->x3p[ip]);
-        Real sph = sin(pphot->x3p[ip]);
-        k3[0] = pphot->k1p[ip];
-        k3[1] = pphot->k2p[ip];
-        k3[2] = pphot->k3p[ip];
-        pphot->k1p[ip] = k3[0]*sth*cph + k3[1]*sth*sph + k3[2]*cth;
-        pphot->k2p[ip] = k3[0]*cth*cph + k3[1]*cth*sph - k3[2]*sth;
-        pphot->k3p[ip] = -k3[0]*sph + k3[1]*cph;
-        Real knorm = std::sqrt(SQR(pphot->k1p[ip])+SQR(pphot->k2p[ip])+SQR(pphot->k3p[ip]));
-        pphot->k1p[ip] /= knorm;
-        pphot->k2p[ip] /= knorm;
-        pphot->k3p[ip] /= knorm;
-      }
+      // Back out of the scattering basis.  Guarded on the legacy pusher exactly as
+      // before: the general pusher reaches this function through a different branch.
+      if (!pmy_mc->general_pusher_flag && IsPolarized(pmy_mc->polarized))
+        FromScatteringBasis(this, pphot, ip);
 
       Real k0init = pphot->k0p[ip];
+      // comoving frame stores a unit direction
       Real ki[4], kf[4];
-      if (boosts) {
-        ki[0] = pphot->k0p[ip];
-        ki[1] = pphot->k1p[ip];
-        ki[2] = pphot->k2p[ip];
-        ki[3] = pphot->k3p[ip];
+      pphot->GetFourVector(ip, true, kf);
+
+      if (pmy_mc->general_pusher_flag) {
+        // The exact inverse of the projection in TransformToComoving, through the same
+        // frame, so the round trip across a scattering closes.
+        Real econ[4][4], ecov[4][4];
+        ComovingFrame(this, pphot, ip, econ, ecov);
+        for (int i=0; i<4; i++) ki[i] = kf[i];
+        TetradToCoordinate(ki, kf, econ);
+      } else if (boosts) {
+        for (int i=0; i<4; i++) ki[i] = kf[i];
         for (int j=0; j<4; j++) {
           kf[j] = 0.;
           for (int i=0; i<4; i++) {
             kf[j] += boost_lab(i3,i2,i1,j,i) * ki[i];
           }
         }
-        pphot->k0p[ip] = kf[0];
-        pphot->k1p[ip] = kf[1];
-        pphot->k2p[ip] = kf[2];
-        pphot->k3p[ip] = kf[3];
       }
-      Real nufact;
-      if (pmy_mc->general_pusher_flag) {
-        ki[0] = pphot->k0p[ip];
-        ki[1] = pphot->k1p[ip];
-        ki[2] = pphot->k2p[ip];
-        ki[3] = pphot->k3p[ip];
 
-        Real x[4], tetrad[4][4];
-        x[0] = pphot->x0p[ip];
-        x[1] = pphot->x1p[ip];
-        x[2] = pphot->x2p[ip];
-        x[3] = pphot->x3p[ip];
-        pcoord->Tetrad(x,tetrad);
-        for (int j=0; j<4; j++) {
-          kf[j] = 0.;
-          for (int i=0; i<4; i++) {
-            kf[j] += tetrad[j][i] * ki[i];
-          }
-        }
-        pphot->k0p[ip] = kf[0];
-        pphot->k1p[ip] = kf[1];
-        pphot->k2p[ip] = kf[2];
-        pphot->k3p[ip] = kf[3];
-        nufact = kf[0]/k0init;
-      } else {
-        // spatial components of k are unit vectors
-        nufact = pphot->k0p[ip]/k0init;
-
-        Real knorm = std::sqrt(SQR(pphot->k1p[ip])+SQR(pphot->k2p[ip])+SQR(pphot->k3p[ip]));
-        pphot->k0p[ip] = 1.;
-        pphot->k1p[ip] /= knorm;
-        pphot->k2p[ip] /= knorm;
-        pphot->k3p[ip] /= knorm;
-      }
-      //if (std::isinf(nufact) || std::isnan(nufact))
-      //  pphot->PrintPhoton("to cord: nan in boost",ip);
-      // update energy and opacities
-      pphot->ep[ip] *= nufact;
+      // Take nufact before storing: writing k0p also writes ep.  The general pusher
+      // keeps dimensional spatial components in the coordinate frame; the legacy
+      // pushers keep a unit direction.
+      Real nufact = kf[IMC0]/k0init;
+      pphot->SetFourVector(ip, !pmy_mc->general_pusher_flag, kf);
+      // update opacities
       pphot->acp[ip] /= nufact;
       pphot->scp[ip] /= nufact;
 
@@ -2458,48 +2516,64 @@ void MonteCarloBlock::TransformToCoordinate(Photon *pphot, int ips, int ipe) {
 Real  MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip) {
 
   if (GENERAL_RELATIVITY) {
-    Real gcov[4][4];
+    // Evaluate the metric pair at the photon and hand it to the body below.  The general
+    // pusher calls the body directly with the pair it carries from step to step.
+    Real gcov[4][4], gcon[4][4];
     Real x[4];
     x[IMC0] = pphot->x0p[ip];
     x[IMC1] = pphot->x1p[ip];
     x[IMC2] = pphot->x2p[ip];
     x[IMC3] = pphot->x3p[ip];
-    pcoord->Metric(x, gcov);
+    pcoord->MetricAndInverse(x, gcov, gcon);
+    return FrequencyShiftComoving(pphot, ip, gcov, gcon);
+  } else {
+    return FrequencyShiftComoving(pphot, ip, nullptr, nullptr);
+  }
+}
 
-    // Create tetrad basis
+Real MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip, const Real gcov[4][4],
+                                             const Real gcon[4][4]) {
+
+  if (GENERAL_RELATIVITY) {
+    // vel holds the fluid four-velocity when boosts are on and the normal observer
+    // otherwise, so the tetrad is well defined either way.  With boosts off the shift
+    // returned here is the purely gravitational one.
+    //
+    // Rebuilt at the photon rather than read from the cell center, so u.u = -1 holds
+    // here, where it is about to be contracted with k.
     Real ucon[4];
-    ucon[IMC0] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],0);
-    ucon[IMC1] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],1);
-    ucon[IMC2] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],2);
-    ucon[IMC3] = vel(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip],3);
-    Real econ[4][4], ecov[4][4];
-    ConstructTetrad(ucon, gcov, econ, ecov);
+    FluidFourVelocity(gcov, gcon, pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip], ucon);
 
     Real k0init = pphot->k0p[ip];
-    // Transform to comoving tetrad
+    // Called from the coordinate frame, where GR keeps dimensional components.
     Real kcopy[4];
-    kcopy[IMC0] = pphot->k0p[ip];
-    kcopy[IMC1] = pphot->k1p[ip];
-    kcopy[IMC2] = pphot->k2p[ip];
-    kcopy[IMC3] = pphot->k3p[ip];
-    Real k[4];
-    CoordinateToTetrad(kcopy, k, ecov);
+    pphot->GetFourVector(ip, false, kcopy);
 
-    Real nufact = k[IMC0]/k0init;
-    return nufact;
+    // Only the observer's energy is wanted, so build only the tetrad leg that carries it.
+    // ObserverEnergy reproduces ConstructTetrad + CoordinateToTetrad on this component
+    // bit for bit while skipping the Gram-Schmidt for the three spatial legs, which is
+    // roughly ten metric contractions and four square roots that never reach the answer.
+    // This sits in the general pusher's inner loop through UpdateOpacities, so the saving
+    // is what makes refreshing opacities more often than once per cell affordable.
+    // ObserverEnergy takes a mutable array (it only reads it); copy rather than
+    // const-cast, sixteen doubles.
+    Real g[4][4];
+    for (int i = 0; i < 4; i++)
+      for (int j = 0; j < 4; j++) g[i][j] = gcov[i][j];
+    return ObserverEnergy(ucon, kcopy, g)/k0init;
   } else {
     int i1 = pphot->i1p[ip];
     int i2 = pphot->i2p[ip];
     int i3 = pphot->i3p[ip];
 
     Real k0init = pphot->k0p[ip];
+    // Called from the coordinate frame: the general pusher keeps dimensional spatial
+    // components there, the legacy pushers keep a unit direction.
     Real ki[4], kf[4];
-    if (tetrads) {
-      ki[0] = pphot->k0p[ip];
-      ki[1] = pphot->k1p[ip];
-      ki[2] = pphot->k2p[ip];
-      ki[3] = pphot->k3p[ip];
+    pphot->GetFourVector(ip, !pmy_mc->general_pusher_flag, kf);
 
+    if (tetrads) {
+      for (int i=0; i<4; i++) ki[i] = kf[i];
       Real x[4], invtet[4][4];
       x[0] = pphot->x0p[ip];
       x[1] = pphot->x1p[ip];
@@ -2512,19 +2586,22 @@ Real  MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip) {
           kf[j] += invtet[j][i] * ki[i];
         }
       }
-    } else {
-      kf[0] = pphot->k0p[ip];
-      kf[1] = pphot->k1p[ip];
-      kf[2] = pphot->k2p[ip];
-      kf[3] = pphot->k3p[ip];
     }
 
-    Real k0f = 0.;
-    for (int i=0; i<4; i++) {
-      k0f += boost_cmv(i3,i2,i1,0,i) * kf[i];
+    // Boost from the tetrad frame into the fluid frame.  With boosts disabled the tetrad
+    // frame is already the comoving frame, and boost_cmv has never been filled by
+    // ComputeTransformations(), so it must not be applied here.
+    Real k0f;
+    if (boosts) {
+      k0f = 0.;
+      for (int i=0; i<4; i++) {
+        k0f += boost_cmv(i3,i2,i1,0,i) * kf[i];
+      }
+    } else {
+      k0f = kf[0];
     }
-    Real nufact =k0f/k0init;
-    /*if (std::isinf(nufact) || std::isnan(nufact)) {
+    /* Real nufact =k0f/k0init;
+     (std::isinf(nufact) || std::isnan(nufact)) {
       printf("%g %g %g %g\n",boost_cmv(i3,i2,i1,0,0),boost_cmv(i3,i2,i1,0,1),
             boost_cmv(i3,i2,i1,0,2),boost_cmv(i3,i2,i1,0,3));
       printf("%g %g %g %g %g %g\n",k0init,k0f,kf[0],kf[1],kf[2],kf[3]);
@@ -2534,84 +2611,6 @@ Real  MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip) {
   }
 
  }
-
-//----------------------------------------------------------------------------------------
-//! \fn void MonteCarloBlock::FrequencyAngelShiftComoving(Photon *pphot, int ip,
-//             Real &shift, Real &k1, Real &k2, Real &k3) {
-//! \brief frequency shift factor angular aberation from coordinate to comoving
-
-void  MonteCarloBlock::FrequencyAngleShiftComoving(Photon *pphot, int ip, Real &shift,
-                                                   Real &k1, Real &k2, Real &k3) {
-
-    int i1 = pphot->i1p[ip];
-    int i2 = pphot->i2p[ip];
-    int i3 = pphot->i3p[ip];
-
-    Real k0 = pphot->k0p[ip];
-    Real ki[4], kf[4];
-    if (tetrads) {
-      ki[0] = pphot->k0p[ip];
-      ki[1] = pphot->k1p[ip];
-      ki[2] = pphot->k2p[ip];
-      ki[3] = pphot->k3p[ip];
-
-      Real x[4], invtet[4][4];
-      x[0] = pphot->x0p[ip];
-      x[1] = pphot->x1p[ip];
-      x[2] = pphot->x2p[ip];
-      x[3] = pphot->x3p[ip];
-      pcoord->InverseTetrad(x,invtet);
-      for (int j=0; j<4; j++) {
-        kf[j] = 0.;
-        for (int i=0; i<4; i++) {
-          kf[j] += invtet[j][i] * ki[i];
-        }
-      }
-    } else {
-      kf[0] = pphot->k0p[ip];
-      kf[1] = pphot->k1p[ip];
-      kf[2] = pphot->k2p[ip];
-      kf[3] = pphot->k3p[ip];
-    }
-
-    Real ke[4];
-    for (int j=0; j<4; j++) {
-      ke[j] = 0.;
-      for (int i=0; i<4; i++) {
-        ke[j] += boost_cmv(i3,i2,i1,j,i) * kf[i];
-      }
-    }
-    //shift = k1 = k2 = k3 =1.;
-    shift = ke[0]/k0;
-    k1 = ke[1]/ke[0];
-    k2 = ke[2]/ke[0];
-    k3 = ke[3]/ke[0];
-
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn Real MonteCarloBlock::FrequencyShiftCoordinate(Photon *pphot, int ip)
-//! \brief frequency shift factor from coordinate to comoving
-
-Real  MonteCarloBlock::FrequencyShiftCoordinate(Photon *pphot, int ip) {
-
-    int i1 = pphot->i1p[ip];
-    int i2 = pphot->i2p[ip];
-    int i3 = pphot->i3p[ip];
-
-    Real ki[4];
-    ki[0] = pphot->k0p[ip];
-    ki[1] = pphot->k1p[ip];
-    ki[2] = pphot->k2p[ip];
-    ki[3] = pphot->k3p[ip];
-    Real k0 = 0.;
-    for (int i=0; i<4; i++) {
-      k0 += boost_lab(i3,i2,i1,0,i) * ki[i];
-    }
-    return k0/ki[0];
-
- }
-
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::SetBoundaryValues(enum MCBoundaryFlag *input_bcs)

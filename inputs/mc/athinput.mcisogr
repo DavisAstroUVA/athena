@@ -1,0 +1,131 @@
+<comment>
+problem   =  isothermal blackbody shell in Kerr-Schild, gravitationally redshifted
+reference =
+configure = --prob=mc_isoth_gr -mc -g -hdf5 --coord=kerr-schild
+
+# Validates the relativistic luminosity scaling
+#
+#     L_inf = 4 pi R^2 sigma T^4 alpha^2 ,      alpha = sqrt(1 - 2M/R)
+#
+# one factor of alpha from the photon redshift and one from time dilation of the emission
+# rate.  Measured at R = 6 (this file):
+#
+#     L measured = 3.6855e+34    predicted = 3.7242e+34    ratio = 0.990
+#
+# and repeating the run at R = 6, 8, 12, 20 and fitting L/(4 pi R^2 sigma T^4) ~ alpha^m
+# gives m = 2.042 +/- 0.096, i.e. alpha^2 at 0.4 sigma and alpha^4 excluded at 20 sigma.
+# The fitted normalization is 1.0011 +/- 0.0054, which also confirms Kirchhoff: the
+# emergent flux only saturates at sigma T^4 if j_nu / alpha_nu = B_nu, and the free-free
+# emissivity (eta0, emission.cpp) and opacity (ffnrm, opacity.cpp) are coded as separate
+# constants that happen to agree to 5e-5.
+#
+# The design point that makes R well defined is CONSTANT density with a sharp outer edge.
+# An exponential atmosphere buries the tau_ff = 1 surface somewhere inside the shell, so
+# the effective emitting radius is not x1max and the comparison above becomes degenerate:
+# 36*(2/3)^2 = 16 and r^2-2r = 16 at r = 5.12, so "alpha^4 at R=6" and "alpha^2 at r=5.12"
+# are arithmetically indistinguishable.  With uniform density the photosphere sits at
+# x1max to within one mean free path, tau_ff^-1 = 1% of the shell thickness.
+#
+# For the exponential-atmosphere variant instead, set constdens = false and supply
+# taumin/taumax (electron-scattering optical depths at the top and base).
+
+<job>
+problem_id = isothgr   # problem ID: basename of output filenames
+
+# The spec output type is rejected for Kerr-Schild, at setup.  Its angle binning applies
+# the flat r and r sin(theta) scale factors and treats the result as a unit direction,
+# which needs a diagonal metric with g_rr = 1; in Kerr-Schild g_rr = 1 + 2M/r, g_tr does
+# not vanish and the normal observer has n^r < 0, so the recovered direction is off by up
+# to ~20 degrees at r = 6M.  Its energy axis has the matching problem: it bins k^t, not
+# the conserved -k_t.  (Before that check existed this combination matched no branch at
+# all and accumulated with phibin and mubin uninitialized, writing out of bounds -- that
+# segfaulted under MPI.)
+# Bin the photon list instead, with vis/python/montecarlo/make_spectrum.py.  The energy
+# column of the list already carries the conserved -k_t, the energy at infinity.
+<output1>
+file_type = phlist
+
+# not part of the validation run; drop this block if configuring without -hdf5
+<output2>
+file_type = hdf5
+variable = prim
+
+<coord>
+m = 1.0 #because our pgen assumes m is 1 in code units
+a = 0.0
+
+# Thin shell just inside R = 6.  The thickness only has to be many mean free paths; it is
+# kept small so that little volume is wasted emitting photons that are reabsorbed before
+# reaching the surface.  x1max IS the emitting radius, so alpha^2 = 1 - 2/6 = 2/3 exactly.
+#
+# Inward-going photons are lost to the hole (absorb).  With tau_ff ~ 100 across the shell
+# they are almost all reabsorbed first, so the inner boundary has no effect on the
+# emergent luminosity and the shell behaves as a semi-infinite atmosphere from outside.
+<mesh>
+nx1        = 128       # Number of zones in X1-direction
+x1min      = 5.95      # minimum value of X1
+x1max      = 6.0       # maximum value of X1
+ix1_mc_bc  = absorb  # inner-X1 boundary flag: inward photons are lost to the hole
+ox1_mc_bc  = escape  # outer-X1 boundary flag
+
+nx2        = 8          # Number of zones in X2-direction
+x2min      = 0.      # minimum value of X2
+x2max      = 3.14159265358979      	      # maximum value of X2
+ix2_mc_bc  = polar  # inner-X2 boundary flag
+ox2_mc_bc  = polar  # outer-X2 boundary flag
+
+nx3        = 8          # Number of zones in X3-direction
+x3min      = 0.0        # minimum value of X3
+x3max      = 6.28318530717959      	       # maximum value of X3
+ix3_mc_bc  = periodic  # inner-X3 boundary flag
+ox3_mc_bc  = periodic  # outer-X3 boundary flag
+
+<hydro>
+gamma = 1.666666666666667 # gamma = C_p/C_v
+
+# 4 x 2 x 2 = 16 blocks, so this runs on up to 16 ranks
+<meshblock>
+nx1 = 32
+nx2 = 4
+nx3 = 4
+
+# general_pusher and boosts are both required; the problem generator aborts without them.
+# general_pusher selects the four-vector storage convention (Kerr-Schild always uses
+# GeneralPusher regardless), and boosts is what makes the static-observer velocity set in
+# the problem generator actually reach the comoving tetrad.
+<montecarlo>
+nphot     = 4000000
+iseed     = 121500
+scattering = none
+emission   = freefree
+absorption = freefree
+polarized = none
+general_pusher = true
+boosts    = true
+stepsize  = 0.1
+varystep = true
+
+# dens is chosen so the free-free optical depth across the shell is ~100 at the Planck
+# peak (243 eV for T = 1e6 K), which is thick enough that the emergent flux is sigma T^4
+# and thin enough that ~4% of emitted packets escape.  Raising it shrinks the Wien-tail
+# systematic -- above x ~ 13 the shell is thin and leaks ~0.07% of sigma T^4 -- but costs
+# escape fraction, and so statistics, linearly.
+#
+# emin/emax are narrowed from the usual 0.01/30 because packets below x ~ 0.3 are far too
+# thick to escape and are pure waste.  The truncation discards a known 0.12% of the Planck
+# integral, which must be divided out when comparing against sigma T^4.
+#
+# ambient = 1 keeps the density uniform in the ghost zones outside [xlow,xhigh]; it must
+# never be zero, since GetTemperature() would form 0/0 and the NaN poisons the emission
+# array through eta0/sqrt(0).
+<problem>
+temp     = 1.0e6       # isothermal temperature
+constdens = true
+dens     = 1.5974e-3   # g/cm^3, gives tau_ff ~ 100 at the spectral peak
+ambient  = 1.0         # density outside the shell, relative to the base (must be > 0)
+tnorm   = true
+emin = 0.3             # with tnorm, emin/emax are E/kT
+emax = 20.
+l_cgs = 1476625.0380501247
+vel_cgs = 29979245800.0
+tgas_cgs = 1.08101416735e+13 #c^2/rideal

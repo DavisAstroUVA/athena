@@ -20,6 +20,7 @@
 #include "../hydro/hydro.hpp"
 #include "../mesh/mesh.hpp"
 #include "../monte_carlo/montecarlo.hpp"
+#include "../monte_carlo/tetrad.hpp"
 #include "../monte_carlo/photon.hpp"
 #include "../monte_carlo/photonpusher.hpp"
 #include "../globals.hpp"
@@ -167,11 +168,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 }
 
 //========================================================================================
-//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe)
+//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype)
 //! \brief Initializes Photon packets before integration
 //========================================================================================
 
-void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
+void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
   MCCoord *pco = pphot->pmy_mcb->pcoord;
 
@@ -198,7 +199,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
 
     // Set the initial photon direction assuming "isotropic" emission
     pphot->ep[ip] = 1.0;
-    pphot->trp[ip] = iphot;
+    pphot->type[ip] = iphot;
     int ith = iphot / 4;
     int iph = iphot % 4;
     Real cth = muk + 0.2 * static_cast<Real>(ith);
@@ -214,7 +215,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
     ktet[IMC3] = pphot->ep[ip]*sth*cos(phi);
 
     // Initialize Stokes vector as unpolarized
-    if (pphot->polarized) {
+    if (IsPolarized(pphot->polarized)) {
       pphot->sip[ip] = 1.0;
       pphot->sqp[ip] = 0.0;
       pphot->sup[ip] = 0.0;
@@ -276,7 +277,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
   // k_\alpha needed to define alpha, beta for geokerr
 
     Real alpha,beta;
-    if (!pphot->pmy_mcb->boyerlindquist_flag) {
+    if (pphot->pmy_mcb->coord_system != MCCOORD_BOYER_LINDQUIST) {
 
       Real delta = SQR(x[IMC1]) - 2 * x[IMC1] + SQR(a);
       Real kt0_bl = (k[IMC0] - 2.*x[IMC1]/delta*k[IMC1])*gcov0[IMC0][IMC0]

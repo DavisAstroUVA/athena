@@ -1,0 +1,317 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{Reference frames and radiation moments in the Monte Carlo module}
+\author{Athena++ Monte Carlo radiation transport}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note records the frame transformations used by the Monte Carlo radiation transport
+module and the estimator used to accumulate radiation moments. It is written to be read
+alongside the source. The material is split across three files by layer:
+\texttt{src/monte\_carlo/tetrad.cpp} holds the geometric primitives of
+Sec.~\ref{sec:construct}, acting on bare four-vectors and a metric;
+\texttt{src/monte\_carlo/photon\_frames.cpp} applies them to photons and to accumulated
+moments, as in Secs.~\ref{sec:project} and \ref{sec:transform}; and the estimator of
+Sec.~\ref{sec:accumulate} is assembled in the \texttt{UpdateMoments} routine of
+\texttt{src/monte\_carlo/montecarloblock.cpp}. The emphasis is on which quantity is
+expressed in which frame, since almost every defect found in this code has come from a
+frame convention being reimplemented in a second place and drifting from the first.
+\end{abstract}
+
+\section{Conventions}
+
+The metric signature is $(-,+,+,+)$. Greek indices $\mu,\nu$ run over coordinate
+components and Latin indices in parentheses, $(a),(b)$, over orthonormal tetrad
+components. A photon four-momentum is $k^\mu$; the transport is null, so
+\begin{equation}
+  g_{\mu\nu} k^\mu k^\nu = 0 ,
+  \label{eq:null}
+\end{equation}
+and this is satisfied to machine precision at the photon position throughout a run.
+
+Monte Carlo quantities are in cgs; the hydrodynamic grid is in code units, and
+\texttt{l\_cgs} converts a coordinate length to centimetres. Photon weights $w$ are
+physical photon numbers per sample, not probabilities.
+
+\subsection{Photon storage}
+
+The stored time component \texttt{k0p} always holds the photon energy in whatever frame
+the photon is currently expressed in; \texttt{ep} is an alias for the same storage. The
+spatial components are stored one of two ways. The general pusher keeps dimensional
+coordinate components $k^i$. The legacy pushers, and every frame after a transformation
+to the comoving frame, keep a unit propagation direction $n^i$. The accessors
+\texttt{Photon::GetFourVector} and \texttt{SetFourVector} hide the difference by
+reconstructing
+\begin{equation}
+  k^\mu = \left( E,\; k^i \right)
+  \qquad\text{or}\qquad
+  k^\mu = \left( E,\; E\, n^i \right) ,
+\end{equation}
+so that everything downstream sees a genuine contravariant four-vector.
+
+\subsection{Path length as handed to the moments}
+
+The pushers advance a photon and then report the segment length. The legacy pushers
+integrate a coordinate path length directly and pass \texttt{dl * l\_cgs}. The general
+pusher integrates the geodesic in an affine parameter $\lambda$, with
+$dx^\mu = k^\mu \, d\lambda$, and passes \texttt{step * ep * l\_cgs}. Since the time
+component of that relation is $dt = k^0 d\lambda = E\, d\lambda$, both pushers deliver the
+same thing: a path length measured in the \emph{coordinate} frame, in centimetres. Call it
+$\Delta \ell_{\rm coord}$. Every frame-dependent rescaling below starts from it.
+
+\section{The three frames}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+Frame & Orthonormal & Definition \\
+\midrule
+\texttt{MCFRAME\_LAB}      & yes & normal (Eulerian) observer in GR; Eulerian frame in flat spacetime \\
+\texttt{MCFRAME\_COMOVING} & yes & rest frame of the four-velocity held in \texttt{vel} \\
+\texttt{MCFRAME\_COORD}    & no  & the raw coordinate basis \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The coordinate basis is retained because the components of $T^{\mu\nu}$ in it are what
+couple to the GRMHD conservative variables and the radiation four-force. Those components
+are dimensionally inhomogeneous by construction, since $k^\theta$ and $k^\phi$ carry
+inverse length, and no attempt is made to normalise them.
+
+\section{Frame construction}
+\label{sec:construct}
+
+\subsection{General relativity}
+
+Both orthonormal frames are built by Gram--Schmidt orthonormalisation against a timelike
+four-velocity. Given $u^\mu$, the timelike leg is
+\begin{equation}
+  e_{(0)}^{\ \ \mu} = \frac{u^\mu}{\sqrt{\left| g_{\alpha\beta} u^\alpha u^\beta \right|}} ,
+\end{equation}
+and the three spacelike legs are obtained by orthonormalising the coordinate directions
+$\delta^\mu_{\ 1}, \delta^\mu_{\ 2}, \delta^\mu_{\ 3}$ against $e_{(0)}$ and against each
+other. The covariant legs $e^{(a)}_{\ \ \mu}$ then project a coordinate four-vector onto
+orthonormal components,
+\begin{equation}
+  p^{(a)} = e^{(a)}_{\ \ \mu} \, k^\mu .
+  \label{eq:project}
+\end{equation}
+
+The lab frame uses the normal observer,
+\begin{equation}
+  n^\mu = -\alpha \, g^{\mu t} , \qquad \alpha = \frac{1}{\sqrt{-g^{tt}}} ,
+\end{equation}
+which stays well defined inside the ergosphere. The comoving frame uses the four-velocity
+stored in \texttt{vel}: the fluid when boosts are enabled, and the normal observer
+otherwise, in which case the two frames coincide by construction.
+
+Both are evaluated once per zone, at the zone centre, in
+\texttt{ComputeTransformations()}, and stored as the arrays \texttt{boost\_lab} and
+\texttt{boost\_cmv}. A single matrix multiply then carries a coordinate four-vector to
+orthonormal components.
+
+It is worth stating what this replaced, because the failure was not obvious. Earlier
+versions built \texttt{boost\_cmv} as a flat Lorentz boost from the components of
+\texttt{vel}, treating $u^0$ as $\gamma$ and $u^i$ as $\gamma \beta^i$. In general
+relativity \texttt{vel} holds a coordinate-frame four-velocity, so those components are
+not orthonormal: for a static observer in Kerr--Schild the spatial part carries the shift
+vector and the components miss the Minkowski norm by $25\%$ at $r=6M$. The construction
+was not a Lorentz transformation at all, and a fluid at rest acquired a spurious Doppler
+factor.
+
+\subsection{Flat spacetime}
+
+In flat spacetime the same two arrays hold a closed-form Lorentz boost built from
+$u^\mu = \gamma(1, \beta^i)$,
+\begin{equation}
+  \Lambda^{(0)}_{\ \ (0)} = \gamma , \qquad
+  \Lambda^{(0)}_{\ \ (i)} = -\gamma \beta_i , \qquad
+  \Lambda^{(i)}_{\ \ (j)} = \delta_{ij} + \frac{\gamma^2 \beta_i \beta_j}{1+\gamma} ,
+\end{equation}
+which acts on the lab-frame components rather than on coordinate components. This is the
+special case of the tetrad construction above with $g_{\mu\nu} = \eta_{\mu\nu}$, and the
+two agree to machine precision where both apply.
+
+\section{Projecting a photon}
+\label{sec:project}
+
+For a photon in a given zone, \texttt{PhotonFrames} returns three numbers per frame: an
+energy $E$, a unit propagation direction $n^i$, and a path length $\Delta \ell$. The
+frames are filled lazily and cached, so several consumers asking for the same frame pay
+for one projection.
+
+\subsection{Energy and direction}
+
+In the orthonormal frames the projection is Eq.~\eqref{eq:project}, followed by
+\begin{equation}
+  E = p^{(0)} , \qquad
+  n^i = \frac{p^{(i)}}{\sqrt{\delta_{jk}\, p^{(j)} p^{(k)}}} .
+  \label{eq:normalise}
+\end{equation}
+
+The normalisation in Eq.~\eqref{eq:normalise} deserves comment, because the more obvious
+choice $n^i = p^{(i)}/p^{(0)}$ is wrong here. If the projection were exactly null then the
+two agree, since $\eta_{ab} p^{(a)} p^{(b)} = 0$ implies
+$\delta_{jk} p^{(j)} p^{(k)} = (p^{(0)})^2$. The photon four-vector does satisfy
+Eq.~\eqref{eq:null} at its own position, but the tetrad is orthonormal with respect to the
+metric at the \emph{zone centre}, so the projected vector is null only to the accuracy with
+which the metric is constant across a zone. Measured on the isothermal shell problem, the
+null violation at the photon is $1.2\times 10^{-16}$ while the same contraction against the
+zone-centre metric is $1.1\times 10^{-1}$, falling roughly first order under angular
+refinement. Dividing by $p^{(0)}$ would therefore leave $n^i$ off unit length by that
+amount, and the resulting moment tensor would not be traceless. Dividing by the spatial
+magnitude confines the error to the direction, where it belongs, and preserves
+Eq.~\eqref{eq:traceless} below exactly.
+
+In the coordinate frame no normalisation is possible or wanted, and the stored direction
+is simply $k^i/k^0$.
+
+\subsection{Path length}
+
+Because $dx^\mu = k^\mu d\lambda$, the interval measured in a frame whose timelike leg
+gives the photon energy $E$ is $\Delta \ell = E \, \Delta\lambda$. The affine step is
+frame independent, so the ratio between any two frames is the ratio of the energies. With
+$E_{\rm coord} = k^0$ the stored energy in the coordinate frame,
+\begin{equation}
+  \Delta \ell = \Delta \ell_{\rm coord} \, \frac{E}{E_{\rm coord}} .
+  \label{eq:dl}
+\end{equation}
+This factor is easy to omit, and omitting it is not visible in flat spacetime, where the
+lab tetrad is trivial and $E = E_{\rm coord}$. It is the reason the path length is carried
+in the same structure as the energy rather than passed alongside it: handing a consumer a
+frame-correct energy next to a coordinate path length simply relocates the trap.
+
+\section{Moment accumulation}
+\label{sec:accumulate}
+
+The radiation stress tensor is accumulated with the covariant estimator
+\begin{equation}
+  T^{(a)(b)} = \frac{1}{\Delta V_4} \sum_{\rm photons} w \; p^{(a)} p^{(b)} \, \Delta\lambda ,
+  \label{eq:estimator}
+\end{equation}
+where $\Delta V_4$ is the four-volume of the zone over the integration window and the sum
+runs over every segment of every photon track crossing it. Writing
+$p^{(a)} = E\,(1, n^i)$ and using $\Delta\lambda = \Delta \ell / E$, the per-segment
+contribution reduces to a single weight,
+\begin{equation}
+  \text{weight} = \frac{w \, E \, \Delta \ell}{c} ,
+\end{equation}
+multiplied into the products of the direction components. The three stored quantities are
+\begin{equation}
+  E_{\rm r} = T^{(0)(0)} , \qquad
+  F_{\rm r}^{i} = c \, T^{(0)(i)} , \qquad
+  P_{\rm r}^{ij} = T^{(i)(j)} ,
+\end{equation}
+so that in code they become
+\begin{equation}
+  E_{\rm r} \mathrel{+}= \text{weight} , \qquad
+  F_{\rm r}^{i} \mathrel{+}= \text{weight} \; n^i \, c , \qquad
+  P_{\rm r}^{ij} \mathrel{+}= \text{weight} \; n^i n^j .
+\end{equation}
+The mapping from $(a,b)$ to a storage slot, and which slots carry the extra factor of $c$,
+is held in a single table so that the accumulation and the frame transform of
+Sec.~\ref{sec:transform}, which are inverses of each other, cannot disagree.
+
+Because the spatial direction is a unit vector, the stress tensor of a null-particle gas is
+traceless in any orthonormal frame,
+\begin{equation}
+  \eta_{ab} T^{(a)(b)} = -E_{\rm r} + P_{\rm r}^{11} + P_{\rm r}^{22} + P_{\rm r}^{33} = 0 ,
+  \label{eq:traceless}
+\end{equation}
+which is checked directly by the frame-consistency tests and is a sharp diagnostic in
+curved spacetime.
+
+\section{Transforming accumulated moments}
+\label{sec:transform}
+
+The moments are a rank-two tensor and the transformation between two frames is the same
+matrix for every photon in a zone. The sum and the transformation therefore commute,
+\begin{equation}
+  \sum_{\rm photons} \Lambda p \, \Lambda p
+  \;=\; \Lambda \left( \sum_{\rm photons} p \, p \right) \Lambda^{\mathsf T} ,
+\end{equation}
+so the estimator of Eq.~\eqref{eq:estimator} can be evaluated once per zone at output
+rather than accumulated photon by photon,
+\begin{equation}
+  T^{(a')(b')}_{\rm com} = \Lambda^{(a')}_{\ \ (a)} \Lambda^{(b')}_{\ \ (b)} \, T^{(a)(b)}_{\rm lab} .
+\end{equation}
+This is exact rather than an approximation of the accumulation, and it removes a second
+per-photon projection.
+
+The transformation is obtained by composing the two tetrads,
+\begin{equation}
+  \Lambda^{(a')}_{\ \ (a)} = e^{(a')}_{{\rm fluid}\ \mu} \; e_{{\rm lab}\ (a)}^{\ \ \ \ \mu} ,
+\end{equation}
+and \emph{not} by rebuilding a pure boost from a three-velocity. Both frames are
+orthonormal at the same event, so the map is certainly a Lorentz transformation, and it
+satisfies $\Lambda^{\mathsf T} \eta \, \Lambda = \eta$ to machine precision. It is not in
+general a pure boost. The two spatial triads are grown by Gram--Schmidt from the same
+coordinate trial vectors but against different timelike legs, so they differ by a rotation
+as well as a boost whenever the relative velocity has all three spatial components; the
+antisymmetric part of the spatial block is $6.9\%$ for a fully three-dimensional velocity
+in Kerr--Schild, and vanishes identically when the velocity is aligned with a coordinate
+axis. Using a pure boost would leave $E_{\rm r}$ correct, since it is a scalar under that
+rotation, while silently rotating the axes of $F_{\rm r}^i$ and $P_{\rm r}^{ij}$.
+
+\section{Normalisation}
+
+Photon weights are set from a number emissivity, which is naturally a comoving-frame
+quantity, multiplied by the cell volume and the integration time,
+\begin{equation}
+  w = \eta_{\rm com} \; V \; \Delta t .
+\end{equation}
+Mixing a comoving emissivity with a coordinate volume and a coordinate time is correct
+rather than approximate, because the four-volume element is invariant,
+\begin{equation}
+  dV_{\rm proper} \, d\tau = \sqrt{-g} \, d^3x \, dt ,
+\end{equation}
+so the product is the invariant photon number. In flat spacetime the same identity holds
+for a different reason: the Lorentz contraction of the volume cancels the time dilation.
+The cell volume returned by the coordinate class integrates $\sqrt{-g}$ exactly, so this
+holds term by term in Kerr--Schild.
+
+\texttt{NormalizeMoments} divides by the same $\Delta t \, V$ that appears in the weight.
+Both factors therefore cancel, and the units of the integration time never reach the
+answer; the physical rate comes entirely from the emissivity being in cgs.
+
+\section{Approximations and their signatures}
+
+\begin{enumerate}
+\item \textbf{Zone-centred frames.} The tetrads and the boost are evaluated once per zone
+at the zone centre. For the boost this is exact given the existing assumption that the
+fluid velocity is uniform within a cell. For the tetrad it is a further approximation with
+no counterpart in that assumption: the orthonormal basis rotates across a cell in any
+curvilinear coordinate system, with or without gravity, by an angle of order the cell's
+angular size. In Cartesian coordinates it is exact.
+
+\item \textbf{Non-null projection.} A direct consequence of the above, quantified in
+Sec.~\ref{sec:project} and handled by the normalisation of Eq.~\eqref{eq:normalise}.
+
+\item \textbf{Accumulated versus derived comoving moments.} Both apply the rescaling of
+Eq.~\eqref{eq:dl}. They agree exactly in flat spacetime and are checked there. In curved spacetime they differ, because the accumulated
+path renormalises each photon direction in the comoving frame while a tensor transform
+cannot reproduce a per-photon renormalisation. On the isothermal shell problem the
+difference is $12$--$32\%$ in $E_{\rm r}$ and the pressure diagonal, and larger in the
+flux, which is a near-cancelling residual. The derived form is preferred: it is an exact
+transform of the lab moments and inherits their tracelessness, so it satisfies both
+Eq.~\eqref{eq:traceless} and the tensor relation, whereas the accumulated form satisfies
+only the first. The difference between them is a direct measure of the zone-centring error
+and is otherwise difficult to observe.
+
+\item \textbf{Polarization.} Not yet transformed between frames in the general
+relativistic path. The polarization tensor is parallel transported along geodesics and has
+a rank-two transformation available, but the comoving transforms do not currently apply
+it.
+\end{enumerate}
+
+\end{document}

@@ -19,6 +19,7 @@
 #include "../hydro/hydro.hpp"
 #include "../mesh/mesh.hpp"
 #include "../monte_carlo/montecarlo.hpp"
+#include "../monte_carlo/tetrad.hpp"
 #include "../monte_carlo/photon.hpp"
 #include "../monte_carlo/photonpusher.hpp"
 #include "../globals.hpp"
@@ -246,11 +247,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 }
 
 //========================================================================================
-//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe)
+//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype)
 //! \brief Initializes Photon packets before integration
 //========================================================================================
 
-void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
+void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
   MCCoord *pco = pphot->pmy_mcb->pcoord;
 
@@ -292,7 +293,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
     x[IMC3] = pphot->x3p[ip] = zcam;
 
     // Initialize Stokes vector as unpolarized
-    if (pphot->polarized) {
+    if (IsPolarized(pphot->polarized)) {
       pphot->sip[ip] = 1.0;
       pphot->sqp[ip] = 0.0;
       pphot->sup[ip] = 0.0;
@@ -410,7 +411,7 @@ void TransformPhotonAtDisk(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
 void TransformPhotonAtGridEdge(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
-  if (pphot->polarized) {
+  if (IsPolarized(pphot->polarized)) {
     // Construct the orthonormal tetrad at edge of simulation grid
     Real ucon[4];
     ucon[IMC0] = 1.;
@@ -871,7 +872,7 @@ void MidplaneCrossing(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppushe
     pphot->statp[ip] = DESTROYED;
     pphot->user[2][ip] = 0.;
     pphot->user[3][ip] = rh;
-    if (pphot->polarized) {
+    if (IsPolarized(pphot->polarized)) {
       pphot->sqp[ip] = 0.;
       pphot->sup[ip] = 0.;
     }
@@ -1001,7 +1002,7 @@ void MidplaneCrossing(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppushe
     // set plane crossing to zero
     pphot->user[4][ip] = 0.;
 
-    if (pphot->polarized) {
+    if (IsPolarized(pphot->polarized)) {
       // Initialize and transform Stokes vector
       Real stokes[4];
       int ipol = static_cast<int>(kcopy[IMC2]*20.);
@@ -1099,7 +1100,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
   g(I12) = f * l_1 * l_2;
   g(I13) = f * l_1 * l_3;
   g(I22) = f * l_2 * l_2 + 1.0;
-  g(I23) = f * l_3 * l_3;
+  g(I23) = f * l_2 * l_3;
   g(I33) = f * l_3 * l_3 + 1.0;
 
   // Calculate contravariant components
@@ -1111,7 +1112,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
   g_inv(I12) = -f * l1 * l2;
   g_inv(I13) = -f * l1 * l3;
   g_inv(I22) = -f * l2 * l2 + 1.0;
-  g_inv(I23) = -f * l3 * l3;
+  g_inv(I23) = -f * l2 * l3;
   g_inv(I33) = -f * l3 * l3 + 1.0;
 
   // Calculate covariant x-derivatives

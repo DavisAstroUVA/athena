@@ -3,6 +3,7 @@ Support for manipulating and plotting Monte Carlo outputs
 """
 
 # standard python modules
+from multiprocessing.resource_sharer import stop
 import struct
 import time
 import math
@@ -10,6 +11,128 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from io import BytesIO
+
+# Canonical geometry tags written by MonteCarlo::SetGeometryTag (montecarlo.cpp).
+#
+# Every consumer of a photon list needs three facts that the Athena++ COORDINATE_SYSTEM
+# name does not carry: whether the run was relativistic, what the spatial basis is, and
+# how the wavevector is stored.  The legacy pushers keep a unit orthonormal three-vector
+# alongside the energy; GeneralPusher keeps genuine contravariant components, so in
+# spherical coordinates k^theta and k^phi need factors of r and r sin(theta) before they
+# can be treated as orthonormal.
+#
+#   relativistic : energy column holds the conserved -k_t rather than ep
+#   geometry     : spatial basis, 'cartesian' | 'spherical' | 'cylindrical'
+#   kvec         : 'unit' (orthonormal three-vector) | 'coord' (contravariant components)
+#   metric       : 'minkowski' | 'kerr_schild' | 'boyer_lindquist'
+#   layout       : 'v2' for tags below; 'v1' for pre-tag files, whose energy column held
+#                  k^t in GR runs and whose spherical entries are ambiguous about kvec
+_COORD_TAGS = {
+    'cartesian':      dict(relativistic=False, geometry='cartesian',   kvec='unit',
+                           metric='minkowski',       layout='v2'),
+    'cartesian_gp':   dict(relativistic=False, geometry='cartesian',   kvec='coord',
+                           metric='minkowski',       layout='v2'),
+    'spherical_polar':dict(relativistic=False, geometry='spherical',   kvec='unit',
+                           metric='minkowski',       layout='v2'),
+    'spherical_gp':   dict(relativistic=False, geometry='spherical',   kvec='coord',
+                           metric='minkowski',       layout='v2'),
+    'cylindrical_gp': dict(relativistic=False, geometry='cylindrical', kvec='coord',
+                           metric='minkowski',       layout='v2'),
+    'minkowski_cart': dict(relativistic=True,  geometry='cartesian',   kvec='coord',
+                           metric='minkowski',       layout='v2'),
+    'ks_spherical':   dict(relativistic=True,  geometry='spherical',   kvec='coord',
+                           metric='kerr_schild',     layout='v2'),
+    'ks_cartesian':   dict(relativistic=True,  geometry='cartesian',   kvec='coord',
+                           metric='kerr_schild',     layout='v2'),
+    'bl_spherical':   dict(relativistic=True,  geometry='spherical',   kvec='coord',
+                           metric='boyer_lindquist', layout='v2'),
+    'snake_cart':     dict(relativistic=True,  geometry='cartesian',   kvec='coord',
+                           metric='snake',           layout='v2'),
+}
+
+# Tags written before SetGeometryTag existed.  These were just COORDINATE_SYSTEM, so the
+# pusher is unknowable: 'cartesian' and 'spherical_polar' may hold either convention.  We
+# assume the legacy pusher, which is what those runs almost always used, and the GR ones
+# carried k^t in the energy column rather than -k_t.
+_COORD_TAGS_LEGACY = {
+    'cartesian':       dict(relativistic=False, geometry='cartesian', kvec='unit',
+                            metric='minkowski',   layout='v1'),
+    'spherical_polar': dict(relativistic=False, geometry='spherical', kvec='unit',
+                            metric='minkowski',   layout='v1'),
+    'cylindrical':     dict(relativistic=False, geometry='cylindrical', kvec='coord',
+                            metric='minkowski',   layout='v1'),
+    'minkowski':       dict(relativistic=True,  geometry='cartesian', kvec='coord',
+                            metric='minkowski',   layout='v1'),
+    'kerr-schild':     dict(relativistic=True,  geometry='spherical', kvec='coord',
+                            metric='kerr_schild', layout='v1'),
+    'gr_user':         dict(relativistic=True,  geometry='cartesian', kvec='coord',
+                            metric='kerr_schild', layout='v1'),
+}
+
+
+def coord_properties(coord):
+    """
+    Return how to interpret a photon list, given its coord header tag.
+
+    This is the single place that decides relativistic vs non-relativistic, the spatial
+    basis, and the wavevector convention.  Callers should branch on the returned fields
+    rather than comparing the coord string directly.
+    """
+    if coord in _COORD_TAGS:
+        return dict(_COORD_TAGS[coord])
+    if coord in _COORD_TAGS_LEGACY:
+        return dict(_COORD_TAGS_LEGACY[coord])
+    raise ValueError(f"Unrecognized coord tag '{coord}' in photon list header")
+
+
+# Polarization modes, mirroring MCPolarization in src/monte_carlo/polarization.hpp.
+# 'none' stores no Stokes parameters, 'linear' stores Q and U, 'circular' adds V.
+POLARIZATION_MODES = ('none', 'linear', 'circular')
+
+# What the two file formats used to write before the modes existed.  Lists carried an
+# integer, spectra and images the strings true/false.  Both meant "linear" when set.
+_POLARIZATION_LEGACY = {'0': 'none', '1': 'linear', '2': 'circular',
+                        'false': 'none', 'true': 'linear',
+                        'False': 'none', 'True': 'linear'}
+
+
+def parse_polarization(value):
+    """
+    Normalize a polarized header field to one of POLARIZATION_MODES.
+
+    Accepts the current mode names and the legacy spellings both writers used.
+    """
+    if isinstance(value, bool):
+        return 'linear' if value else 'none'
+    if isinstance(value, (int, np.integer)):
+        value = str(int(value))
+    tag = str(value).strip()
+    if tag in POLARIZATION_MODES:
+        return tag
+    if tag in _POLARIZATION_LEGACY:
+        return _POLARIZATION_LEGACY[tag]
+    raise ValueError(f"Unrecognized polarized tag '{value}' in file header")
+
+
+def is_polarized(mode):
+    """True when any Stokes parameters are stored"""
+    return parse_polarization(mode) != 'none'
+
+
+def tracks_circular(mode):
+    """True when Stokes V is stored"""
+    return parse_polarization(mode) == 'circular'
+
+
+def num_stokes_stored(mode):
+    """Number of Stokes planes stored alongside the intensity: 0, 2 (Q,U) or 3 (Q,U,V)"""
+    mode = parse_polarization(mode)
+    if mode == 'circular':
+        return 3
+    if mode == 'linear':
+        return 2
+    return 0
+
 
 #SWD: Maybe photons be rewritten simply as dictionary
 #SWD: Add error control
@@ -19,13 +142,22 @@ class Photons:
     """
     #Initialization from dictionary
     def __init__(self, phlist):
-        self.npars = 10
         self.dt = phlist['dt']
-        self.polarized = phlist['polarized']
+        self.polarized = parse_polarization(phlist['polarized'])
+        self.npars = 10 + num_stokes_stored(self.polarized)
         self.ntot = phlist['ntot']
         self.coord = phlist['coord']
-        if self.polarized:
-            self.npars = self.npars + 2
+        # Free parameters of the metric. Empty for a flat metric
+        self.metric_params = phlist.get('metric_params', {})
+        # The frame the wavevector and the Stokes parameters are both measured in.
+        self.frame = phlist.get('frame')
+        # The spatial basis of k1,k2,k3: 'cartesian' when the writer has already rotated
+        # the local legs onto the global ones, None for older files that carry the local
+        # orthonormal legs and need the rotation applied here.
+        self.basis = phlist.get('basis')
+        # How to interpret this list: relativistic?, spatial basis, wavevector convention
+        self.props = coord_properties(self.coord)
+        self.relativistic = self.props['relativistic']
         ncol = phlist['npars']
         self.nphot = phlist['length']
         if ncol < self.npars:
@@ -44,17 +176,76 @@ class Photons:
         self.x1 = phlist['list'][:,2]
         self.x2 = phlist['list'][:,3]
         self.x3 = phlist['list'][:,4]
-        self.k0 = phlist['list'][:,9]
-        self.k1 = phlist['list'][:,6]
-        self.k2 = phlist['list'][:,7]
-        self.k3 = phlist['list'][:,8]
-        if self.polarized:
+        self.k0 = phlist['list'][:,9].copy()
+        self.k1 = phlist['list'][:,6].copy()
+        self.k2 = phlist['list'][:,7].copy()
+        self.k3 = phlist['list'][:,8].copy()
+        if is_polarized(self.polarized):
             self.q = phlist['list'][:,10]
             self.u = phlist['list'][:,11]
-            #self.v = phlist['list'][:,12]
+        if tracks_circular(self.polarized):
+            self.v = phlist['list'][:,12]
         if self.nuser > 0:
             for i in range(self.nuser):
                 self.user[:,i] = phlist['list'][:,i+self.npars]
+
+def ks_cartesian_metric(pos, M, a):
+    """Covariant Kerr-Schild Cartesian metric at pos = [t, x, y, z]."""
+    a2 = a**2
+    x1, x2, x3 = pos[1], pos[2], pos[3]
+    rr2 = x1**2 + x2**2 + x3**2
+    r2 = 0.5 * (rr2 - a2 + np.hypot(rr2 - a2, 2.0 * a * x3))
+    r = np.sqrt(r2)
+    f = 2.0 * M * r2 * r / (r2**2 + a2 * x3**2)
+
+    l = np.array([1.0,
+                  (r * x1 + a * x2) / (r2 + a2),
+                  (r * x2 - a * x1) / (r2 + a2),
+                  x3 / r])
+
+    return np.diag([-1., 1., 1., 1.]) + f * np.outer(l, l)
+
+
+def resolve_metric_params(phots, **kwargs):
+    """
+    Mass and spin of a Kerr metric, taken from the photon list unless the caller overrides.
+
+    The list header records the metric's free parameters, so these no longer have to be
+    supplied by hand and cannot silently disagree with the run that produced the file.  An
+    explicit keyword still wins, because lists written before the header carried the field
+    have no parameters at all, but a value that contradicts the file is reported rather
+    than quietly honoured.
+    """
+    params = getattr(phots, 'metric_params', None) or {}
+
+    def disagrees(given, key):
+        return key in params and not np.isclose(given, params[key], rtol=1e-12, atol=0.)
+
+    # Mass: geometric units with M = 1 are the convention throughout and the previous code
+    # hardcoded it, so fall back to that silently.
+    mass = kwargs.get('mass')
+    if mass is None:
+        mass = params.get('m', 1.0)
+    elif disagrees(mass, 'm'):
+        print(f"Warning: mass={mass!r} was supplied but the file says {params['m']!r};"
+              " using the supplied value.")
+
+    # Spin: changes the answer materially and used to be a required keyword, so refuse to
+    # guess when neither the file nor the caller supplies it rather than quietly assuming
+    # Schwarzschild.
+    spin = kwargs.get('spin')
+    if spin is None:
+        if 'a' not in params:
+            raise ValueError(
+                "spin is neither given nor recorded in the photon list header.  Lists"
+                " written before the header carried metric_params must be passed"
+                " spin=<a> explicitly.")
+        spin = params['a']
+    elif disagrees(spin, 'a'):
+        print(f"Warning: spin={spin!r} was supplied but the file says {params['a']!r};"
+              " using the supplied value.")
+
+    return mass, spin
 
 
 def read_list(filename, data=True, header=True):
@@ -104,13 +295,48 @@ def read_list(filename, data=True, header=True):
         phlist['length'] = parse_line_value("length=", int)
         phlist['npars'] = parse_line_value("npars=", int)
         phlist['ntot'] = parse_line_value("ntot=", int)
-        phlist['polarized'] = bool(parse_line_value("polarized=", int))
+        phlist['polarized'] = parse_polarization(parse_line_value("polarized=", str))
 
         # Handle coord separately as it's a string
         current_index = skip_string("coord=")
         end_of_line_index = raw_data_ascii.find('\n', current_index)
         phlist['coord'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
         current_index = end_of_line_index + 1
+
+        # Free parameters of the metric, written since the spin and mass are needed to
+        # lower an index or form -k_t.  Absent for metrics with no parameters
+        phlist['metric_params'] = {}
+        if raw_data_ascii.startswith("metric_params=", current_index):
+            current_index += len("metric_params=")
+            end_of_line_index = raw_data_ascii.find('\n', current_index)
+            for item in raw_data_ascii[current_index:end_of_line_index].split(','):
+                if '=' in item:
+                    key, _, val = item.partition('=')
+                    try:
+                        phlist['metric_params'][key.strip()] = float(val)
+                    except ValueError:
+                        phlist['metric_params'][key.strip()] = val.strip()
+            current_index = end_of_line_index + 1
+
+        # One tag for every direction-like quantity in the file: the wavevector, the
+        # angle bins and the plane the Stokes parameters are referenced to.  Optional,
+        # as it postdates the format.
+        phlist['frame'] = None
+        if raw_data_ascii.startswith("frame=", current_index):
+            current_index += len("frame=")
+            end_of_line_index = raw_data_ascii.find('\n', current_index)
+            phlist['frame'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+            current_index = end_of_line_index + 1
+
+        # The spatial basis of the wavevector columns.  'cartesian' means the writer has
+        # already rotated the local legs onto the global ones; absent means an older file
+        # that still carries the local orthonormal legs, which the reader rotates itself.
+        phlist['basis'] = None
+        if raw_data_ascii.startswith("basis=", current_index):
+            current_index += len("basis=")
+            end_of_line_index = raw_data_ascii.find('\n', current_index)
+            phlist['basis'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+            current_index = end_of_line_index + 1
 
     if data:
         npars = phlist['npars']
@@ -228,13 +454,46 @@ def read_list_generator(filename, chunk_size=None):
     phlist['length'] = parse_line_value("length=", int)
     phlist['npars'] = parse_line_value("npars=", int)
     phlist['ntot'] = parse_line_value("ntot=", int)
-    phlist['polarized'] = bool(parse_line_value("polarized=", int))
+    phlist['polarized'] = parse_polarization(parse_line_value("polarized=", str))
     
     skip_string("coord=")
     end_of_line_index = raw_data_ascii.find('\n', current_index)
     phlist['coord'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
     current_index = end_of_line_index + 1
-    
+
+    # Free parameters of the metric, written since the spin and mass are needed to lower
+    # an index or form -k_t.  Absent for metrics with no parameters
+    phlist['metric_params'] = {}
+    if raw_data_ascii.startswith("metric_params=", current_index):
+        current_index += len("metric_params=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        for item in raw_data_ascii[current_index:end_of_line_index].split(','):
+            if '=' in item:
+                key, _, val = item.partition('=')
+                try:
+                    phlist['metric_params'][key.strip()] = float(val)
+                except ValueError:
+                    phlist['metric_params'][key.strip()] = val.strip()
+        current_index = end_of_line_index + 1
+
+    # One tag for every direction-like quantity in the file: the wavevector, the
+    # angle bins and the plane the Stokes parameters are referenced to.  Optional,
+    # as it postdates the format.
+    phlist['frame'] = None
+    if raw_data_ascii.startswith("frame=", current_index):
+        current_index += len("frame=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        phlist['frame'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+        current_index = end_of_line_index + 1
+
+    # see read_list: absent means the local orthonormal legs, 'cartesian' the global ones
+    phlist['basis'] = None
+    if raw_data_ascii.startswith("basis=", current_index):
+        current_index += len("basis=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        phlist['basis'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+        current_index = end_of_line_index + 1
+
     # Yield header first
     yield {'header': phlist, 'chunk': None, 'remaining': None, 'length': None, 'done': False}
     
@@ -293,13 +552,46 @@ def write_list(filename, phlist, header=True, length=None):
             outfile.write(f"length={length if length is not None else phlist['length']:d}\n")
             outfile.write(f"npars={phlist['npars']:d}\n")
             outfile.write(f"ntot={phlist['ntot']:d}\n")
-            outfile.write(f"polarized={int(phlist['polarized']):d}\n")
+            outfile.write(f"polarized={parse_polarization(phlist['polarized'])}\n")
             outfile.write(f"coord={phlist['coord']}\n")
+            # Carry the metric through a read-modify-write, so a filtered list is still
+            # self-describing.  Written only when present, matching the C++ writer.
+            mpars = phlist.get('metric_params') or {}
+            if mpars:
+                outfile.write("metric_params="
+                              + ",".join(f"{k}={v!r}" for k, v in mpars.items()) + "\n")
+            if phlist.get('frame') is not None:
+                outfile.write("frame="+phlist['frame']+"\n")
+            # Carried through unchanged: the columns are copied verbatim, so the basis
+            # they were written in is the basis they are still in.
+            if phlist.get('basis') is not None:
+                outfile.write("basis="+phlist['basis']+"\n")
 
     # Append binary data using numpy's tobytes() - faster than struct.pack
     with open(filename, 'ab') as outfile:
         data_array = phlist['list'].astype('>f8')  # big-endian double precision
         outfile.write(data_array.tobytes())
+
+def print_list(infile, start = 0, stop = None):
+    """
+    Print contents of list
+    """
+
+    phlist = read_list(infile, data=True)
+
+    print(f"dt={phlist['dt']:.8e}\n")
+    print(f"length={phlist['length']:d}\n")
+    print(f"npars={phlist['npars']:d}\n")
+    print(f"ntot={phlist['ntot']:d}\n")
+    print(f"polarized={parse_polarization(phlist['polarized'])}\n")
+    print(f"coord={phlist['coord']}\n")
+    print(f"metric_params={phlist.get('metric_params') or {}}\n")
+    print(f"frame={phlist.get('frame')}\n")
+
+    if stop is None:
+        stop = phlist['length']
+    for i in range(start, stop):
+        print(f"Photon {i}: {phlist['list'][i]}")
 
 def get_luminosity_list(phlist):
     """
@@ -329,9 +621,19 @@ def write_spectrum(filename,spectrum):
     outfile.write("nphi={:d}\n".format(nphi))
     outfile.write("ntot={:d}\n".format(spectrum['ntot']))
     outfile.write("nintens={:d}\n".format(spectrum['nintens']))
-    outfile.write("units="+spectrum['xaxis']+"\n")
-    outfile.write("polarized="+spectrum['polarized']+"\n")
+    outfile.write("units="+spectrum.get('units', spectrum.get('xaxis'))+"\n")
+    outfile.write("polarized="+parse_polarization(spectrum['polarized'])+"\n")
     outfile.write("yerror="+spectrum['yerror']+"\n")
+    # Geometry and metric last, matching the order Spectrum::WriteSpectrum uses, so a
+    # spectrum written from python and one written by the code parse identically.
+    if spectrum.get('coord') is not None:
+        outfile.write("coord="+spectrum['coord']+"\n")
+    mpars = spectrum.get('metric_params') or {}
+    if mpars:
+        outfile.write("metric_params="
+                      + ",".join(f"{k}={v!r}" for k, v in mpars.items()) + "\n")
+    if spectrum.get('frame') is not None:
+        outfile.write("frame="+spectrum['frame']+"\n")
     outfile.close()
 
     # Write binfaces
@@ -427,7 +729,8 @@ def read_spectrum(filename):
     end_of_line_index = current_index + 1
     while raw_data_ascii[end_of_line_index] != '\n':
         end_of_line_index += 1
-    spectrum['polarized'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+    spectrum['polarized'] = parse_polarization(
+        raw_data_ascii[current_index:end_of_line_index].split(' ')[0])
     current_index = end_of_line_index + 1
     current_index = skip_string("yerror=")
     end_of_line_index = current_index + 1
@@ -435,6 +738,37 @@ def read_spectrum(filename):
         end_of_line_index += 1
     spectrum['yerror'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
     current_index = end_of_line_index + 1
+    # Geometry and metric are optional: they were added after the format was in use, and
+    # metric_params is absent for a metric with no free parameters.  Probed rather than
+    # required so one reader handles files written before and after.
+    spectrum['coord'] = None
+    spectrum['metric_params'] = {}
+    if raw_data_ascii.startswith("coord=", current_index):
+        current_index += len("coord=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        spectrum['coord'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+        current_index = end_of_line_index + 1
+    if raw_data_ascii.startswith("metric_params=", current_index):
+        current_index += len("metric_params=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        for item in raw_data_ascii[current_index:end_of_line_index].split(','):
+            if '=' in item:
+                key, _, val = item.partition('=')
+                try:
+                    spectrum['metric_params'][key.strip()] = float(val)
+                except ValueError:
+                    spectrum['metric_params'][key.strip()] = val.strip()
+        current_index = end_of_line_index + 1
+
+    # One tag for every direction-like quantity in the file: the wavevector, the
+    # angle bins and the plane the Stokes parameters are referenced to.  Optional,
+    # as it postdates the format.
+    spectrum['frame'] = None
+    if raw_data_ascii.startswith("frame=", current_index):
+        current_index += len("frame=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        spectrum['frame'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+        current_index = end_of_line_index + 1
 
     # Read in faces
     nx = spectrum['nx']
@@ -487,6 +821,16 @@ def header_match(dict1, dict2, dict_type):
             match = False
         elif dict1['polarized'] != dict2['polarized']:
             match = False
+        # Geometry and metric were not compared before, so lists from different
+        # coordinate systems -- or the same one with a different spin -- could be merged
+        # silently.  Absent metric_params compares equal to absent, so files written
+        # before the header carried it still combine with each other.
+        elif dict1.get('coord') != dict2.get('coord'):
+            match = False
+        elif (dict1.get('metric_params') or {}) != (dict2.get('metric_params') or {}):
+            match = False
+        elif dict1.get('frame') != dict2.get('frame'):
+            match = False
     elif dict_type == 'spec':
         if dict1['nx'] != dict2['nx']:
             match = False
@@ -496,11 +840,20 @@ def header_match(dict1, dict2, dict_type):
             match = False
         elif dict1['nintens'] != dict2['nintens']:
             match = False
-        elif dict1['xaxis'] != dict2['xaxis']:
+        elif dict1['units'] != dict2['units']:
             match = False
         elif dict1['polarized'] != dict2['polarized']:
             match = False
         elif dict1['yerror'] != dict2['yerror']:
+            match = False
+        # Absent compares equal to absent, so spectra written before the header carried
+        # geometry still combine with each other, while one that records a metric will not
+        # silently merge with one that records a different metric.
+        elif dict1.get('coord') != dict2.get('coord'):
+            match = False
+        elif (dict1.get('metric_params') or {}) != (dict2.get('metric_params') or {}):
+            match = False
+        elif dict1.get('frame') != dict2.get('frame'):
             match = False
     else:
         print("file type: "+dict_type+" not supported. Returning false.")
@@ -664,11 +1017,13 @@ def compute_pol_angle_error(intensity,errors=None):
 
 def compute_q_error(intensity,errors=None):
     """
-    Compute q=-Q/I and error if requested
+    Compute q=Q/I and error if requested
+
+    Q > 0 for polarization along the meridian direction l, as stored by the code.
     """
     i = intensity[0,:]
     q = intensity[1,:]
-    frac = -q/i
+    frac = q/i
     if errors is not None:
         ei = errors[0,:]
         eq = errors[1,:]
@@ -687,6 +1042,20 @@ def compute_u_error(intensity,errors=None):
         ei = errors[0,:]
         eu = errors[1,:]
         err = np.sqrt(eu**2 + (u**2)*(ei/i)**2)/i
+        return frac, err
+    return frac, None
+
+def compute_v_error(intensity,errors=None):
+    """
+    Compute v=V/I and error if requested.  Only present for circular spectra.
+    """
+    i = intensity[0,:]
+    v = intensity[3,:]
+    frac = v/i
+    if errors is not None:
+        ei = errors[0,:]
+        ev = errors[3,:]
+        err = np.sqrt(ev**2 + (v**2)*(ei/i)**2)/i
         return frac, err
     return frac, None
 
@@ -709,16 +1078,33 @@ def polarization_requested(yunit):
     """
     Determine whether code requires polarization based on requested y unit
     """
-    if yunit == 'polfrac':
+    return yunit in ('polfrac', 'polangle', 'q', 'u', 'v')
+
+
+def circular_requested(yunit):
+    """
+    Determine whether the requested y unit needs Stokes V, i.e. a circular file
+    """
+    return yunit == 'v'
+
+
+def check_polarization(header, yunit, kind='spectrum'):
+    """
+    Check that a spectrum or image carries the Stokes parameters yunit needs.
+
+    Returns True when the request can be satisfied, and prints why when it cannot.
+    """
+    if not polarization_requested(yunit):
         return True
-    elif yunit == 'polangle':
-        return True
-    elif yunit == 'q':
-        return True
-    elif yunit == 'u':
-        return True
-    else:
+    mode = parse_polarization(header['polarized'])
+    if not is_polarized(mode):
+        print("Error: polarization output "+yunit+" requested for unpolarized "+kind+".")
         return False
+    if circular_requested(yunit) and not tracks_circular(mode):
+        print("Error: output "+yunit+" requested but "+kind+" mode is '"+mode
+              +"', which carries no Stokes V.")
+        return False
+    return True
 
 def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
                    plterr=True, nu=None, rebinx=None):
@@ -750,8 +1136,7 @@ def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
             plterr = False
 
     # Check whether spectrum has required polarization data
-    if (polarization_requested(yunit) and (spectrum['polarized'] != 'true')):
-        print("Error: polarization output "+yunit+" requested for unpolarized spectrum.")
+    if not check_polarization(spectrum, yunit):
         return None
 
     # Compute intensity spectrum
@@ -813,6 +1198,9 @@ def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
     elif yunit == 'u':
         ylabel = r"$U_\nu/I_\nu$"
         y, yerr = compute_u_error(intensity,errors)
+    elif yunit == 'v':
+        ylabel = r"$V_\nu/I_\nu$"
+        y, yerr = compute_v_error(intensity,errors)
     else:
         print("Error: yunit ("+yunit+") not specified correctly")
         return None
@@ -823,9 +1211,11 @@ def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
         n_new = len(x) // nbin
         x = x[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
         y = y[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
-        y2 = yerr**2
-        y2 = y2[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
-        yerr = np.sqrt(y2)
+        # yerr is None whenever plterr is off, which rebinning has no reason to require
+        if yerr is not None:
+            y2 = yerr**2
+            y2 = y2[:n_new * nbin].reshape(n_new, nbin).mean(axis=1)
+            yerr = np.sqrt(y2)
 
     # Return x and y variables, their labels, and possible error on y
     return x,y,yerr,xlabel,ylabel
@@ -852,8 +1242,7 @@ def plot_theta(spectrum,ix,iphi='ave',xunit='mu',yunit='lnu',
             plterr = False
 
     # Check whether spectrum has required polarization data
-    if (polarization_requested(yunit) and (spectrum['polarized'] != 'true')):
-        print("Error: polarization output "+yunit+" requested for unpolarized spectrum.")
+    if not check_polarization(spectrum, yunit):
         return None
 
     intensity = spectrum['intensity']
@@ -914,6 +1303,9 @@ def plot_theta(spectrum,ix,iphi='ave',xunit='mu',yunit='lnu',
     elif yunit == 'u':
         ylabel = r"$U_\nu/I_\nu$"
         y, yerr = compute_u_error(intensity,errors)
+    elif yunit == 'v':
+        ylabel = r"$V_\nu/I_\nu$"
+        y, yerr = compute_v_error(intensity,errors)
     elif yunit == 'fluxfrac':
         ylabel = r"$I_\nu/F_\nu$"
         y, yerr = compute_flux_frac_error(intensity,xfaces,errors)
@@ -954,8 +1346,7 @@ def plot_phi(spectrum, ix, imu='sum', xunit='phi', yunit='lnu',
             plterr = False
 
     # Check whether spectrum has required polarization data
-    if (polarization_requested(yunit) and (spectrum['polarized'] != 'true')):
-        print("Error: polarization output "+yunit+" requested for unpolarized spectrum.")
+    if not check_polarization(spectrum, yunit):
         return None
 
     intensity = spectrum['intensity']
@@ -1015,6 +1406,9 @@ def plot_phi(spectrum, ix, imu='sum', xunit='phi', yunit='lnu',
     elif yunit == 'u':
         ylabel = r"$U_\nu/I_\nu$"
         y, yerr = compute_u_error(intensity,errors)
+    elif yunit == 'v':
+        ylabel = r"$V_\nu/I_\nu$"
+        y, yerr = compute_v_error(intensity,errors)
     elif yunit == 'fluxfrac':
         ylabel = r"$I_\nu/F_\nu$"
         y, yerr = compute_flux_frac_error(intensity,xfaces,errors)
@@ -1130,7 +1524,7 @@ def get_bins(xphots, xfaces, nx, uniform=True, log=True):
 
             # get integer bin number
             log_xphots = np.log10(xphots)
-            xbins = ((log_xphots - xlfaces[0]) / xwidth * nx).astype(int)
+            xbins = np.floor((log_xphots - xlfaces[0]) / xwidth * nx).astype(int)
 
             # catch out-of-bounds values
             xbins = np.where((xbins < 0) | (xbins >= nx), -1, xbins)
@@ -1138,7 +1532,7 @@ def get_bins(xphots, xfaces, nx, uniform=True, log=True):
             xwidth = xfaces[nx] - xfaces[0]
 
             # get integer bin number
-            xbins = ((xphots - xfaces[0]) / xwidth * nx).astype(int)
+            xbins = np.floor((xphots - xfaces[0]) / xwidth * nx).astype(int)
 
             # catch out-of-bounds values
             xbins = np.where((xbins < 0) | (xbins >= nx), -1, xbins)
@@ -1162,6 +1556,94 @@ def get_bins_binary_search(xphots, xfaces, nx):
 
     return xbins
 
+def effective_kvec(photons):
+    """
+    Whether the stored wavevector is an orthonormal three-vector or contravariant
+    coordinate components.
+
+    _COORD_TAGS records what a coord tag meant when the tag was introduced.  A file that
+    carries a frame field says it directly and wins: both 'normal' and 'lab' store
+    components in an orthonormal frame, so the scale factors and metric projections the
+    coordinate form needs must not be applied on top.
+    """
+    if getattr(photons, 'frame', None) in ('normal', 'lab'):
+        return 'unit'
+    return photons.props['kvec']
+
+
+def unit_direction_cartesian(photons):
+    """
+    Cartesian components of the photon propagation direction, as a unit vector.
+
+    Handles every wavevector convention the format has carried.  A file whose header
+    declares basis=cartesian already holds the global cartesian components and needs
+    only normalizing.  Otherwise the columns are on the local orthonormal legs: under the
+    legacy pushers directly, under GeneralPusher as contravariant components whose
+    spherical k^theta and k^phi carry factors of 1/r and 1/(r sin(theta)), and whose
+    cylindrical k^phi carries 1/R, all removed before rotating.  The result is normalized
+    either way: for a null vector the orthonormal spatial components have norm equal to
+    the time component, not unity.
+    """
+    props = photons.props
+    k1, k2, k3 = photons.k1, photons.k2, photons.k3
+
+    if getattr(photons, 'basis', None) == 'cartesian':
+        norm = np.sqrt(k1*k1 + k2*k2 + k3*k3)
+        return k1/norm, k2/norm, k3/norm
+
+    if props['geometry'] == 'spherical':
+        cth = np.cos(photons.x2)
+        sth = np.sin(photons.x2)
+        cph = np.cos(photons.x3)
+        sph = np.sin(photons.x3)
+        if effective_kvec(photons) == 'coord':
+            k2 = k2 * photons.x1
+            k3 = k3 * photons.x1 * sth
+        kx = k1*sth*cph + k2*cth*cph - k3*sph
+        ky = k1*sth*sph + k2*cth*sph + k3*cph
+        kz = k1*cth - k2*sth
+    elif props['geometry'] == 'cylindrical':
+        cph = np.cos(photons.x2)
+        sph = np.sin(photons.x2)
+        if effective_kvec(photons) == 'coord':
+            k2 = k2 * photons.x1
+        kx = k1*cph - k2*sph
+        ky = k1*sph + k2*cph
+        kz = k3
+    else:
+        kx, ky, kz = k1, k2, k3
+
+    norm = np.sqrt(kx*kx + ky*ky + kz*kz)
+    return kx/norm, ky/norm, kz/norm
+
+
+def unit_direction_radial(photons):
+    """
+    Component of the photon propagation direction along the local radial unit vector.
+    """
+    props = photons.props
+
+    # Go through the cartesian direction, which already resolves every basis the file
+    # can carry, and dot it with the radial unit vector built from the position.  The
+    # spherical shortcut of reading k1 directly is gone: it was only right while the
+    # columns were on the local legs.
+    kx, ky, kz = unit_direction_cartesian(photons)
+    if props['geometry'] == 'spherical':
+        sth = np.sin(photons.x2)
+        x = sth*np.cos(photons.x3)
+        y = sth*np.sin(photons.x3)
+        z = np.cos(photons.x2)
+        return kx*x + ky*y + kz*z
+    if props['geometry'] == 'cylindrical':
+        x = photons.x1*np.cos(photons.x2)
+        y = photons.x1*np.sin(photons.x2)
+        z = photons.x3
+    else:
+        x, y, z = photons.x1, photons.x2, photons.x3
+    rnorm = np.sqrt(x*x + y*y + z*z)
+    return (kx*x + ky*y + kz*z)/rnorm
+
+
 def get_angle_bins_cartesian(photons,nmu, mufaces, nphi, phifaces):
     """
     Bin angles in theta, phi defined relative to x,y,z axes
@@ -1179,25 +1661,7 @@ def get_angle_bins_cartesian(photons,nmu, mufaces, nphi, phifaces):
     if (skipmu and skipphi):
         return np.zeros(photons.nphot,dtype=int),np.zeros(photons.nphot,dtype=int)
 
-    if photons.coord == 'spherical_polar':
-        kr = photons.k1
-        kth = photons.k2
-        kph = photons.k3
-        cth = np.cos(photons.x2)
-        sth = np.sin(photons.x2)
-        cph = np.cos(photons.x3)
-        sph = np.sin(photons.x3)
-        if not skipphi:
-            kx = kr*sth*cph + kth*cth*cph - kph*sph
-            ky = kr*sth*sph + kth*cth*sph - kph*cph
-        if not skipmu:
-            kz = kr*cth - kth*sth
-    else:
-        if not skipphi:
-            kx = photons.k1
-            ky = photons.k2
-        if not skipmu:
-            kz = photons.k3
+    kx, ky, kz = unit_direction_cartesian(photons)
 
     if skipmu:
         # return 0
@@ -1230,21 +1694,12 @@ def get_angle_bins_spherical(photons,nmu,mufaces):
     if skipmu:
         return np.zeros(photons.nphot,dtype=int),np.zeros(photons.nphot,dtype=int)
 
-    if photons.coord == 'spherical_polar':
-        kr = photons.k1
-    else:
-        cth = np.cos(photons.x2)
-        sth = np.sin(photons.x2)
-        cph = np.cos(photons.x3)
-        sph = np.sin(photons.x3)
-        kr = sth*(cph*photons.k1+sph*photons.k2)+cth*photons.k3
-
     # Bin based on k_r
-    mu = kr
-    mubins = get_bins(mu,mufaces,nmu,log=False)
+    mu = unit_direction_radial(photons)
+    mubins = get_bins(mu, mufaces ,nmu, log=False)
 
     # return 0 for phi
-    phibins = np.zeros(photons.nphot,dtype=int)
+    phibins = np.zeros(photons.nphot, dtype=int)
 
     return mubins, phibins
 
@@ -1260,16 +1715,16 @@ def get_angle_bins_hybrid(photons, nmu, mufaces, nphi, phifaces):
         print("Error: this function requires nphi > 1")
         return np.zeros(photons.nphot,dtype=int),np.zeros(photons.nphot,dtype=int)
 
-    if photons.coord != 'spherical_polar':
-        print("Error: this function only works with spherical polar")
+    if photons.props['geometry'] != 'spherical':
+        print("Error: this function only works with spherical geometry")
         return np.zeros(photons.nphot,dtype=int),np.zeros(photons.nphot,dtype=int)
 
-    kr = photons.k1
-    kth = photons.k2
-    kph = photons.k3
-    cth = np.cos(photons.x2)
-    sth = np.sin(photons.x2)
-    kz = kr*cth - kth*sth
+    # The z and phi-hat components of the direction, from the cartesian form so that the
+    # basis the file was written in is resolved in one place.
+    kx, ky, kz = unit_direction_cartesian(photons)
+    cph = np.cos(photons.x3)
+    sph = np.sin(photons.x3)
+    kph = -kx*sph + ky*cph
 
     # Bin based on k . z
     mu = abs(kz)
@@ -1305,7 +1760,16 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
     everg = 1.6021772e-12
     c = 2.99792e10
     preset = False
-    spectrum['xaxis'] = xaxis
+    # 'units' is the canonical key: it is what the file header calls this field and what
+    # every consumer reads.  make_spectrum used to set 'xaxis' instead, so a freshly made
+    # spectrum could not be passed to convert_xaxis, get_luminosity or the plotting
+    # scripts, while one read back from file could not be written out again.
+    spectrum['units'] = xaxis
+    # Carry the provenance across from the photon list, so a derived spectrum still says
+    # which metric produced it and header_match can refuse to combine incompatible ones.
+    spectrum['coord'] = getattr(phots, 'coord', None)
+    spectrum['metric_params'] = getattr(phots, 'metric_params', None) or {}
+    spectrum['frame'] = getattr(phots, 'frame', None)
     if xaxis == 'kev':
         xphots = phots.energy/everg/1000.
         preset = True
@@ -1350,13 +1814,9 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
         print("Error: anglebin == "+anglebin+". Must be cartesian, spherical, or hybrid.")
 
     # Create intensity grid and loop over photons to add contribution
-    nintens = 1
-    if phots.polarized:
-        spectrum['polarized'] = 'true'
-        nintens += 2
-    else:
-        spectrum['polarized'] = 'false'
-
+    spectrum['polarized'] = parse_polarization(phots.polarized)
+    npol = num_stokes_stored(spectrum['polarized'])
+    nintens = 1 + npol
     spectrum['nintens'] = nintens
     #count = np.zeros((nphi,nmu,nx))
     intensity = np.zeros((nintens,nphi,nmu,nx))
@@ -1381,19 +1841,19 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
     #np.add.at(count, (valid_phi, valid_mu, valid_x), 1.0)
     np.add.at(intensity, (0, valid_phi, valid_mu, valid_x), valid_weights)
 
-    if phots.polarized:
-        np.add.at(intensity, (1, valid_phi, valid_mu, valid_x),
-                  valid_weights * phots.q[valid_phots])
-        np.add.at(intensity, (2, valid_phi, valid_mu, valid_x),
-                  valid_weights * phots.u[valid_phots])
+    # Stokes planes follow the intensity in the order Q, U, V
+    stokes = [phots.q, phots.u] if npol >= 2 else []
+    if npol == 3:
+        stokes.append(phots.v)
+    for m, spol in enumerate(stokes):
+        np.add.at(intensity, (m+1, valid_phi, valid_mu, valid_x),
+                  valid_weights * spol[valid_phots])
 
     if yerror:
         np.add.at(errors, (0, valid_phi, valid_mu, valid_x), valid_weights**2)
-        if phots.polarized:
-            np.add.at(errors, (1, valid_phi, valid_mu, valid_x),
-                      (valid_weights * phots.q[valid_phots])**2)
-            np.add.at(errors, (2, valid_phi, valid_mu, valid_x),
-                      (valid_weights * phots.u[valid_phots])**2)
+        for m, spol in enumerate(stokes):
+            np.add.at(errors, (m+1, valid_phi, valid_mu, valid_x),
+                      (valid_weights * spol[valid_phots])**2)
 
     # Compute frequency width and mean energy (in erg) of bins
     h = 6.62607015e-27
@@ -1468,29 +1928,24 @@ def get_image_bins(phots, rcam, ifaces, xfaces, yfaces):
     nx  = xfaces.size - 1
     ny = yfaces.size - 1
 
-    #thc = 0.5*(xfaces[1:]+xfaces[:-1])
-    if phots.coord == 'spherical_polar':
+    # Cartesian position and direction, whatever chart and wavevector basis the file
+    # carries.  Previously keyed on the raw coord string, which knew only the two legacy
+    # tags and read the spherical wavevector as if it were always on the local legs.
+    geometry = phots.props['geometry']
+    if geometry == 'spherical':
         sth = np.sin(phots.x2)
-        cth = np.cos(phots.x2)
-        sph = np.sin(phots.x3)
-        cph = np.cos(phots.x3)
-        xp = phots.x1*sth*cph
-        yp = phots.x1*sth*sph
-        zp = phots.x1*cth
-        rp = phots.x1
-        kdx = rp*phots.k1
-        kx = phots.k1*sth*cph + phots.k2*cth*cph - phots.k3*sph
-        ky = phots.k1*sth*sph + phots.k2*cth*sph + phots.k3*cph
-        kz = phots.k1*cth - phots.k2*sth
-    elif phots.coord == 'cartesian':
-        xp = phots.x1
-        yp = phots.x2
+        xp = phots.x1*sth*np.cos(phots.x3)
+        yp = phots.x1*sth*np.sin(phots.x3)
+        zp = phots.x1*np.cos(phots.x2)
+    elif geometry == 'cylindrical':
+        xp = phots.x1*np.cos(phots.x2)
+        yp = phots.x1*np.sin(phots.x2)
         zp = phots.x3
-        rp = np.sqrt(xp**2+yp**2+zp**2)
-        kx = phots.k1
-        ky = phots.k2
-        kz = phots.k3
-        kdx = xp*kx+yp*ky+zp*kz
+    else:
+        xp, yp, zp = phots.x1, phots.x2, phots.x3
+    rp = np.sqrt(xp**2 + yp**2 + zp**2)
+    kx, ky, kz = unit_direction_cartesian(phots)
+    kdx = xp*kx + yp*ky + zp*kz
 
 
     dl = np.sqrt(rcam**2-rp**2+kdx**2)-kdx
@@ -1564,12 +2019,13 @@ def make_image_mc(phots, rcam, ninc, imin, imax, nen, emin, emax,
     #ebins = np.zeros(len(ibins),dtype=int)
 
     # Create intensity grid and loop over photons to add contribution
-    nintens = 1
-    if phots.polarized:
-        image['polarized'] = True
-        nintens += 2
-    else:
-        image['polarized'] = False
+    image['polarized'] = parse_polarization(phots.polarized)
+    # Provenance from the photon list, as make_spectrum does.
+    image['coord'] = getattr(phots, 'coord', None)
+    image['metric_params'] = getattr(phots, 'metric_params', None) or {}
+    image['frame'] = getattr(phots, 'frame', None)
+    npol = num_stokes_stored(image['polarized'])
+    nintens = 1 + npol
     image['nintens'] = nintens
 
     if mask is not None:
@@ -1589,21 +2045,13 @@ def make_image_mc(phots, rcam, ninc, imin, imax, nen, emin, emax,
 
     np.add.at(intensity, (0, valid_i, valid_e, valid_y, valid_x), valid_weights)
 
-    if phots.polarized:
-        np.add.at(intensity, (1, valid_i, valid_e, valid_y, valid_x),
-                  valid_weights * phots.q[valid_phots])
-        np.add.at(intensity, (2, valid_i, valid_e, valid_y, valid_x),
-                  valid_weights * phots.u[valid_phots])
-    """
-    for i in range(phots.nphot):
-        if ((ibins[i] >= 0) and (ebins[i] >= 0) and (xbins[i] >= 0) and (ybins[i] >= 0)):
-            # Weight includes energy -- slightly different from spectra
-            wght = phots.weight[i]*phots.energy[i]
-            intensity[0,ibins[i],ebins[i],ybins[i],xbins[i]] += wght
-            if phots.polarized:
-                intensity[1,ibins[i],ebins[i],ybins[i],xbins[i]] += wght*phots.q[i]
-                intensity[2,ibins[i],ebins[i],ybins[i],xbins[i]] += wght*phots.u[i]
-    """
+    # Stokes planes follow the intensity in the order Q, U, V
+    stokes = [phots.q, phots.u] if npol >= 2 else []
+    if npol == 3:
+        stokes.append(phots.v)
+    for m, spol in enumerate(stokes):
+        np.add.at(intensity, (m+1, valid_i, valid_e, valid_y, valid_x),
+                  valid_weights * spol[valid_phots])
     # Normalize intensities
     mumid = abs(0.5*(ifaces[1:]+ifaces[:-1]))
     dmu = ifaces[1:]-ifaces[:-1]
@@ -1677,10 +2125,10 @@ def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, st
     cmap = plt.get_cmap(kwargs['colormap'])
     plt.figure()
 
-    if polarization_requested(itype):
-        if not image['polarized']:
-            raise RuntimeError("Polarization type requested ("+itype+
-                               ") but image is unpolarized")
+    if not check_polarization(image, itype, kind='image'):
+        raise RuntimeError("Polarization type requested ("+itype+
+                           ") but image mode is '"
+                           +parse_polarization(image['polarized'])+"'")
     if itype == 'intensity':
         vals = image['intensity'][0,iinc,ie,:,:]
         clabel=r"$I$"
@@ -1692,6 +2140,9 @@ def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, st
     elif itype == 'u':
         vals = image['intensity'][2,iinc,ie,:,:]
         clabel=r"$U/I$"
+    elif itype == 'v':
+        vals = image['intensity'][3,iinc,ie,:,:]
+        clabel=r"$V/I$"
     elif itype == 'polangle':
         q = image['intensity'][1,iinc,ie,:,:]
         u = image['intensity'][2,iinc,ie,:,:]
@@ -1741,7 +2192,7 @@ def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, st
     plt.colorbar(im,label=clabel)
     plt.gca().set_aspect('equal')
     if pvec:
-        if image['polarized']:
+        if is_polarized(image['polarized']):
             q = image['intensity'][1,iinc,ie,:,:]
             u = image['intensity'][2,iinc,ie,:,:]
             q, u, x, y = subsample_polarization(q,u,x,y,step,average)
@@ -1779,10 +2230,15 @@ def write_image(filename,image):
     outfile.write("unit="+image['unit']+"\n")
     outfile.write("ntot={:d}\n".format(image['ntot']))
     outfile.write("nintens={:d}\n".format(image['nintens']))
-    if image['polarized']:
-        outfile.write("polarized=true\n")
-    else:
-        outfile.write("polarized=false\n")
+    outfile.write("polarized="+parse_polarization(image['polarized'])+"\n")
+    if image.get('coord') is not None:
+        outfile.write("coord="+image['coord']+"\n")
+    mpars = image.get('metric_params') or {}
+    if mpars:
+        outfile.write("metric_params="
+                      + ",".join(f"{k}={v!r}" for k, v in mpars.items()) + "\n")
+    if image.get('frame') is not None:
+        outfile.write("frame="+image['frame']+"\n")
     outfile.close()
 
     # Write binfaces
@@ -1890,12 +2346,40 @@ def read_image(filename):
     end_of_line_index = current_index + 1
     while raw_data_ascii[end_of_line_index] != '\n':
         end_of_line_index += 1
-    image['polarized'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+    image['polarized'] = parse_polarization(
+        raw_data_ascii[current_index:end_of_line_index].split(' ')[0])
     current_index = end_of_line_index + 1
-    if image['polarized'] == 'false':
-        image['polarized'] = False
-    if image['polarized'] == 'true':
-        image['polarized'] = True
+
+    # Optional, as in read_spectrum: added after the format was in use, and metric_params
+    # is absent for a metric with no free parameters.
+    image['coord'] = None
+    image['metric_params'] = {}
+    if raw_data_ascii.startswith("coord=", current_index):
+        current_index += len("coord=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        image['coord'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+        current_index = end_of_line_index + 1
+    if raw_data_ascii.startswith("metric_params=", current_index):
+        current_index += len("metric_params=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        for item in raw_data_ascii[current_index:end_of_line_index].split(','):
+            if '=' in item:
+                key, _, val = item.partition('=')
+                try:
+                    image['metric_params'][key.strip()] = float(val)
+                except ValueError:
+                    image['metric_params'][key.strip()] = val.strip()
+        current_index = end_of_line_index + 1
+
+    # One tag for every direction-like quantity in the file: the wavevector, the
+    # angle bins and the plane the Stokes parameters are referenced to.  Optional,
+    # as it postdates the format.
+    image['frame'] = None
+    if raw_data_ascii.startswith("frame=", current_index):
+        current_index += len("frame=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        image['frame'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+        current_index = end_of_line_index + 1
 
     # Read in faces
     ninc = image['ninc']

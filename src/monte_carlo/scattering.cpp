@@ -66,10 +66,11 @@ void ScatterThomsonPolarized(MonteCarloBlock *pmcb, Photon *pphot, int ips, int 
   for (int ip=ips; ip<=ipe; ip++) {
 
     Real norm = pphot->sip[ip];
-    Real stokes[3];
+    Real stokes[4];
     stokes[0] = 1.;
     stokes[1] = pphot->sqp[ip] / norm;
     stokes[2] = pphot->sup[ip] / norm;
+    stokes[3] = pphot->svp[ip] / norm;
 
     // Polarized scattering must be computed relative to cartesian bases due to
     // definition of stokes vectors
@@ -79,9 +80,15 @@ void ScatterThomsonPolarized(MonteCarloBlock *pmcb, Photon *pphot, int ips, int 
 
     Real mu = kz;
     Real stheta = sqrt(1. - SQR(mu));
-    Real phio = acos(kx / stheta);
-    if(ky < 0.0)
-      phio = 2.*PI - phio;
+    
+    Real phio = 0.;
+    if (stheta > TINY_NUMBER) {
+      Real carg = kx / stheta;
+      carg = (carg > 1.) ? 1. : ((carg < -1.) ? -1. : carg);
+      phio = acos(carg);
+      if(ky < 0.0)
+        phio = 2.*PI - phio;
+    }
 
     Real smu, sstheta, s1, s2, s3, i1;
     Real ci1, si1, ci2, si2, s2i1, c2i1;
@@ -174,10 +181,10 @@ void ScatterThomsonPolarized(MonteCarloBlock *pmcb, Photon *pphot, int ips, int 
         ci2 = (mu - mup * smu)/ (sthetap * sstheta);
       }
       else {
-        if (sstheta==0.0) {
+        if (sthetap == 0.0) {
           si2 = 0.0;
           ci2 = 1.0;
-        } else if (sthetap==0.0) {
+        } else if (sstheta == 0.0) {
           si2 = si1;
           ci2 = -ci1;
         }
@@ -216,6 +223,7 @@ void ScatterThomsonPolarized(MonteCarloBlock *pmcb, Photon *pphot, int ips, int 
     // value of the overall intensity (stokes[0]) does not change
     pphot->sqp[ip] = norm*(r10*stokes[0]+r11*stokes[1]+r12*stokes[2])/intensi;
     pphot->sup[ip] = norm*(r20*stokes[0]+r21*stokes[1]+r22*stokes[2])/intensi;
+    pphot->svp[ip] = norm*(s3*stokes[3])/intensi;
 
     // Calculate new photon direction
     kx = sthetap * cos(phip);
@@ -363,10 +371,11 @@ void ScatterComptonPolarized(MonteCarloBlock *pmcb, Photon *pphot, int ips,
   for (int ip=ips; ip<=ipe; ip++) {
 
     Real norms = pphot->sip[ip];
-    Real stokes[3];
+    Real stokes[4];
     stokes[0] = 1.;
     stokes[1] = pphot->sqp[ip] / norms;
     stokes[2] = pphot->sup[ip] / norms;
+    stokes[3] = pphot->svp[ip] / norms;
 ;
     // Polarized scattering must be computed relative to cartesian basis due
     // to definition of stokes vectors
@@ -494,18 +503,14 @@ void ScatterComptonPolarized(MonteCarloBlock *pmcb, Photon *pphot, int ips,
     Real r21 = s1 * c1s2 - s3 * s1c2;
     Real r22 = s3 * c1c2 + s1 * s1s2;
 
+    Real r33 = 0.5*s3*(erat + 1.0/erat);
+
     // Calculate new stokes vectors from rotation matrix.  Note that the
     // value of the overall intensity (stokes[0]=1) does not change
     pphot->sqp[ip] = norms*(r10+r11*stokes[1]+r12*stokes[2]) / norm;
     pphot->sup[ip] = norms*(r20+r21*stokes[1]+r22*stokes[2]) / norm;
+    pphot->svp[ip] = norms*(r33*stokes[3]) / norm;
 
-    Real fnorm = sqrt(SQR(pphot->sqp[ip])+SQR(pphot->sup[ip]));
-    if (fnorm > 1.) {
-      pphot->sqp[ip] /= fnorm;
-      pphot->sup[ip] /= fnorm;
-      printf("stokes %g %g %g %g %g\n",stokes[1],stokes[2],norms,norm,fnorm); 
-      printf("%g %g %g %g %g %g\n",r10,r11,r12,r20,r21,r22);
-    }
     if (pphot->IsNanPhoton(ip)) {
       pphot->statp[ip] = DESTROYED;
       pphot->PrintPhoton("Warning: Nan encounterd in ScatterComptonPolarized(),"
@@ -812,10 +817,10 @@ Real Bigy(Real x, Real xp)
 //! \fn Real SigmaHat(Real x)
 //! \brief Helper function used by Compton scattering routines
 
-Real SigmaHat(Real x)
-{
-  if (x < 0.001)
-    return 4. * (1. - x) / 3.;
+Real SigmaHat(Real x) {
+
+  if (x < 0.001) // more accurate at low x
+    return 4. * (1. - x * (1. - x * (1.3 - 1.6625 * x))) / 3.;
   else
     return ( (1. - 4. / x * (1. + 2. / x) ) * log(1. + x) +
              0.5 + 8. / x - 0.5 / SQR(1. + x) ) / x;

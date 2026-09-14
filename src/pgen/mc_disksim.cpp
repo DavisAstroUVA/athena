@@ -350,11 +350,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 }
 
 //========================================================================================
-//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe)
+//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype)
 //! \brief Initializes Photon packets before integration
 //========================================================================================
 
-void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
+void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
   // Set initial cells and emission weights for all photon samples
   SetEmissionCellWeight(pphot,ips,ipe);

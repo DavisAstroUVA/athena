@@ -117,11 +117,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 }
 
 //========================================================================================
-//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe)
+//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype)
 //! \brief Initializes Photon packets before integration
 //========================================================================================
 
-void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
+void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
   for (int ip=ips; ip<=ipe; ip++) {
 

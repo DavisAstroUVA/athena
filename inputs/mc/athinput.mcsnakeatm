@@ -1,0 +1,97 @@
+<comment>
+problem   = Polarized Thomson atmosphere in sinusoidal ("snake") coordinates
+reference = White, Stone & Gammie (2016), ApJS 225, 22
+configure = --prob=mc_snake_atm --coord=gr_user -mc -g
+
+# The same plane-parallel isothermal scattering atmosphere mc_isoth sets up, written in a
+# sheared chart.  Snake coordinates are flat spacetime, so the emergent intensity and
+# polarization must reproduce the Feautrier solution mc_isoth is checked against -- see
+# tst/montecarlo/snake_thomson_spectrum.  Set snake_a = 0 to degenerate to Minkowski,
+# which isolates "the general pusher path works" from "the shear is handled correctly".
+#
+# The atmosphere is stratified along x3 on purpose: z = z_M exactly and no metric
+# component depends on or mixes x3, so the shear leaves the stratification alone.
+#
+# rho_cgs and tgas_cgs are derived by the problem generator from taumin, taumax and temp
+# and do not belong in this file.
+
+<job>
+problem_id = mcsnakeatm
+
+<output1>
+file_type = spec
+face      = outer_x3
+ne        = 100
+emin      = 1.0
+emax      = 100.0
+ncth      = 8
+nphi      = 8
+
+<time>
+cfl_number = 0.1
+nlim       = 1
+tlim       = 1.0
+
+<coord>
+# GRUser reads m and a unconditionally; neither means anything for snake.
+m       = 0.0
+a       = 0.0
+# beta_max = snake_a * snake_k = 0.3.  snake_k = 2*pi/Lx1 puts exactly one period across
+# the box, so the metric stays continuous across the periodic x1 boundary.
+snake_a = 4.774648292756861e+09
+snake_k = 6.283185307179586e-11
+
+<mesh>
+nx1        = 32
+x1min      = -5.0e10
+x1max      = 5.0e10
+ix1_bc     = periodic
+ox1_bc     = periodic
+ix1_mc_bc  = periodic
+ox1_mc_bc  = periodic
+
+nx2        = 32
+x2min      = -5.0e10
+x2max      = 5.0e10
+ix2_bc     = periodic
+ox2_bc     = periodic
+ix2_mc_bc  = periodic
+ox2_mc_bc  = periodic
+
+# the stratified direction: absorbing below, escaping above
+nx3        = 128
+x3min      = 0.0
+x3max      = 1.0e11
+ix3_bc     = outflow
+ox3_bc     = outflow
+ix3_mc_bc  = absorb
+ox3_mc_bc  = escape
+
+<meshblock>
+nx1 = 16
+nx2 = 16
+nx3 = 32
+
+<hydro>
+gamma = 1.666666666666667
+
+<montecarlo>
+mc_coord       = snake
+general_pusher = true
+nphot          = 20000
+iseed          = 125787
+scattering     = thomson
+emission       = freefree
+absorption     = freefree
+polarized      = linear
+# drives the comoving-to-coordinate conversion at emission
+boosts         = true
+stepsize       = 1.0e-2
+varystep       = true
+
+<problem>
+temp     = 1.0e5
+taumin   = 1.0e-3      # scattering depth at the top
+taumax   = 1.0e4       # scattering depth at the bottom
+emin     = 1.0         # eV
+emax     = 100.0       # eV

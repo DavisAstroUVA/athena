@@ -7,6 +7,8 @@
 //! \brief implementation for moving photons via integration with metric and connection
 
 // Athena++ headers
+#include <complex>
+
 #include "montecarlo.hpp"
 #include "photon.hpp"
 #include "photonpusher.hpp"
@@ -26,6 +28,14 @@ GeneralPusher::GeneralPusher(MonteCarloBlock *pmcb)
   : PhotonPusher(pmcb) {
 
   step_par = pmy_mcb->stepsize;
+  acon_valid = false;
+  metric_valid = false;
+  polarized_ = IsPolarized(pmy_mcb->pmy_mc->polarized);
+  // A coordinate system whose Connect leaves components untouched would otherwise have
+  // them read as whatever was on the stack, which is silent and looks like a physics bug.
+  for (int i = 0; i < NCOORD; i++)
+    for (int j = 0; j < NCOORD; j++)
+      for (int k = 0; k < NCOORD; k++) gamma[i][j][k] = 0.0;
 
 }
 
@@ -53,25 +63,64 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
   bool abs_tau = (pmy_mc->absorption_method[pphot->type[ips]] == ABSTAU);
 
   for (int ip=ips; ip<=ipe; ip++) {
+    // check if photon is on this block
+    if (!IsOnBlock(pphot,ip)) continue;
     // get number of mean free paths photon will travel
     Real tauremaining = GetOpticalDepth(pran);
-    if (!IsOnBlock(pphot,ip)) continue;
     Real step = StepSize(pphot,ip);
     //printf("step %g\n",step);
     Real path_length;
     Real k1, k2, k3;
+    // Steps already taken in this free flight, plus the ones taken here.  Counted in a
+    // local so it stays in a register across a body that calls out to AdvanceStep,
+    // UpdateMoments and UserWorkInMove.
+    const int nmv0 = pphot->nmvp[ip];
     int iter = 0;
 
     // set total extinction coefficient
     Real chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
+    // nothing cached carries over from the previous photon
+    acon_valid = false;
+    metric_valid = false;
+    // Cell the opacities were last computed for.  Starts invalid so that the first step
+    // always refreshes; see the shift_unity comment below.
+    int oi1 = -1, oi2 = -1, oi3 = -1;
     while ( (pphot->statp[ip] == EVOLVING) && (tauremaining > TINY_NUMBER) &&
-            (iter < checkmove) && (pphot->dtp[ip] > 0.) ) {
+            (pphot->dtp[ip] > 0.) ) {
+      // Tested before the step is counted, so nmvp only ever counts steps actually taken.
+      if (capmove > 0 && nmv0 + iter >= capmove) {
+        pphot->statp[ip] = REMOVED;
+        break;
+      }
       iter++;
 
+      // Update opacities at the beginning of each step.  Two regimes:
+      //
+      //   shift_unity false -- the comoving shift moves as the photon does, through the
+      //     lapse and through the Doppler term, so the opacity has to be recomputed every
+      //     step.  Any curved metric, or any moving fluid, lands here.
+      //   shift_unity true  -- flat metric and fluid at rest, so the shift is identically
+      //     one and the opacity depends on the cell alone.  Refreshing inside a cell is
+      //     then provably a no-op; it measured exactly 0 over 1.2e7 same-cell steps in
+      //     mc_snake_atm before this shortcut existed.  Only a cell change needs one.
+      //
+      // The first step of a Move always refreshes either way, because oi1 starts invalid.
+      // Whatever left the opacities behind -- emission, or a coherent scatter that turned
+      // the photon without recomputing them -- they cannot be assumed current on entry.
+      if (!pmcb->shift_unity) {
+        UpdateOpacities(pphot,pmcb,ip);
+        chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
+      } else if (pphot->i1p[ip] != oi1 || pphot->i2p[ip] != oi2
+                 || pphot->i3p[ip] != oi3) {
+        UpdateOpacities(pphot,pmcb,ip);
+        chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
+        oi1 = pphot->i1p[ip]; oi2 = pphot->i2p[ip]; oi3 = pphot->i3p[ip];
+      }
       bool accel_success = false;
+
+      Real dl_face = 0.;
       if ((acceleration) && (resonance)) {
         // Get distance from photon to closest cell face
-        Real dl;
         Real dw3, dw2, dw1;
         Real dx3f = fabs(pcoord->x3f(pphot->i3p[ip]) - pcoord->x3f(pphot->i3p[ip] + 1));
         Real dx2f = fabs(pcoord->x2f(pphot->i2p[ip]) - pcoord->x2f(pphot->i2p[ip] + 1));
@@ -81,30 +130,27 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
         dw3 = dx3f * x1v * sin(x2v);
         dw2 = dx2f * x1v;
         Real dmin0 = std::min(dx1f, dw2);
-        dl = std::min(dmin0, dw3); // Distance to nearest face
+        dl_face = std::min(dmin0, dw3); // Distance to nearest face
 
         Real tauacc = 1000.; //BCM: make this an input parameter
         // Try to perform MRW acceleration if optical depth is large enough
-        if (dl*l_cgs*chi > tauacc) {
-          MRWResonanceAcceleration(pphot,pran,dl,tauacc,path_length,k1,k2,k3,ip);
+        if (dl_face*l_cgs*chi > tauacc) {
+          MRWResonanceAcceleration(pphot,pran,dl_face,tauacc,path_length,k1,k2,k3,ip);
           accel_success = true;
+          // the photon has been relocated, so the cached connection no longer applies
+          acon_valid = false;
+          metric_valid = false;
         }
       }
       if (!accel_success) {// Acceleration not triggered - take standard step
-        if (tauremaining > chi * l_cgs* step * pphot->ep[ip]) { // Photon hasn't yet reached tauremaining
-          //printf("step: %g %g %g %g\n", step, tauremaining, pphot->ep[ip], pphot->wp[ip]);
-          //VerletStep(pphot,step,ip);
-          RK4Step(pphot,step,ip);
-          if (pmy_mcb->pmy_mc->polarized)
-            PropogatePolarization(pphot,step,ip);
-          tauremaining -= chi * l_cgs * step * pphot->ep[ip];
-          //printf("large: %g %g %g %g %g\n",tauremaining,chi,step,pphot->ep[ip],chi * step * pphot->ep[ip]);
+        Real tau_step = chi * l_cgs * step * pphot->ep[ip];
+        if (tauremaining > tau_step) { // Photon hasn't yet reached tauremaining
+          // advance photon position, momentum, and polarization
+          AdvanceStep(pphot,step,ip);
+          tauremaining -= tau_step; // uses ep, chi at step start
         } else { // Photon has reached end of tauremaining - step to make it 0
           step = tauremaining / (chi * l_cgs * pphot->ep[ip]);
-          //VerletStep(pphot,step,ip);
-          RK4Step(pphot,step,ip);
-          if (pmy_mcb->pmy_mc->polarized)
-            PropogatePolarization(pphot,step,ip);
+          AdvanceStep(pphot,step,ip);
           tauremaining = 0.;
         }
         pphot->dtp[ip] -= pphot->ep[ip] * step / c_code;
@@ -120,9 +166,9 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
           }
         }
       } else {
-        // Photon has been given a new position on sphere of radius dl
+        // Photon has been given a new position on sphere of radius dl_face
         // Set exit parameters and continue the loop over photons
-        step = dl;
+        step = dl_face;
         tauremaining = 0.;
         if (pmcb->call_moments) {
           // SWD needs to use correct dl here
@@ -130,14 +176,19 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
         }
       }
 
-      // Check if photon changed zones
-      if (UpdateZone(pphot,ip)) {
-        UpdateOpacities(pphot,pmcb,ip);
-        // set total extinction coefficient
-        Real chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
+      // Check if photon changed cells and set flags for caching connection, metric
+      const Real xb0 = pphot->x0p[ip], xb1 = pphot->x1p[ip];
+      const Real xb2 = pphot->x2p[ip], xb3 = pphot->x3p[ip];
+      UpdateZone(pphot,ip);
+      if (pphot->x0p[ip] != xb0 || pphot->x1p[ip] != xb1 ||
+          pphot->x2p[ip] != xb2 || pphot->x3p[ip] != xb3) {
+        acon_valid = false;
+        metric_valid = false;
       }
 
-      if (pphot->IsNanPhoton(ip)) {
+      // Position and wavevector only, every step; the full check including the sixteen
+      // tensor columns runs once per flight below
+      if (pphot->IsNanTransport(ip)) {
         pphot->statp[ip] = DESTROYED;
         pphot->PrintPhoton("Photon returned Nan in general pusher",ip);
         break;
@@ -150,29 +201,28 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
       if (ptraj != NULL) ptraj->AddToTrajectory(pphot,ip);
 
     } // end of photon integration
-    //printf("it: %d\n",iter);
-    /*if (pphot->statp[ip] == ESCAPED) {
-      pphot->ep[ip] *= pphot->k0p[ip];
-      //pphot->PrintPhoton(ip);
-      }*/
 
-    if (iter >= checkmove) {
-      std::cout << "Warning: iter exceeded " << checkmove << " in photon pusher."
-                << std::endl;
-      pphot->PrintPhoton(ip);
-      std::cout << "tau remaining, chi: " << tauremaining << " " << chi << std::endl;
+
+    // Retire a photon whose free flight has run past the cap.  nmvp carries across Move
+    // calls and blocks, which is what it takes to bound a flight; it is reset at each
+    // scattering, in TransferPhotonsOnBlock.
+    pphot->nmvp[ip] = nmv0 + iter;
+    if (capmove > 0 && pphot->nmvp[ip] >= capmove &&
+        (pphot->statp[ip] == EVOLVING || pphot->statp[ip] == BUFFERED))
+      pphot->statp[ip] = REMOVED;
+    // The full NaN check, tensor included, once per flight rather than once per step.
+    if (pphot->statp[ip] != DESTROYED && pphot->IsNanPhoton(ip)) {
       pphot->statp[ip] = DESTROYED;
+      pphot->PrintPhoton("Photon returned Nan in general pusher",ip);
     }
   } // end loop over ip
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void GeneralPusher::UpdateOpacities(Photon *pphot, MonteCarloBlock *pmcb, int ip)
-//! \brief update opacities after a photon has changed zones
+//! \brief update opacities after a photon has changed cells
 
 void GeneralPusher::UpdateOpacities(Photon *pphot, MonteCarloBlock *pmcb, int ip) {
-
-  pmy_mcb = pmcb;
 
     if (pphot->statp[ip] == EVOLVING) {
     // Opacities need to be calculated using comoving frame energy and then transformed
@@ -181,14 +231,22 @@ void GeneralPusher::UpdateOpacities(Photon *pphot, MonteCarloBlock *pmcb, int ip
     int i1 = pphot->i1p[ip];
     int i2 = pphot->i2p[ip];
     int i3 = pphot->i3p[ip];
-    if (pmcb->boosts) {
-      // Shift photon energy to comoving frame
-      //shift = pmy_mcb->LorentzTransformFrequencyShift(pphot,ip);
-      shift = pmy_mcb->FrequencyShiftComoving(pphot,ip);
-      Real energy = pphot->ep[ip] * shift;
+    if (pmcb->boosts || pmcb->tetrads) {
+      // Shift photon energy to comoving frame.  The metric pair at the photon is the one
+      // the last step ended with, so hand it over rather than have the shift recompute it.
+      Real x[4], gcov[4][4], gcon[4][4];
+      x[IMC0] = pphot->x0p[ip];
+      x[IMC1] = pphot->x1p[ip];
+      x[IMC2] = pphot->x2p[ip];
+      x[IMC3] = pphot->x3p[ip];
+      MetricPairAt(x, gcov, gcon);
+      shift = pmy_mcb->FrequencyShiftComoving(pphot, ip, gcov, gcon);
+      pphot->ep[ip] *= shift;
       // compute opacities in comoving frame
       pphot->acp[ip] = pmcb->AbsorptionOpacity(pmcb,pphot,ip);
       pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb,pphot,ip);
+      // Shift energy back to Eulerian frame
+      pphot->ep[ip] /= shift;
       // Shift opaciteis to Eulerian frame
       pphot->acp[ip] *= shift;
       pphot->scp[ip] *= shift;
@@ -201,6 +259,9 @@ void GeneralPusher::UpdateOpacities(Photon *pphot, MonteCarloBlock *pmcb, int ip
   }
 }
 
+// Compiled only with MC_VERLET_DK (photon.hpp): the dk*p columns it advances are not
+// registered otherwise.  RK4Step is the integrator in use.
+#if MC_VERLET_DK
 //----------------------------------------------------------------------------------------
 //! \fn void GeneralPusher::VerletStep(Photon *pphot, Real step, int ip)
 //! \brief performs a single verlet integration step
@@ -287,6 +348,7 @@ void GeneralPusher::VerletStep(Photon *pphot, Real step, int ip) {
   pphot->dk3p[ip] = dk_n1[IMC3];
 
 }
+#endif  // MC_VERLET_DK
 
 //----------------------------------------------------------------------------------------
 //! \fn void GeneralPusher::RK4Step(Photon *pphot, Real step, int ip)
@@ -306,8 +368,9 @@ void GeneralPusher::RK4Step(Photon *pphot, Real step, int ip) {
   kcon[IMC2] = pphot->k2p[ip];
   kcon[IMC3] = pphot->k3p[ip];
 
-  Real k0[4], gcov[4][4];
-  pcoord->Metric(x0, gcov);
+  // Lower k with g_{mu nu} at the start point, which is where the previous step ended.
+  Real k0[4], gcov[4][4], gcon0[4][4];
+  MetricPairAt(x0, gcov, gcon0);
   for (int j = 0; j < 4; j++) {
     k0[j] = 0.;
     for (int i = 0; i < 4; i++)
@@ -351,8 +414,19 @@ void GeneralPusher::RK4Step(Photon *pphot, Real step, int ip) {
     k[i] += step / 6. * dl[i+4];
   }
 
+  // Raise k with g^{mu nu} and renormalize with g_{mu nu}, both at the new point: one
+  // evaluation for the pair (see MCCoord::MetricAndInverse).
   Real gcon[4][4];
-  pcoord->InverseMetric(x, gcon);
+  pcoord->MetricAndInverse(x, gcov, gcon);
+  // Keep the pair for the next step; see metric_valid in photonpusher.hpp.
+  for (int i = 0; i < 4; i++) {
+    metric_x[i] = x[i];
+    for (int j = 0; j < 4; j++) {
+      metric_gcov[i][j] = gcov[i][j];
+      metric_gcon[i][j] = gcon[i][j];
+    }
+  }
+  metric_valid = true;
   for (int j = 0; j < 4; j++) {
     kcon[j] = 0.;
     for (int i = 0; i < 4; i++) {
@@ -360,7 +434,6 @@ void GeneralPusher::RK4Step(Photon *pphot, Real step, int ip) {
     }
   }
   // Renormalize space components to keep k on shell
-  pcoord->Metric(x, gcov);
   Real a = 0.;
   for (int j = 1; j < 4; j++)
     for (int i = 1; i < 4; i++)
@@ -377,11 +450,33 @@ void GeneralPusher::RK4Step(Photon *pphot, Real step, int ip) {
   pphot->x1p[ip] = x[IMC1];
   pphot->x2p[ip] = x[IMC2];
   pphot->x3p[ip] = x[IMC3];
+  // k0p is the photon energy
   pphot->k0p[ip] = kcon[IMC0];
   pphot->k1p[ip] = kcon[IMC1] * factor;
   pphot->k2p[ip] = kcon[IMC2] * factor;
   pphot->k3p[ip] = kcon[IMC3] * factor;
+}
 
+//----------------------------------------------------------------------------------------
+//! \fn void GeneralPusher::MetricPairAt(Real x[4], Real gcov[4][4], Real gcon[4][4])
+//! \brief g_{mu nu} and g^{mu nu} at x, from the cache when x is exactly the cached point
+//
+// Exact comparison is the intent: the cache is only ever reused for the position the
+// previous RK4 step wrote to the photon, which is the same four doubles.  Anything that
+// moves the photon otherwise clears metric_valid, so a stale hit cannot happen.
+
+void GeneralPusher::MetricPairAt(Real x[4], Real gcov[4][4], Real gcon[4][4]) {
+  if (metric_valid && x[0] == metric_x[0] && x[1] == metric_x[1] &&
+      x[2] == metric_x[2] && x[3] == metric_x[3]) {
+    for (int i = 0; i < 4; i++) {
+      for (int j = 0; j < 4; j++) {
+        gcov[i][j] = metric_gcov[i][j];
+        gcon[i][j] = metric_gcon[i][j];
+      }
+    }
+    return;
+  }
+  pcoord->MetricAndInverse(x, gcov, gcon);
 }
 
 //----------------------------------------------------------------------------------------
@@ -393,18 +488,32 @@ void GeneralPusher::SubStep(Real xcon[4], Real kcov[4], Real dl[8]) {
   for (int i = 0; i < 8; i++)
     dl[i] = 0.0;
 
+  // One point evaluation for both: the inverse metric and its derivative share their
+  // intermediates in every metric that has any (see MCCoord::InverseMetricAndDerivative).
   Real gcon[4][4];
-  pcoord->InverseMetric(xcon, gcon);
+  Real dgcon[4][4][4];
+  pcoord->InverseMetricAndDerivative(xcon, gcon, dgcon);
   for (int j = 0; j < 4; j++)
     for (int i = 0; i < 4; i++)
       dl[j] += gcon[j][i] * kcov[i];
 
-  Real dgcon[4][4][4];
-  pcoord->InverseMetricDerivative(xcon, dgcon);
-  for (int k = 0; k < 4; k++)
-    for (int j = 0; j < 4; j++)
-      for (int i = 0; i < 4; i++)
-        dl[k+4] -= 0.5 * dgcon[k][j][i] * kcov[j] * kcov[i];
+  // Every metric the module integrates is stationary, so the time derivative of g^{ab}
+  // is identically zero and dk_t/dl = 0: the k = 0 slice of this contraction only ever
+  // subtracted zeros.  dl[4] was zeroed above and stays so.  A time-dependent metric
+  // would have to start this loop at zero again.
+  //
+  // d_k g^{ji} is symmetric in (j,i), and every coordinate class fills both triangles,
+  // so the double sum is the diagonal plus twice the upper triangle: thirty products per
+  // k instead of forty-eight.
+  for (int k = 1; k < 4; k++) {
+    Real sum = 0.;
+    for (int j = 0; j < 4; j++) {
+      const Real kj = kcov[j];
+      sum += dgcon[k][j][j] * kj * kj;
+      for (int i = j+1; i < 4; i++) sum += 2.0 * dgcon[k][j][i] * kj * kcov[i];
+    }
+    dl[k+4] = -0.5 * sum;
+  }
   // proper distance
   //Real gcov[4][4];
   //pcoord->Metric(xcon, gcov);
@@ -420,23 +529,20 @@ void GeneralPusher::SubStep(Real xcon[4], Real kcov[4], Real dl[8]) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void GeneralPusher::PropogatePolarization(Photon *pphot, Real step, int ip)
-//! \brief propogates polarization tensor a single step
+//! \fn void GeneralPusher::ConnectionContraction(Photon *pphot, int ip, Real acon[4][4])
+//! \brief A^i_k = Gamma^i_kl k^l at the photon's current position and wavevector
+//
+// Contract k with connection. This is the part of the polarization transport that depends
+// on where the photon is rather so AdvanceStep saves for next step
 
-void GeneralPusher::PropogatePolarization(Photon *pphot, Real step, int ip) {
+void GeneralPusher::ConnectionContraction(Photon *pphot, int ip, Real acon[4][4]) {
 
-  // SWD: Gamma does not need recomputing
-  //Real gamma[NCOORD][NCOORD][NCOORD];
-  // Store gamma in Coord to prevent recalculation
-  //pcoord->Connect(pphot->x, gamma);
-
-
-  std::complex<Real> ptcopy[4][4];
-  for (int i = 0; i < 4; i++) {
-    for (int j = 0; j < 4; j++) {
-      ptcopy[i][j] = pphot->polten[i*4+j][ip];
-    }
-  }
+  Real xpol[4];
+  xpol[IMC0] = pphot->x0p[ip];
+  xpol[IMC1] = pphot->x1p[ip];
+  xpol[IMC2] = pphot->x2p[ip];
+  xpol[IMC3] = pphot->x3p[ip];
+  pcoord->Connect(xpol, gamma);
 
   Real kp[4];
   kp[IMC0] = pphot->k0p[ip];
@@ -445,25 +551,121 @@ void GeneralPusher::PropogatePolarization(Photon *pphot, Real step, int ip) {
   kp[IMC3] = pphot->k3p[ip];
 
   for (int i = 0; i < 4; i++) {
-    for (int j = 0; j < 4; j++) {
-      for (int k = 0; k < 4; k++) {
-        for (int l = 0; l < 4; l++) {
-          // eq. 16 of Moscibrodzka & Gammie in vacuum
-          pphot->polten[i*4+j][ip] += -(gamma[i][k][l] * ptcopy[k][j] +
-                                        gamma[j][k][l] * ptcopy[i][k]) *
-                                       kp[l] * step;
-        }
-      }
+    for (int k = 0; k < 4; k++) {
+      Real sum = 0.;
+      for (int l = 0; l < 4; l++) sum += gamma[i][k][l] * kp[l];
+      acon[i][k] = sum;
     }
   }
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void GeneralPusher::ApplyPolarizationRate(...)
+//! \brief dN/dlambda for a given coherency tensor, from a precomputed A^i_k
+//
+// eq. 16 of Moscibrodzka & Gammie in vacuum, written as
+//
+//     dN^ij/dl = -(A^i_k N^kj + A^j_k N^ik),
+//
+// which is the same contraction with the sum over l pulled out into A.  Done inline it
+// recomputes the same sixteen numbers once for every (i,j) pair.
+
+void GeneralPusher::ApplyPolarizationRate(const Real acon[4][4],
+                                          const std::complex<Real> nin[4][4],
+                                          std::complex<Real> dndl[4][4]) {
+
+  // N is Hermitian (Photon::StoreTensor keeps it so exactly), and then the second term
+  // is the conjugate transpose of the first: A^j_k N^ik = conj(A^j_k N^kj) summed over k.
+  // So form M = A N once, a real-by-complex 4x4 product, and add its adjoint.  Half the
+  // multiplies of the direct double sum.
+  std::complex<Real> m[4][4];
+  for (int i = 0; i < 4; i++) {
+    for (int j = 0; j < 4; j++) {
+      std::complex<Real> sum(0., 0.);
+      for (int k = 0; k < 4; k++) sum += acon[i][k] * nin[k][j];
+      m[i][j] = sum;
+    }
+  }
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++)
+      dndl[i][j] = -(m[i][j] + std::conj(m[j][i]));
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void GeneralPusher::AdvanceStep(Photon *pphot, Real step, int ip)
+//! \brief advance the geodesic and, when it is tracked, the coherency tensor
+//
+// The coherency tensor is transported with the midpoint rule: a half step to estimate the
+// tensor midway through the interval, then a full step from the initial value using the
+// rate evaluated there.  Writing the transport as dN/dl = -A(l) N, that is
+//
+//   N_half = N_n + (h/2) f(A_n, N_n),    N_(n+1) = N_n + h f(A_mid, N_half),
+//
+// with A_mid the average of the connection contractions at the two ends of the step.
+//
+// ipole (ipolarray.c, push_polar) has a true midpoint to hand because its geodesic tracer
+// stores Xhalf and Kconhalf for every step: it runs the geodesic to completion first and
+// integrates the radiation along the stored ray.  Monte Carlo cannot work that way, since
+// the path is not known ahead of time so the midpoint is approximated as in blacklight
+// (polarized.cpp), by averaging the endpoints.  Averaging the contracted A rather than
+// averaging Gamma and k separately differs at O(h^2) in the operator and O(h^3) in N,
+// which is the scheme's own truncation error.
+//
+// Leaving RK4Step a single full step matters twice: the geodesic is untouched, so
+// unpolarized results stay bit-identical, and the endpoint contraction is still the last
+// one computed, so acon carries into the next step's predictor as it did before.
+
+void GeneralPusher::AdvanceStep(Photon *pphot, Real step, int ip) {
+
+  if (!polarized_) {
+    RK4Step(pphot, step, ip);
+    return;
+  }
+
+  std::complex<Real> n0[4][4], d1[4][4];
+  pphot->LoadTensor(ip, n0);
+
+  // Rate at the step start.  The previous step evaluated the connection at exactly this
+  // position and wavevector -- only the tensor it was applied to differs -- so reuse it
+  // whenever nothing has moved the photon since.
+  if (!acon_valid) ConnectionContraction(pphot, ip, acon);
+  Real acon_start[4][4];
+  for (int i = 0; i < 4; i++)
+    for (int k = 0; k < 4; k++) acon_start[i][k] = acon[i][k];
+  ApplyPolarizationRate(acon_start, n0, d1);
+
+  // Half step, giving the tensor midway through the interval
+  std::complex<Real> nhalf[4][4];
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++)
+      nhalf[i][j] = n0[i][j] + d1[i][j]*(0.5*step);
+
+  RK4Step(pphot, step, ip);
+
+  // Contraction at the step end, which is also what the next step's predictor reuses
+  ConnectionContraction(pphot, ip, acon);
+  acon_valid = true;
+
+  // Rate at the midpoint, from the averaged operator applied to the half-step tensor
+  Real acon_mid[4][4];
+  for (int i = 0; i < 4; i++)
+    for (int k = 0; k < 4; k++) acon_mid[i][k] = 0.5*(acon_start[i][k] + acon[i][k]);
+  std::complex<Real> d2[4][4];
+  ApplyPolarizationRate(acon_mid, nhalf, d2);
+
+  std::complex<Real> n1[4][4];
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++)
+      n1[i][j] = n0[i][j] + d2[i][j]*step;
+  pphot->StoreTensor(ip, n1);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn Real GeneralPusher::StepSize(Photon *pphot, int ip)
-//! \brief computes stepsize based on size of current zone
+//! \brief computes stepsize based on size of current cell
 
 // SWD: Requires updates
-// return the stepsize based on the current zone and k-vector
+// return the stepsize based on the current cell and k-vector
 // this should be updated with every iteration since k continuously changes
 Real GeneralPusher::StepSize(Photon *pphot, int ip) {
 

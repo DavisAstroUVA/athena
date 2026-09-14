@@ -43,7 +43,26 @@
 #include "outputs/outputs.hpp"
 #include "parameter_input.hpp"
 #include "utils/utils.hpp"
+#include "monte_carlo/mcgrid.hpp"
 #include "monte_carlo/montecarlo.hpp"
+
+//! \fn static long PeakResidentKB()
+//! \brief peak resident set size of this process in kB, from /proc/self/status
+//
+// Linux only; returns 0 where the file is missing, and the caller then prints nothing.
+// Read at the end of the run rather than sampled during it because VmHWM is already the
+// high-water mark the kernel keeps.
+static long PeakResidentKB() {
+  std::FILE *f = std::fopen("/proc/self/status", "r");
+  if (f == nullptr) return 0;
+  char line[256];
+  long kb = 0;
+  while (std::fgets(line, sizeof(line), f) != nullptr) {
+    if (std::sscanf(line, "VmHWM: %ld", &kb) == 1) break;
+  }
+  std::fclose(f);
+  return kb;
+}
 
 // MPI/OpenMP headers
 #ifdef MPI_PARALLEL
@@ -263,6 +282,15 @@ int main(int argc, char *argv[]) {
 
   //--- Step 4. --------------------------------------------------------------------------
   // Construct and initialize Mesh
+
+  // Take the grid from an athdf snapshot if one was named.  This rewrites the <mesh> and
+  // <meshblock> parameters before Mesh reads them in its member initializer list, so the
+  // Monte Carlo run is built on exactly the grid the snapshot was written from.  A
+  // restart carries its own mesh, so this applies only to a fresh start.
+  if (MONTE_CARLO_ENABLED) {
+    if (res_flag == 0 && MCGridFile::Requested(pinput))
+      MCGridFile::Load(pinput)->InjectMeshParameters(pinput);
+  }
 
   Mesh *pmesh;
 #ifdef ENABLE_EXCEPTIONS
@@ -630,6 +658,16 @@ int main(int argc, char *argv[]) {
   if ((MONTE_CARLO_ENABLED) && !(pmc->dynamic))
     write_fluid_diagnostics = false;
 
+  // Peak resident memory, from /proc/self/status (zero where that file does not exist).
+  // Collective: every rank contributes before rank 0 prints.  The per-rank maximum is what
+  // has to fit on a node; the total is what the job charged.
+  long mem_max_kb = PeakResidentKB();
+  long mem_sum_kb = mem_max_kb;
+#ifdef MPI_PARALLEL
+  MPI_Allreduce(MPI_IN_PLACE, &mem_max_kb, 1, MPI_LONG, MPI_MAX, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, &mem_sum_kb, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
   if (Globals::my_rank == 0) {
     if (write_fluid_diagnostics) {
       if (SignalHandler::GetSignalFlag(SIGTERM) != 0) {
@@ -673,6 +711,10 @@ int main(int argc, char *argv[]) {
       std::cout << std::endl << "cpu time used  = " << cpu_time << std::endl;
       std::cout << "samples/cpu_second = " << phot_cpus << std::endl;
     }
+    if (mem_max_kb > 0) {
+      std::cout << "peak resident memory = " << mem_max_kb/1024.0 << " MB per rank (max), "
+                << mem_sum_kb/1024.0 << " MB total" << std::endl;
+    }
 #ifdef OPENMP_PARALLEL
     double zc_omps = static_cast<double> (zonecycles) / omp_time;
     std::cout << std::endl << "omp wtime used = " << omp_time << std::endl;
@@ -681,10 +723,15 @@ int main(int argc, char *argv[]) {
   }
 
   delete pinput;
+  // Before the Mesh: MonteCarloBlock holds a MeshBlock pointer, so tearing the Mesh down
+  // first leaves ~MonteCarlo walking blocks whose MeshBlocks are already gone.
+  if (MONTE_CARLO_ENABLED) {
+    delete pmc;
+    MCGridFile::Free();
+  }
   delete pmesh;
   delete ptlist;
   delete pouts;
-  if (MONTE_CARLO_ENABLED) delete pmc;
 
 #ifdef MPI_PARALLEL
   MPI_Finalize();

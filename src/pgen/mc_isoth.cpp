@@ -32,8 +32,10 @@ namespace {
   bool tnorm;
   Real logemin, logemax;
   Real DensityProfile(Real x, Real xl, Real xh, Real taul, Real tauh, Real kap);
-  void JMeanOpacity(MonteCarloBlock *pmcb, Photon *pphot, Real dl, int ip, int imom);
-  void AverageEnergy(MonteCarloBlock *pmcb, Photon *pphot, Real dl, int ip, int imom);
+  void JMeanOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+                  const PhotonFrameState &s);
+  void AverageEnergy(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+                  const PhotonFrameState &s);
 }
 
 
@@ -81,6 +83,12 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
       if (radial) {
         xlow = pin->GetReal("mesh","x1min");
         xhigh = pin->GetReal("mesh","x1max");
+      } else {
+        // Stratified in z = r cos(theta) rather than in r, so the profile is measured from
+        // the midplane out to zmax.  The disk is symmetric about z = 0, so only |z| is
+        // ever passed to DensityProfile and the lower bound is the midplane itself.
+        xlow = 0.0;
+        xhigh = pin->GetReal("problem","zmax");
       }
     }
   }
@@ -119,8 +127,40 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
       for (int k=ks; k<=ke; k++) {
         for (int j=js; j<=je; j++) {
           for (int i=is; i<=ie; i++) {
-            Real x1 = pcoord->x1v(k);
+            Real x1 = pcoord->x1v(i);
             if (!constdens) rho = DensityProfile(x1,xlow,xhigh,taumin,taumax,kappaes);
+            phydro->u(IDN,k,j,i) = rho;
+            phydro->u(IM1,k,j,i) = rho*vel;
+            phydro->u(IM2,k,j,i) = 0.0;
+            phydro->u(IM3,k,j,i) = 0.0;
+            phydro->u(IEN,k,j,i) = rideal*rho*tgas/(gamma-1.0);
+          }
+        }
+      }
+    } else {
+      // Vertically stratified disk: the density depends only on z = r cos(theta), so every
+      // cylindrical radius carries the same plane-parallel atmosphere and the emergent
+      // polarization can be compared against a plane-parallel solution.
+      //
+      // Above |z| = zmax the exponential simply continues, which is the right continuation
+      // for an isothermal atmosphere -- there is nothing up there.  Clamping the argument
+      // at zmax instead, so that everything above it carries the full surface density, is
+      // wrong in a way that is easy to miss: the atmosphere top is a plane (z = zmax) but
+      // the domain top is a cone (constant theta), and the wedge between them grows with
+      // radius.  Filled with surface-density material it is optically thin vertically
+      // (tau ~ 0.02) but not along a grazing ray (tau ~ 0.26 at mu = 0.06), so it
+      // contaminates the most grazing angle bin only, which is also the bin carrying most
+      // of the polarization signal.
+      Real rhofloor = pin->GetOrAddReal("problem","rhofloor",0.0);
+      for (int k=ks; k<=ke; k++) {
+        for (int j=js; j<=je; j++) {
+          Real cth = std::cos(pcoord->x2v(j));
+          for (int i=is; i<=ie; i++) {
+            Real zabs = std::fabs(pcoord->x1v(i)*cth);
+            if (!constdens) {
+              rho = DensityProfile(zabs,xlow,xhigh,taumin,taumax,kappaes);
+              if (rho < rhofloor) rho = rhofloor;
+            }
             phydro->u(IDN,k,j,i) = rho;
             phydro->u(IM1,k,j,i) = rho*vel;
             phydro->u(IM2,k,j,i) = 0.0;
@@ -146,7 +186,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 //! \brief Initializes Photon packets before integration
 //========================================================================================
 
-void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
+void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
   // Set initial cells and emission weights for all photon samples
   BoundaryFace face;
@@ -154,7 +194,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
       SetEmissionCellWeight(pphot,ips,ipe);
   } else if (pmy_mc->emission_flag == EMISBB) {
     face = pmy_mc->emission_face[0];
-    SetEmissionCellWeightArea(pphot,face,ips,ipe); 
+    SetEmissionCellWeightArea(pphot,face,ips,ipe);
   }
 
   for (int ip=ips; ip<=ipe; ip++) {
@@ -180,7 +220,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
 
       PhotonEmitBlackbody(this,pphot,face,ip);
     }
-   
+
     // Convert k unit vector to k^\alpha
     /*if (pmy_mc->general_pusher_flag) {
       pphot->k0p[ip] = 1.;
@@ -201,7 +241,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
 
     // initialize scattering number
     pphot->nscp[ip] = 0;
-    
+
     // Initialize the absorption and scattering extinction coefficients
     // to the values appropriate in the emitted zone
     pphot->acp[ip] = AbsorptionOpacity(this,pphot,ip);
@@ -258,27 +298,29 @@ Real DensityProfile(Real x, Real xl, Real xh, Real taul, Real tauh, Real kap) {
   return taul/l0/kap*exp((xh-x)/l0);
 }
 
-void JMeanOpacity(MonteCarloBlock *pmcb, Photon *pphot, Real dl, int ip, int imom) {
+void JMeanOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+                  const PhotonFrameState &s) {
 
   int i1 = pphot->i1p[ip];
   int i2 = pphot->i2p[ip];
   int i3 = pphot->i3p[ip];
 
-  const Real c_cgs = 2.99792458e10;
-  Real weight = pphot->ep[ip]*pphot->wp[ip]*dl/c_cgs;
+  // energy and path length come from the frame this moment was enrolled with
+  Real weight = pphot->wp[ip]*s.e*s.dl/MCConstants::c_cgs;
   pmcb->moments_user(imom,i3,i2,i1) += weight*pphot->acp[ip];
 
 }
 
-void AverageEnergy(MonteCarloBlock *pmcb, Photon *pphot, Real dl, int ip, int imom) {
+void AverageEnergy(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+                  const PhotonFrameState &s) {
 
   int i1 = pphot->i1p[ip];
   int i2 = pphot->i2p[ip];
   int i3 = pphot->i3p[ip];
 
-  const Real c_cgs = 2.99792458e10;
-  Real weight = pphot->ep[ip]*pphot->wp[ip]*dl/c_cgs;
-  pmcb->moments_user(imom,i3,i2,i1) += weight*pphot->ep[ip];
+  // energy and path length come from the frame this moment was enrolled with
+  Real weight = pphot->wp[ip]*s.e*s.dl/MCConstants::c_cgs;
+  pmcb->moments_user(imom,i3,i2,i1) += weight*s.e;
 
 }
 

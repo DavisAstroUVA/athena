@@ -42,7 +42,7 @@ namespace {
   Real energy0;
   int i1,i2,i3;
   Real rhobase;
-  Real IonizedEmission(MonteCarloBlock *pmcb, int k, int j, int i);
+  Real IonizedEmission(MonteCarloBlock *pmcb, int k, int j, int i, int etype);
 
 }
 //========================================================================================
@@ -148,11 +148,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 }
 
 //========================================================================================
-//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe)
+//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype)
 //! \brief Initializes Photon packets before integration
 //========================================================================================
 
-void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
+void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
   // Set initial cells and emission weights for all photon samples
   SetEmissionCellWeight(pphot,ips,ipe);
@@ -168,7 +168,8 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
     Real mu = 2.*pran->uniform()-1.0;
     Real stheta = std::sqrt(1.0-mu*mu);
     Real phi = 2.*PI*pran->uniform();
-    pphot->k0p[ip] = 1. / 2.99792458e10;
+    // k0p is the photon energy (set via ep); the light-travel time bookkeeping
+    // below now divides by c explicitly instead of stashing 1/c in k0p.
     pphot->k1p[ip] = stheta * cos(phi);
     pphot->k2p[ip] = stheta * sin(phi);
     pphot->k3p[ip] = mu;
@@ -231,7 +232,7 @@ void TrackIonization(MeshBlock *pmb, const Real time, const Real dt,
 }
 
 namespace {
-Real IonizedEmission(MonteCarloBlock *pmcb, int k, int j, int i) {
+Real IonizedEmission(MonteCarloBlock *pmcb, int k, int j, int i, int etype) {
 
   const Real mp = 1.6726e-24;
   const Real alpha = 4.18e-13;

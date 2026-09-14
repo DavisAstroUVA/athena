@@ -32,8 +32,10 @@ namespace {
   bool tnorm;
   Real logemin, logemax;
   Real DensityProfile(Real x, Real xl, Real xh, Real taul, Real tauh, Real kap);
-  void JMeanOpacity(MonteCarloBlock *pmcb, Photon *pphot, Real dl, int ip, int imom);
-  void AverageEnergy(MonteCarloBlock *pmcb, Photon *pphot, Real dl, int ip, int imom);
+  void JMeanOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+                  const PhotonFrameState &s);
+  void AverageEnergy(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+                  const PhotonFrameState &s);
 
   // frequency table parameters
   std::string emission_type;
@@ -45,13 +47,15 @@ namespace {
   AthenaArray<Real> ross_tab;
   AthenaArray<Real> plan_tab;
   AthenaArray<Real> eta_cum_tab;
-  AthenaArray<Real> eta_tab;
   AthenaArray<Real> prob_tab;
+  AthenaArray<Real> emisst;
+  AthenaArray<Real> opact;
+
   //functions
   Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
   Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap);
   Real Planck(Real temp, Real nu);
-  Real TableEmission(MonteCarloBlock *pmcb, int k, int j, int i);
+  Real TableEmission(MonteCarloBlock *pmcb, int k, int j, int i, int etype);
   Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
 }
 
@@ -105,9 +109,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   }
 
   // Assume constant velocity provided as fraction of speed of light
-  Real vel = pin->GetOrAddReal("problem","velocity",0.);
-  Real c = 2.99792458e10;
-  vel *= c;
+  Real c_cgs = 2.99792458e10;
+  Real vel1 = pin->GetOrAddReal("problem","vel1",0.)*c_cgs;
+  Real vel2 = pin->GetOrAddReal("problem","vel2",0.)*c_cgs;
+  Real vel3 = pin->GetOrAddReal("problem","vel3",0.)*c_cgs;
 
   // Assume constant temperature and ideal gas
   Real gamma = peos->GetGamma();
@@ -124,11 +129,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
       for (int j=js; j<=je; j++) {
         for (int i=is; i<=ie; i++) {
           phydro->u(IDN,k,j,i) = rho;
-          phydro->u(IM1,k,j,i) = 0.0;
-          phydro->u(IM2,k,j,i) = 0.0;
-          phydro->u(IM3,k,j,i) = rho*vel;
+          phydro->u(IM1,k,j,i) = rho*vel1;
+          phydro->u(IM2,k,j,i) = rho*vel2;
+          phydro->u(IM3,k,j,i) = rho*vel3;
           phydro->u(IEN,k,j,i) = rideal*rho*tgas/(gamma-1.0);
-          //printf("%g %g\n",rho,tgas);
         }
       }
     }
@@ -143,9 +147,9 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
             Real x1 = pcoord->x1v(k);
             if (!constdens) rho = DensityProfile(x1,xlow,xhigh,taumin,taumax,kappaes);
             phydro->u(IDN,k,j,i) = rho;
-            phydro->u(IM1,k,j,i) = rho*vel;
-            phydro->u(IM2,k,j,i) = 0.0;
-            phydro->u(IM3,k,j,i) = 0.0;
+            phydro->u(IM1,k,j,i) = rho*vel1;
+            phydro->u(IM2,k,j,i) = rho*vel2;
+            phydro->u(IM3,k,j,i) = rho*vel3;
             phydro->u(IEN,k,j,i) = rideal*rho*tgas/(gamma-1.0);
           }
         }
@@ -163,11 +167,11 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 }
 
 //========================================================================================
-//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe)
+//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype)
 //! \brief Initializes Photon packets before integration
 //========================================================================================
 
-void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
+void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
   // Set initial cells and emission weights for all photon samples
   SetEmissionCellWeight(pphot,ips,ipe);
@@ -191,15 +195,14 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
       }
     } else {
       pphot->ep[ip] = SampleEmissivity(this,pphot,ip);
-      //printf("%g\n",pphot->ep[ip]/1.6e-9);
       // Generate initial angle parameters
       Real phi = 2. * PI * pran->uniform();
       Real cphi = cos(phi);
       Real sphi = sin(phi);
       Real cth = 2. * pran->uniform() - 1.;
       Real sth = sqrt(1. - SQR(cth));
-      // Initialize wave vector with isotropic distribution
-      pphot->k0p[ip] = 1.;
+      // Initialize wave vector with isotropic distribution.  k0p carries the photon
+      // energy, already sampled into ep above, so it must not be reset here.
       pphot->k1p[ip] = sth*cphi;
       pphot->k2p[ip] = sth*sphi;
       pphot->k3p[ip] = cth;
@@ -210,7 +213,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
 
     // Convert k unit vector to k^\alpha
     if (pmy_mc->general_pusher_flag) {
-      pphot->k0p[ip] = 1.;
+      // k0p is the photon energy; only the spatial components are rescaled here.
       pphot->k2p[ip] /= pphot->x1p[ip];
       pphot->k3p[ip] /= (pphot->x1p[ip]*sin(pphot->x2p[ip]));
       pphot->dk0p[ip] = 0.;
@@ -218,7 +221,6 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
       pphot->dk2p[ip] = 0.;
       pphot->dk3p[ip] = 0.;
     }
-    //printf("%g %g \n",pphot->ep[ip],pphot->wp[ip]);
     // Set status flag
     if (pphot->wp[ip] < 0.0)
       pphot->statp[ip] = DESTROYED;
@@ -264,49 +266,13 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     }
   } else {
 
-    // Create array for emissivity
-    AthenaArray<Real> eta_nu_tab;
-    eta_nu_tab.NewAthenaArray(nfre,ntem,nrho);
-    Real h = 6.62607015e-27;
-    for(int k=0; k<nfre; ++k) {
-      Real nup = fre_grid(k+1)/h;
-      Real num = fre_grid(k)/h;
-      for(int j=0; j<ntem; ++j) {
-        Real temp = temp_grid(j);
-        for(int i=0; i<nrho; ++i) {
-          Real opp = plan_tab(k,j,i);
-          Real opm;
-          if (k == 0)
-            opm = 0.;
-          else
-            opm = plan_tab(k-1,j,i);
-          eta_nu_tab(k,j,i) = IntegrateEmission(temp,num,nup,opm,opp);
-          //if ((Globals::my_rank == 0)) {
-          //    printf("%d %g %g %g %g\n",k,temp_grid(j),rho_grid(i),eta_nu_tab(k,j,i),
-          //           plan_tab(k,j,i));
-          //}
-        }
-      }
-    }
-
-    eta_tab.NewAthenaArray(ntem,nrho);
-    for(int j=0; j<ntem; ++j) {
-      Real temp = temp_grid(j);
-      for(int i=0; i<nrho; ++i) {
-        eta_tab(j,i) = 0.;
-        for(int k=0; k<nfre; ++k) {
-          eta_tab(j,i) += 4.*PI*eta_nu_tab(k,j,i);
-          //printf("%d %d %d %g %g\n",j,i,k,eta_nu_tab(k,j,i),eta_tab(j,i));
-        }
-      }
-    }
-
     int ncells1 = nx1 + 2*(NGHOST);
     int ncells2 = 1, ncells3 = 1;
     if (nx2 > 1) ncells2 = nx2 + 2*(NGHOST);
     if (nx3 > 1) ncells3 = nx3 + 2*(NGHOST);
-    eta_cum_tab.NewAthenaArray(ncells3,ncells2,ncells1,nfre+1);
-    Real keverg = 1.602176634e-9;
+
+    // Compute opacity table corresponding to each cell and frequency
+    opact.NewAthenaArray(ncells3,ncells2,ncells1,nfre+1);
     for(int k=ks; k<=ke; ++k) {
       for(int j=js; j<=je; ++j) {
         for(int i=is; i<=ie; ++i) {
@@ -315,7 +281,6 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
           ld = (ld > lmaxd) ? lmaxd : ld;
           Real temp = tgas(k,j,i);
           Real lt = log10(temp);
-          //printf("%d %d %d %g %g %g\n",k,j,i,lt,tgas(k,j,i),rho(k,j,i));
           lt = (lt < lmint) ? lmint : lt;
           lt = (lt > lmaxt) ? lmaxt : lt;
           Real xi = (ld - lmind) / dld;
@@ -323,7 +288,6 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
           xi -= static_cast<Real>(ii);
           Real xj = (lt - lmint) / dlt;
           int jj = std::floor(xj);
-
           while ((jj<ntem-2) && (temp_grid(jj+1) < temp)){
             jj++;
           }
@@ -334,26 +298,67 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
             jj = ntem-2;
           }
           xj = (temp-temp_grid(jj))/(temp_grid(jj+1)-temp_grid(jj));
+          for(int l=0; l<nfre; ++l) {
+            opact(k,j,i,l) = (1.-xi)*( (1.-xj)*plan_tab(l,jj,ii)+xj*plan_tab(l,jj+1,ii) )
+              + xi*( (1.-xj)* plan_tab(l,jj,ii+1)+xj*plan_tab(l,jj+1,ii+1) );
+          }
+        }
+      }
+    }
 
-          //printf("%d %d %g %g\n",ii,jj,xi,xj);
+    // Compute emissivity table for each cell and frequncy
+    AthenaArray<Real> eta_nu_tab;
+    eta_nu_tab.NewAthenaArray(ncells3,ncells2,ncells1,nfre);
+    Real h = 6.62607015e-27;
+    for(int l=0; l<nfre; ++l) {
+      Real nup = fre_grid(l+1)/h;
+      Real num = fre_grid(l)/h;
+      for(int k=ks; k<=ke; ++k) {
+        for(int j=js; j<=je; ++j) {
+          for(int i=is; i<=ie; ++i) {
+            Real temp = tgas(k,j,i);
+            Real opp = opact(k,j,i,l);
+            Real opm;
+            if (l == 0)
+              opm = 0.;
+            else
+              opm = opact(k,j,i,l-1);
+            eta_nu_tab(k,j,i,l) = IntegrateEmission(temp,num,nup,opm,opp);
+          }
+        }
+      }
+    }
+
+    // Compute integratred emission table for each cell
+    emisst.NewAthenaArray(ncells3,ncells2,ncells1);
+    for(int k=ks; k<=ke; ++k) {
+      for(int j=js; j<=je; ++j) {
+        for(int i=is; i<=ie; ++i) {
+          emisst(k,j,i) = 0.;
+          for(int l=0; l<nfre; ++l) {
+            emisst(k,j,i) += 4.*PI*eta_nu_tab(k,j,i,l);
+          }
+        }
+      }
+    }
+
+    // Compute cumulative emission table for each cell
+    eta_cum_tab.NewAthenaArray(ncells3,ncells2,ncells1,nfre+1);
+    Real keverg = 1.602176634e-9;
+    for(int k=ks; k<=ke; ++k) {
+      for(int j=js; j<=je; ++j) {
+        for(int i=is; i<=ie; ++i) {
           eta_cum_tab(k,j,i,0) = 0.;
           for(int l=0; l<nfre; ++l) {
-            Real eta = (1.-xi) * ((1.-xj)*eta_nu_tab(l,jj,ii)+xj*eta_nu_tab(l,jj+1,ii))
-              + xi * ((1.-xj)*eta_nu_tab(l,jj,ii+1)+xj*eta_nu_tab(l,jj+1,ii+1));
-            eta_cum_tab(k,j,i,l+1) =  eta_cum_tab(k,j,i,l)+eta;
-            if ((Globals::my_rank == 0) && (k==ks) && (j == js) && (i == is)) {
-              printf("%d %g %g %g %g %g %g %g\n",l,fre_grid(l)/keverg,eta_cum_tab(k,j,i,l),
-                     eta,eta_nu_tab(l,jj,ii),eta_nu_tab(l,jj+1,ii),eta_nu_tab(l,jj,ii+1),
-                     eta_nu_tab(l,jj+1,ii+1));
-            }
+            eta_cum_tab(k,j,i,l+1) = eta_cum_tab(k,j,i,l)+eta_nu_tab(k,j,i,l);
+            //if ((Globals::my_rank == 0) && (k==ks) && (j == js) && (i == is)) {
+            //}
           }
-
           for(int l=0; l<nfre+1; ++l) {
             eta_cum_tab(k,j,i,l) /= eta_cum_tab(k,j,i,nfre);
-
-            if ((Globals::my_rank == 0) && (k==ks) && (j == js) && (i == is)) {
-              printf("%d %d %g %g\n",l,jj,fre_grid(l)/keverg,eta_cum_tab(k,j,i,l));
-            }
+            //if ((Globals::my_rank == 0) && (k==ks) && (j == js) && (i == is)) {
+            //  printf("%d %g %g\n",l,fre_grid(l)/keverg,eta_cum_tab(k,j,i,l));
+            //}
           }
         }
       }
@@ -382,7 +387,9 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin){
 
   // Read in opacity table
   FILE  *opac_file;
-  if ( (opac_file=fopen("out_opacity_table_nfreq32.txt","r"))==NULL) {
+  std::string opacity_filename = pin->GetString("problem", "opacity_filename");
+  if ( (opac_file=fopen(opacity_filename.c_str(),"r"))==NULL) {
+  //if ( (opac_file=fopen("out_opacity_table_nfreq32.txt","r"))==NULL) {
     std::stringstream msg;
     msg << "FATAL ERROR: Could not open out_opacity_table_nfreq16.txt." << std::endl;
     ATHENA_ERROR(msg);
@@ -399,12 +406,12 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin){
   ross_tab.NewAthenaArray(nfre,ntem,nrho);
   plan_tab.NewAthenaArray(nfre,ntem,nrho);
 
-  if (Globals::my_rank == 0)
-    printf("Frequency grid (keV):\n");
+  //if (Globals::my_rank == 0)
+  //  printf("Frequency grid (keV):\n");
   for(int i=1; i<=nfre; ++i){
     fscanf(opac_file,"%lf",&(fre_grid(i)));
-    if (Globals::my_rank == 0)
-      printf("%d %g\n",i,fre_grid(i));
+    //if (Globals::my_rank == 0)
+    //  printf("%d %g\n",i,fre_grid(i));
   }
   fre_grid(0) = fre_grid(1)*fre_grid(1)/fre_grid(2);
   // convert to erg
@@ -424,30 +431,24 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin){
   }
   // convert to kelvin
   Real kb = 1.380649e-16;
-  if (Globals::my_rank == 0)
-    printf("Temperature grid:\n");
+  //if (Globals::my_rank == 0)
+  //  printf("Temperature grid:\n");
   for(int i=0; i<ntem; ++i) {
     temp_grid(i) *= keverg/kb;
-    if (Globals::my_rank == 0)
-      printf("%d %g\n",i,temp_grid(i));
+    //if (Globals::my_rank == 0)
+    //  printf("%d %g\n",i,temp_grid(i));
   }
   lmint = std::log10(temp_grid(0));
   lmaxt = std::log10(temp_grid(ntem-1));
   dlt = (lmaxt-lmint)/static_cast<Real>(ntem-1);
-  /*if (Globals::my_rank == 0) {
-    printf("temp %g %g %g\n",lmint,lmaxt,dlt);
-    for(int i=1; i<ntem; ++i) {
-      printf("temp %g\n",temp_grid(i)/temp_grid(i-1));
-    }
-    }*/
 
   // density grid (g/cm^3)
-  if (Globals::my_rank == 0)
-    printf("Density Grid:\n");
+  //if (Globals::my_rank == 0)
+  //  printf("Density Grid:\n");
   for(int i=0; i<nrho; ++i) {
     fscanf(opac_file,"%lf",&(rho_grid(i)));
-    if (Globals::my_rank == 0)
-      printf("%d %g\n",i,rho_grid(i));
+    //if (Globals::my_rank == 0)
+    //  printf("%d %g\n",i,rho_grid(i));
   }
   lmind = std::log10(rho_grid(0));
   lmaxd = std::log10(rho_grid(nrho-1));
@@ -561,27 +562,29 @@ Real DensityProfile(Real x, Real xl, Real xh, Real taul, Real tauh, Real kap) {
   return taul/l0/kap*exp((xh-x)/l0);
 }
 
-void JMeanOpacity(MonteCarloBlock *pmcb, Photon *pphot, Real dl, int ip, int imom) {
+void JMeanOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+                  const PhotonFrameState &s) {
 
   int i1 = pphot->i1p[ip];
   int i2 = pphot->i2p[ip];
   int i3 = pphot->i3p[ip];
 
-  const Real c_cgs = 2.99792458e10;
-  Real weight = pphot->ep[ip]*pphot->wp[ip]*dl/c_cgs;
+  // energy and path length come from the frame this moment was enrolled with
+  Real weight = pphot->wp[ip]*s.e*s.dl/MCConstants::c_cgs;
   pmcb->moments_user(imom,i3,i2,i1) += weight*pphot->acp[ip];
 
 }
 
-void AverageEnergy(MonteCarloBlock *pmcb, Photon *pphot, Real dl, int ip, int imom) {
+void AverageEnergy(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+                  const PhotonFrameState &s) {
 
   int i1 = pphot->i1p[ip];
   int i2 = pphot->i2p[ip];
   int i3 = pphot->i3p[ip];
 
-  const Real c_cgs = 2.99792458e10;
-  Real weight = pphot->ep[ip]*pphot->wp[ip]*dl/c_cgs;
-  pmcb->moments_user(imom,i3,i2,i1) += weight*pphot->ep[ip];
+  // energy and path length come from the frame this moment was enrolled with
+  Real weight = pphot->wp[ip]*s.e*s.dl/MCConstants::c_cgs;
+  pmcb->moments_user(imom,i3,i2,i1) += weight*s.e;
 
 }
 
@@ -594,38 +597,10 @@ Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   int i1 = pphot->i1p[ip];
   int i2 = pphot->i2p[ip];
   int i3 = pphot->i3p[ip];
-  Real ld = log10(pmcb->rho(i3,i2,i1));
-  ld = (ld < lmind) ? lmind : ld;
-  ld = (ld > lmaxd) ? lmaxd : ld;
-  Real temp = pmcb->tgas(i3,i2,i1);
-  Real lt = log10(temp);
-  lt = (lt < lmint) ? lmint : lt;
-  lt = (lt > lmaxt) ? lmaxt : lt;
-  Real xi = (ld - lmind) / dld;
-  Real xj = (lt - lmint) / dlt;
   Real xk = (le - lmine) / dle;
-  int i = std::floor(xi);
   int k = std::floor(xk);
-  xi -= static_cast<Real>(i);
   xk -= static_cast<Real>(k);
-
-  int j = std::floor(xj);
-  while ((j<ntem-2) && (temp_grid(j+1) < temp)){
-    j++;
-  }
-  while ((j>0) && (temp_grid(j) > temp)){
-    j--;
-  }
-  if(j > ntem-2) {
-    j = ntem-2;
-  }
-  xj = (temp-temp_grid(j))/(temp_grid(j+1)-temp_grid(j));
-  Real opacl = (1.-xi) * ((1.-xj) * plan_tab(k,j,i) + xj * plan_tab(k,j+1,i))
-                 + xi  * ((1.-xj) * plan_tab(k,j,i+1) + xj * plan_tab(k,j+1,i+1));
-  Real opach = (1.-xi) * ((1.-xj) * plan_tab(k+1,j,i) + xj * plan_tab(k+1,j+1,i))
-                 + xi  * ((1.-xj) * plan_tab(k+1,j,i+1) + xj * plan_tab(k+1,j+1,i+1));
-
-  Real opac = (1.-xk) * opacl + xk * opach;
+  Real opac = (1.-xk) * opact(i3,i2,i1,k) + xk * opact(i3,i2,i1,k+1);
   //printf("%g %g\n",pphot->ep[ip]/1.6e-9,opac);
   return opac;
 
@@ -641,7 +616,9 @@ Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap) {
   Real dadnu = (ap-am)/(nup-num);
   Real lnu = std::log(num);
   Real sum = Planck(temp,num)*am*dlnu/h/2.;
-  for(int i=1; i<n-1; ++i) {
+  // Interior nodes run to n-1: the composite trapezoid rule over n intervals weights
+  // nodes 1..n-1 fully and the two endpoints by a half.
+  for(int i=1; i<n; ++i) {
     lnu += dlnu;
     Real nu = std::exp(lnu);
     Real alpha = dadnu*(nu-num)+am;
@@ -661,36 +638,9 @@ Real Planck(Real temp, Real nu) {
 
 }
 
-Real TableEmission(MonteCarloBlock *pmcb, int i3, int i2, int i1) {
+Real TableEmission(MonteCarloBlock *pmcb, int i3, int i2, int i1, int etype) {
 
-  Real ld = log10(pmcb->rho(i3,i2,i1));
-  ld = (ld < lmind) ? lmind : ld;
-  ld = (ld > lmaxd) ? lmaxd : ld;
-  Real temp = pmcb->tgas(i3,i2,i1);
-  Real lt = log10(temp);
-  lt = (lt < lmint) ? lmint : lt;
-  lt = (lt > lmaxt) ? lmaxt : lt;
-  Real xi = (ld - lmind) / dld;
-  Real xj = (lt - lmint) / dlt;
-
-  int i = std::floor(xi);
-  int j = std::floor(xj);
-
-  xi -= static_cast<Real>(i);
-  while ((j<ntem-2) && (temp_grid(j+1) < temp)){
-    j++;
-  }
-  while ((j>0) && (temp_grid(j) > temp)){
-    j--;
-  }
-  if(j > ntem-2) {
-    j = ntem-2;
-  }
-  xj = (temp-temp_grid(j))/(temp_grid(j+1)-temp_grid(j));
-
-  Real eta = (1.-xi) * ((1.-xj) * eta_tab(j,i) + xj * eta_tab(j+1,i))
-               + xi  * ((1.-xj) * eta_tab(j,i+1) + xj * eta_tab(j+1,i+1));
-  return eta;
+  return emisst(i3,i2,i1);
 }
 
 

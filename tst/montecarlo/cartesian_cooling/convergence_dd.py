@@ -170,7 +170,7 @@ def write_athinput(iseed,nphot,vel,frame,dens,tgas,emin,emax,length,periodic,
         outfile.write("scattering = none\n")
     outfile.write("emission   = freefree\n")
     outfile.write("absorption = freefree\n")
-    outfile.write("polarized = false\n")
+    outfile.write("polarized = none\n")
     outfile.write("comptonio = 0\n")
     if boosts:
         outfile.write("boosts     = true\n")
@@ -221,7 +221,6 @@ def main(**kwargs):
     er0 = float(4.*np.pi*planck_int/c)
     fr0 = 0.
 
-    print(kwargs['vel'])
     if ((kwargs['vel'] is not None) and (kwargs['frame'] == 'eulerian')):
         beta = kwargs['vel']
         gamma=1./(1.-beta**2)**0.5
@@ -266,6 +265,11 @@ def main(**kwargs):
         kapj = data_usr['kapJ']/ermc/dens
         kapj_ave = np.average(kapj)
         cool = np.average(data_src['Cooling'])
+        # zone-by-zone mean absolute cooling, so that column 3 is directly
+        # comparable to the analytic estimate in column 4.  Averaging the signed
+        # Cooling array first (as `cool` does, for the summary print below) cancels
+        # to ~zero in a uniform box and is not a convergence measure.
+        cool_abs = np.average(abs(data_src['Cooling']))
         cdot, cdot_tgas = cooling(data_lab['tgas'],data_lab['rho'],data_lab['Ermc'],
                                   eave,kapj,emin,emax,scatflag=scatflag)
         cdot_ave = np.average(cdot)
@@ -273,7 +277,7 @@ def main(**kwargs):
 
         output[i,1] = np.average(abs(ermc-er))/er
         output[i,2] = np.average(abs(kapj-kappap))/kappap
-        output[i,3] = np.average(abs(cool))/eta
+        output[i,3] = cool_abs/eta
         output[i,4] = np.average(abs(cdot))/eta
         output[i,5] = np.average(abs(eave-(3.83223*kb*tgas)))/(3.83223*kb*tgas)
 

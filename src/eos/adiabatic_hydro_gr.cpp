@@ -23,6 +23,7 @@
 #include "eos.hpp"
 
 namespace {
+
 // Declarations
 void CalculateNormalConserved(
     const AthenaArray<Real> &cons, const AthenaArray<Real> &g,
@@ -146,29 +147,18 @@ void EquationOfState::ConservedToPrimitive(
           normal_mm_(3,i) *= factor;
           fixed = true;
         }
-        if ( (pmy_block_->gid == 61)&&(k==5)&&(j==37)&&(i==5) ) {
-          printf("h: %d %d %d %g %g ",k,j,i,normal_dd_(i),normal_ee_(i));
-          printf("h2: %d %d %d %g %g ",k,j,i,prim_old(IPR,k,j,i),prim_old(IDN,k,j,i));
-        }
         // Set primitives
         Real gamma;
         bool success = ConservedToPrimitiveNormal(normal_dd_, normal_ee_, normal_mm_,
                                                   gamma_adi, prim_old(IPR,k,j,i), k, j, i,
                                                   prim, &gamma);
 
-        if ( (pmy_block_->gid == 61)&&(k==5)&&(j==37)&&(i==5) ) {
-          printf("g: %g %g \n",prim(IDN,k,j,i),prim(IPR,k,j,i));
-          printf("g2: %g %g \n",prim_old(IDN,k,j,i),prim_old(IPR,k,j,i));
-        }
         // Handle failures
         if (!success) {
           for (int n = 0; n < NHYDRO; ++n) {
             prim(n,k,j,i) = prim_old(n,k,j,i);
           }
           fixed = true;
-          if ( (pmy_block_->gid == 61)&&(k==5)&&(j==37)&&(i==5) ) {
-            printf("q: %g %g \n",prim(IDN,k,j,i),prim(IPR,k,j,i));
-          }
         }
 
         // Apply density and gas pressure floors in normal frame
@@ -177,9 +167,6 @@ void EquationOfState::ConservedToPrimitive(
         Real pgas_add = std::max(pressure_floor_local-prim(IPR,k,j,i),
                                                 static_cast<Real>(0.0));
         if (success && (rho_add > 0.0 || pgas_add > 0.0)) {
-          if ( (pmy_block_->gid == 61)&&(k==5)&&(j==37)&&(i==5) ) {
-            printf("p: %g %g \n",prim(IDN,k,j,i),prim(IPR,k,j,i));
-          }
           // Adjust conserved density and energy
           Real wgas_add = rho_add + gamma_adi/(gamma_adi-1.0) * pgas_add;
           normal_dd_(i) += rho_add * gamma;
@@ -247,10 +234,6 @@ void EquationOfState::ConservedToPrimitive(
           pgas = pressure_floor_local;
           uu1 = uu2 = uu3 = 0.0;
         }
-
-	if ( (pmy_block_->gid == 61)&&(k==5)&&(j==37)&&(i==5) ) {
-	  printf("ac2p: %g %g \n",prim(IDN,k,j,i),prim(IPR,k,j,i));
-	}
         // Ensure conserved variables match primitives
         if (fixed) {
           PrimitiveToConservedSingle(prim, gamma_adi, g_, g_inv_, k, j, i, cons, pco);
@@ -483,14 +466,6 @@ bool ConservedToPrimitiveNormal(
     const AthenaArray<Real> &dd_vals, const AthenaArray<Real> &ee_vals,
     const AthenaArray<Real> &mm_vals, Real gamma_adi, Real pgas_old, int k, int j, int i,
     AthenaArray<Real> &prim, Real *p_gamma_lor) {
-  // Parameters
-  const int max_iterations = 15;
-  const Real tol = 1.0e-12;
-  const Real pgas_uniform_min = 1.0e-12;
-  const Real a_min = 1.0e-12;
-  const Real v_sq_max = 1.0 - 1.0e-12;
-  const Real rr_max = 1.0 - 1.0e-12;
-
   // Extract conserved values
   const Real &dd = dd_vals(i);
   const Real &ee = ee_vals(i);
@@ -498,6 +473,26 @@ bool ConservedToPrimitiveNormal(
   const Real &mm1 = mm_vals(1,i);
   const Real &mm2 = mm_vals(2,i);
   const Real &mm3 = mm_vals(3,i);
+
+  // Parameters.  Upstream fixes the pressure floor, the iteration tolerance and the cubic
+  // guard at 1e-12 in code units, which presumes an energy density of order unity.  A
+  // snapshot read in other units can put whole regions at or below that pressure, and
+  // every such cell then fails to converge (the test below needs pgas > pgas_min) and is
+  // handed back floored with zero velocity; cells within a decade above it converge to a
+  // tolerance that is a large fraction of their pressure.  In a Monte Carlo build, where
+  // the primitives come from a file in whatever units it was written in, the three scale
+  // with the cell's normal-frame energy density instead, so the inverter behaves as it
+  // would in units where that density is one, and the convergence test becomes relative
+  // to the pressure itself, floored at the roundoff of wgas - rho, which is what limits
+  // the pressure of cold gas.  Builds without the module keep the upstream constants.
+  const int max_iterations = 15;
+  const Real ee_scale = MONTE_CARLO_ENABLED ? ee : 1.0;
+  const Real pgas_uniform_min = 1.0e-12 * ee_scale;
+  const Real a_min = 1.0e-12 * ee_scale;
+  const Real tol_abs = (MONTE_CARLO_ENABLED ? 1.0e-14 : 1.0e-12) * ee_scale;
+  const Real tol_rel = MONTE_CARLO_ENABLED ? 1.0e-12 : 0.0;
+  const Real v_sq_max = 1.0 - 1.0e-12;
+  const Real rr_max = 1.0 - 1.0e-12;
 
   // Calculate functions of conserved quantities
   Real pgas_min = -ee;
@@ -530,11 +525,11 @@ bool ConservedToPrimitiveNormal(
 
     // Step 3: Check for convergence
     if (n%3 != 2) {
-      if (pgas[(n+1)%3] > pgas_min && std::abs(pgas[(n+1)%3]-pgas[n%3]) < tol) {
+      if (pgas[(n+1)%3] > pgas_min && std::abs(pgas[(n+1)%3]-pgas[n%3])
+                                       < std::max(tol_abs, tol_rel*pgas[(n+1)%3])) {
         break;
       }
     }
-
     // Step 4: Calculate Aitken accelerant and check for convergence
     if (n%3 == 2) {
       Real rr = (pgas[2] - pgas[1]) / (pgas[1] - pgas[0]);  // (NH 7.1)
@@ -543,7 +538,8 @@ bool ConservedToPrimitiveNormal(
       }
       pgas[0] = pgas[1] + (pgas[2] - pgas[1]) / (1.0 - rr);  // (NH 7.2)
       pgas[0] = std::max(pgas[0], pgas_min);
-      if (pgas[0] > pgas_min && std::abs(pgas[0]-pgas[2]) < tol) {
+      if (pgas[0] > pgas_min && std::abs(pgas[0]-pgas[2])
+                                < std::max(tol_abs, tol_rel*pgas[0])) {
         break;
       }
     }

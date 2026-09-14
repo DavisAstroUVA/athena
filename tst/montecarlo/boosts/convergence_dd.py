@@ -27,7 +27,7 @@ def bnu_int(en,tgas):
         return (en**3*np.log(1.-x)-3.*kt*en**2*polylog(2,x)
                 -6.*en*kt**2*polylog(3,x)-6*kt**3*polylog(4,x))
 
-def write_athinput(iseed,nphot,vel,frame,dens,tgas,emin,emax,absmeth='weight',
+def write_athinput(iseed,nphot,vel,dens,tgas,emin,emax,absmeth='weight',
                    scattering=False,file='athinput.mciso'):
     """
     Write the remainder of the athinput file for convergence test
@@ -98,8 +98,7 @@ def write_athinput(iseed,nphot,vel,frame,dens,tgas,emin,emax,absmeth='weight',
         outfile.write("scattering = none\n")
     outfile.write("emission   = freefree\n")
     outfile.write("absorption = freefree\n")
-    outfile.write("polarized = false\n")
-    outfile.write("checkmove = 100000\n")
+    outfile.write("polarized = none\n")
     outfile.write("abs_method = "+absmeth+"\n")
     if boosts:
         outfile.write("boosts     = true\n")
@@ -171,7 +170,7 @@ def main(**kwargs):
     else:
         res = np.zeros((nstep,12))
     for i,nphot in enumerate(nphots):
-        write_athinput(iseed+99*i,nphot,kwargs['vel'],kwargs['frame'],dens,tgas,emin,emax,
+        write_athinput(iseed+99*i,nphot,kwargs['vel'],dens,tgas,emin,emax,
                        scattering=kwargs['scat'],absmeth=kwargs['absmeth'],file=infile)
         if (mcranks == 1):
             com=athena_path+"/athena -i athinput.mciso"
@@ -238,7 +237,7 @@ def main(**kwargs):
         if boosts:
             print(" Comoving moments:")
             print(" Averages: Er: {:e}, Fr1 {:e}, Fr2 {:e}, Fr3 {:e}".format(res[i,12],
-                  res[i,13],res[i,16],res[i,15]))
+                  res[i,13],res[i,14],res[i,15]))
             print(" Convergence: Er: {:e}, Fr1 {:e}, Fr2 {:e}, Fr3 {:e}".format(
                   res[i,16],res[i,17], res[i,18], res[i,19]))
 # Execute main function
@@ -276,9 +275,6 @@ if __name__ == '__main__':
         type = float,
         default = 1.e5,
         help='gas temperature')
-    parser.add_argument('--frame',
-        default = "eulerian",
-        help='boost velocity')
     parser.add_argument('--scat',
         action = 'store_true',
         help='use thomson scattering')

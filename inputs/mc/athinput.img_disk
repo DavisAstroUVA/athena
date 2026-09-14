@@ -43,12 +43,11 @@ iseed     = 121500
 scattering = none
 emission   = none
 absorption = none
-polarized = true
+polarized = linear
 stepsize = 1.0e-3
 varystep = true
 raytrace = true
 boyerlindquist = true
-checkmove = 1000000
 
 <problem>
 backward  = true

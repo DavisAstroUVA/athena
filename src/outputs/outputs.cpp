@@ -815,6 +815,20 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
         num_vars_++;
       }
     }
+    if (output_params.variable.compare("mccoord") == 0 ||
+        output_params.variable.compare("Ermc_coord") == 0) {
+      AthenaArray<Real> moments;
+      for (int n = 0; n < ntype; ++n) {
+        moments.InitWithShallowSlice(pmcb->moments_coord,5,n,13);
+        std::string name = (ntype == 1) ? "Ermc_coord" : "Ermc_coord_" + std::to_string(n);
+        pod = new OutputData;
+        pod->type = "SCALARS";
+        pod->name = name;
+        if (pmb != nullptr) pod->data.InitWithShallowSlice(moments,4,MCIER,1);
+        AppendOutputDataNode(pod);
+        num_vars_++;
+      }
+    }
     // monte carlo radiation flux vector lab frame
     if (output_params.variable.compare("mclab") == 0 ||
         output_params.variable.compare("Frmc") == 0) {
@@ -837,6 +851,20 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
       for (int n = 0; n < ntype; ++n) {
         moments.InitWithShallowSlice(pmcb->moments_com,5,n,13);
         std::string name = (ntype == 1) ? "Frmc_com" : "Frmc_com_" + std::to_string(n) + "_";
+        pod = new OutputData;
+        pod->type = "VECTORS";
+        pod->name = name;
+        if (pmb != nullptr) pod->data.InitWithShallowSlice(moments,4,MCIFR1,3);
+        AppendOutputDataNode(pod);
+        num_vars_+=3;
+      }
+    }
+    if (output_params.variable.compare("mccoord") == 0 ||
+        output_params.variable.compare("Frmc_coord") == 0) {
+      AthenaArray<Real> moments;
+      for (int n = 0; n < ntype; ++n) {
+        moments.InitWithShallowSlice(pmcb->moments_coord,5,n,13);
+        std::string name = (ntype == 1) ? "Frmc_coord" : "Frmc_coord_" + std::to_string(n) + "_";
         pod = new OutputData;
         pod->type = "VECTORS";
         pod->name = name;
@@ -875,6 +903,20 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
         num_vars_ += 9;
       }
     }
+    if (output_params.variable.compare("mccoord") == 0 ||
+        output_params.variable.compare("Prmc_coord") == 0) {
+      AthenaArray<Real> moments;
+      for (int n = 0; n < ntype; ++n) {
+        moments.InitWithShallowSlice(pmcb->moments_coord,5,n,13);
+        std::string name = (ntype == 1) ? "Prmc_coord" : "Prmc_coord_" + std::to_string(n) + "_";
+        pod = new OutputData;
+        pod->type = "TENSORS";
+        pod->name = name;
+        if (pmb != nullptr) pod->data.InitWithShallowSlice(moments,4,MCIPR11,9);
+        AppendOutputDataNode(pod);
+        num_vars_ += 9;
+      }
+    }
     // monte carlo scattering sourcterms 
     if (output_params.variable.compare("mcscat") == 0){
       for (int n = 0; n < pmcb->nf_scat; ++n) {
@@ -884,6 +926,18 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
         pod->type = "SCALARS";
         pod->name = name;
         pod->data.InitWithShallowSlice(pmcb->moments_scat, 4, n, 1);
+        AppendOutputDataNode(pod);
+        num_vars_++;
+      }
+    }
+    if (output_params.variable.compare("mcscat") == 0){
+      for (int n = 0; n < pmcb->nf_scat; ++n) {
+        char name[16];
+        std::snprintf(name, sizeof(name), "sscat_err%d", n);
+        pod = new OutputData;
+        pod->type = "SCALARS";
+        pod->name = name;
+        pod->data.InitWithShallowSlice(pmcb->moments_scat_error, 4, n, 1);
         AppendOutputDataNode(pod);
         num_vars_++;
       }
@@ -1089,7 +1143,7 @@ void Outputs::MakeOutputs(Mesh *pm, MonteCarlo *pmc, ParameterInput *pin, bool w
   MakeOutputs(pm,pin,wtflag);
   if (!pmc->dynamic)
     pmc->NormalizeDomainOutputs(false); // un-normalize
-  pmc->pmcout->MakeOutputs(false);
+  pmc->pmcout->MakeOutputs(wtflag);
 }
 
 //----------------------------------------------------------------------------------------

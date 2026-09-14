@@ -49,19 +49,24 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
 
     // get number of mean free paths photon will travel
     Real tauremaining = GetOpticalDepth(pran);
-    Real tau0 = tauremaining;
 
     Real& kx = pphot->k1p[ip];
     Real& ky = pphot->k2p[ip];
     Real& kz = pphot->k3p[ip];
 
+    // Steps already taken in this free flight, plus the ones taken here.  Counted in a
+    // local so it stays in a register across a body that calls out to functions the
+    // compiler must assume could alias the photon arrays.
+    const int nmv0 = pphot->nmvp[ip];
     int iter = 0;
 
-    // checkmove is needed to account for (near) infinite trajectories that can occur
-    // in optically thin, periodic domains.
-
-    while( (tauremaining > 0.) && (pphot->statp[ip] == EVOLVING) && (iter < checkmove) &&
+    while( (tauremaining > 0.) && (pphot->statp[ip] == EVOLVING) &&
            (pphot->dtp[ip] > 0.) ) {
+      // Tested before the step is counted, so nmvp only ever counts steps actually taken.
+      if (capmove > 0 && nmv0 + iter >= capmove) {
+        pphot->statp[ip] = REMOVED;
+        break;
+      }
       iter++;
 
       // Compute distance to all faces
@@ -105,7 +110,7 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
       // set total extinction coefficient
       Real chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
 
-      if ((chi > 0.) && (dl*l_cgs > tauremaining / chi)) { // Photon remains in zone
+      if ((chi > 0.) && (dl*l_cgs > tauremaining / chi)) { // Photon remains in cell
         bool accel_success = false;
         if (acceleration) {
           Real dist;
@@ -128,7 +133,7 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
         if (!accel_success) {
           if (pphot->statp[ip] != EVOLVING)
             break;
-          // compute distance remaining in zone
+          // compute distance remaining in cell
           dl = tauremaining / chi / l_cgs;
           pphot->dtp[ip] -= dl / c_code; // SWD: set with k0p instead
 
@@ -145,7 +150,9 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
           }
           //pphot->wp[ip] *= etaua;
           // update position
-          pphot->x0p[ip] += pphot->k0p[ip] * dl;
+          // k0p is the photon energy, not a unit time component: the coordinate time
+          // advance over a path length dl is just dl (in units where c = 1).
+          pphot->x0p[ip] += dl;
           pphot->x1p[ip] += pphot->k1p[ip] * dl;
           pphot->x2p[ip] += pphot->k2p[ip] * dl;
           pphot->x3p[ip] += pphot->k3p[ip] * dl;
@@ -154,7 +161,7 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
         if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
         break;
 
-      } else { // Photon moves to next zone and reduce tauremaining
+      } else { // Photon moves to next cell and reduce tauremaining
         // Account for absorption (if needed) and update moments
         if (pmcb->call_moments) {
           Real dl_cgs = dl * l_cgs;
@@ -168,7 +175,9 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
         }
 
         // update position
-        pphot->x0p[ip] += pphot->k0p[ip] * dl;
+        // k0p is the photon energy, not a unit time component: the coordinate time
+          // advance over a path length dl is just dl (in units where c = 1).
+          pphot->x0p[ip] += dl;
         pphot->x1p[ip] += pphot->k1p[ip] * dl;
         pphot->x2p[ip] += pphot->k2p[ip] * dl;
         pphot->x3p[ip] += pphot->k3p[ip] * dl;
@@ -182,13 +191,20 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
       }
     }
 
-    if (iter >= checkmove) {
-      std::cout << "Warning: iter exceeded " << checkmove << " in photon pusher."
-                << std::endl;
-      std::cout << "tau: " << tau0 << " " << tauremaining << std::endl;
-      pphot->PrintPhoton(ip);
-      pphot->statp[ip] = DESTROYED;
-    }
+    // Retire a photon whose free flight has run past the cap.  nmvp carries across Move
+    // calls and blocks, which is what it takes to bound a flight; it is reset at each
+    // scattering, in TransferPhotonsOnBlock.
+    //
+    // This repeats the loop's test because the loop cannot make it on the step that
+    // matters: a photon leaving the block ends that step BUFFERED, so the loop exits on
+    // its own condition and never sees the final count.  Without this the photon goes
+    // on to the next block, possibly through an MPI message, only to be retired on its
+    // first step there.  Any other status is already terminal, REMOVED included, so this
+    // cannot fire twice.
+    pphot->nmvp[ip] = nmv0 + iter;
+    if (capmove > 0 && pphot->nmvp[ip] >= capmove &&
+        (pphot->statp[ip] == EVOLVING || pphot->statp[ip] == BUFFERED))
+      pphot->statp[ip] = REMOVED;
 
   } // loop over photons
 

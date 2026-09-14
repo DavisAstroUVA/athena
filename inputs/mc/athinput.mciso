@@ -56,7 +56,7 @@ iseed     = 125787
 scattering = none
 emission   = freefree
 absorption = freefree
-polarized = false
+polarized = none
 
 <problem>
 temp     = 1.0e5

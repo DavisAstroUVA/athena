@@ -92,7 +92,7 @@ def write_athinput(iseed,nphot,nen,emin,emax,file='athinput.mciso'):
     outfile.write("scattering = thomson\n")
     outfile.write("emission   = freefree\n")
     outfile.write("absorption = freefree\n")
-    outfile.write("polarized = true\n")
+    outfile.write("polarized = linear\n")
     #outfile.write("abs_method = tau\n")
     outfile.write("\n<problem>\n")
     outfile.write("temp     = 1.0e5\n")
@@ -158,24 +158,35 @@ def main(**kwargs):
         # average spectrum over phi
         intensity = spectrum['intensity']
         intens = np.sum(intensity[0,:,:,:],axis=0)/float(spectrum['nphi'])
-        qpol = -np.sum(intensity[1,:,:,:],axis=0)/float(spectrum['nphi'])
-        qpol /= intens
+        qpol = np.sum(intensity[1,:,:,:],axis=0)/float(spectrum['nphi'])
+        # Bins that collected no photons have intens == 0; the polarization
+        # fraction is undefined there, so mask them out rather than letting a
+        # nan poison the whole norm.
+        empty = (intens == 0.)
+        qpol = np.divide(qpol,intens,out=np.zeros_like(qpol),where=~empty)
 
         normi = 0.
-        normp = 0
+        normp = 0.
         n = 0
+        npol = 0
         for j in range(spectrum['nmu']):
             iinterp = area*interp_feaut(mumid[j],muf,intensf)
             pinterp = interp_feaut(mumid[j],muf,polf)
             for k in range(spectrum['nx']):
                 normi += abs(intens[j,k]-iinterp[k])/iinterp[k]
+                n += 1
+                if empty[j,k]:
+                    continue
                 # Use absolute error for normp since zero values
                 # are possible
                 normp += abs(qpol[j,k]-pinterp[k])
-                n += 1
+                npol += 1
+        if empty.any():
+            print("  {:d} of {:d} spectral bins were empty and are excluded"
+                  " from the polarization norm".format(int(empty.sum()),n))
         lnorm[i,0] = float(nphot)
         lnorm[i,1] = normi/float(n)
-        lnorm[i,2] = normp/float(n)
+        lnorm[i,2] = normp/float(npol) if npol > 0 else np.nan
 
     # save plot to outfile
     np.savetxt(kwargs['outfile'],lnorm)

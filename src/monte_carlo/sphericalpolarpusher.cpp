@@ -51,7 +51,6 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
 
     // get number of mean free paths photon will travel
     Real tauremaining = GetOpticalDepth(pran);
-    Real tau0 = tauremaining;
     // References for momentum vectors
     Real& kr  = pphot->k1p[ip];
     Real& kth = pphot->k2p[ip];
@@ -80,11 +79,21 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
     Real ky = kr*sth*sph + kth*cth*sph + kph*cph;
     Real kz = kr*cth - kth*sth;
 
+    // Steps already taken in this free flight, plus those taken here.  iter has to stay
+    // a per-Move count: the DEBUG_SM trace below indexes db[iter-1] into NBUFFER entries,
+    // and nmvp carries over from earlier Moves and blocks, so it would run off the end.
+    // Nothing would catch that, since DEBUG_SM is off by default.
+    const int nmv0 = pphot->nmvp[ip];
     int iter = 0;
 
     // Move photon until requisite # of mean free paths or escape
-    while( (tauremaining > 0.) && (pphot->statp[ip] == EVOLVING) && (iter < checkmove) &&
+    while( (tauremaining > 0.) && (pphot->statp[ip] == EVOLVING) &&
            (pphot->dtp[ip] > 0.) ) {
+      // Tested before the step is counted, so nmvp only ever counts steps actually taken.
+      if (capmove > 0 && nmv0 + iter >= capmove) {
+        pphot->statp[ip] = REMOVED;
+        break;
+      }
       iter++;
 
       // Compute cartesian positions
@@ -304,7 +313,7 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
       Real chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
 
       bool test = false;
-      if ((chi > 0.) && (dl * l_cgs > tauremaining / chi)) { // Photon remains in zone
+      if ((chi > 0.) && (dl * l_cgs > tauremaining / chi)) { // Photon remains in cell
         bool accel_success = false;
         if (acceleration) {
           Real dist = pco->dmin(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
@@ -324,7 +333,7 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
         if (!accel_success) {
           if (pphot->statp[ip] != EVOLVING)
             break; // break out of while loop
-          // compute distance remaining in zone
+          // compute distance remaining in cell
           dl = tauremaining / chi / l_cgs;
           pphot->dtp[ip] -= dl / c_code;;
           // Update moments
@@ -344,7 +353,9 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
           pphot->x3p[ip] = atan2(y0 + ky * dl,x0 + kx * dl);
           if (pphot->x3p[ip] < 0.)
             pphot->x3p[ip] += 2.*PI;
-          pphot->x0p[ip] += pphot->k0p[ip] * dl;
+          // k0p is the photon energy, not a unit time component: the coordinate time
+          // advance over a path length dl is just dl (in units where c = 1).
+          pphot->x0p[ip] += dl;
 
           // Update k vector
           cth = cos(pphot->x2p[ip]);
@@ -358,7 +369,7 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
         //if (ptraj != NULL) ptraj->AddToTrajectory(pphot,ip);
         if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
         break;
-      } else { // Photon moves to next zone and reduce tauremaining
+      } else { // Photon moves to next cell and reduce tauremaining
         // Update moments
         pphot->dtp[ip] -= dl / c_code;
 
@@ -378,10 +389,12 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
         pphot->x3p[ip] = atan2(y0 + ky * dl,x0 + kx * dl);
         if (pphot->x3p[ip] < 0.)
           pphot->x3p[ip] += 2.*PI;
-        pphot->x0p[ip] += pphot->k0p[ip] * dl;
+        // k0p is the photon energy, not a unit time component: the coordinate time
+          // advance over a path length dl is just dl (in units where c = 1).
+          pphot->x0p[ip] += dl;
 
         tauremaining -= chi * l_cgs * dl;
-        // move photon to next zone and update angular positions
+        // move photon to next cell and update angular positions
         MovePhotonToNextZone(pphot,pco,pmcb,face,ascend,ip);
         if ((face == 1) || (face == 3) || (face == 4) || (face == 6))
           thface = true;
@@ -395,42 +408,24 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
         //if (ptraj != NULL) ptraj->AddToTrajectory(pphot,ip);
       }
 
-      // CMF perform user work
       if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
+
     } // end while loop
 
-    // -------------------------- Debugging ----------------------------------------------
-    if (iter >= checkmove) {
-      std::stringstream msg;
-      msg << "Warning: iter exceeded " << checkmove << " in photon pusher.";
-      pphot->PrintPhoton(msg.str(),ip);
-#ifdef DEBUG_SM
-      int nmax = (NBUFFER > iter) ? iter : NBUFFER;
-      for (int i=0; i < nmax; ++i) {
-        // printf("dl: %16.12e %16.12e %16.12e %16.12e\n");
-        printf("--------------------------------\n %d\n",i);
-        printf("dl: %16.12e %16.12e %16.12e %16.12e\n",db[i].dl,db[i].dlr,db[i].dlt,
-               db[i].dlp);
-        printf("ang: %16.12e %16.12e %16.12e %16.12e\n", db[i].cth,db[i].sth,db[i].cph,
-               db[i].sph);
-        printf("k: %16.12e %16.12e %16.12e\n",db[i].kr,db[i].kth,db[i].kph);
-        printf("kc: %16.12e %16.12e %16.12e\n",db[i].kx,db[i].ky,db[i].kz);
-        printf("x: %16.12e %16.12e %16.12e\n",db[i].x,db[i].y,db[i].z);
-        printf("i: %d %d %d\n",db[i].i,db[i].j,db[i].k);
-        printf("ascend: %d %d %d\n",db[i].ascend[0],db[i].ascend[1],db[i].ascend[2]);
-        printf("l_ext: %g %g %g %g\n",db[i].l_ext,db[i].lm,db[i].lp,db[i].delta);
-        printf("xf: ");
-        if ((db[i].i >= pmcb->is) && (db[i].i <= pmcb->ie))
-          printf("%16.12e %16.12e ",pco->x1f(db[i].i),pco->x1f(db[i].i+1));
-        if ((db[i].j >= pmcb->js) && (db[i].j <= pmcb->je))
-          printf("%16.12e %16.12e ",pco->x2f(db[i].j),pco->x2f(db[i].j+1));
-        if ((db[i].k >= pmcb->ks) && (db[i].k <= pmcb->ke))
-          printf("%16.12e %16.12e ",pco->x3f(db[i].k),pco->x3f(db[i].k+1));
-        printf("\n");
-      }
-#endif
-      pphot->statp[ip] = DESTROYED;
-    } // iter >= checkmove
+    // Retire a photon whose free flight has run past the cap.  nmvp carries across Move
+    // calls and blocks, which is what it takes to bound a flight; it is reset at each
+    // scattering, in TransferPhotonsOnBlock.
+    //
+    // This repeats the loop's test because the loop cannot make it on the step that
+    // matters: a photon leaving the block ends that step BUFFERED, so the loop exits on
+    // its own condition and never sees the final count.  Without this the photon goes
+    // on to the next block, possibly through an MPI message, only to be retired on its
+    // first step there.  Any other status is already terminal, REMOVED included, so this
+    // cannot fire twice.
+    pphot->nmvp[ip] = nmv0 + iter;
+    if (capmove > 0 && pphot->nmvp[ip] >= capmove &&
+        (pphot->statp[ip] == EVOLVING || pphot->statp[ip] == BUFFERED))
+      pphot->statp[ip] = REMOVED;
 
   } // loop over ip
 

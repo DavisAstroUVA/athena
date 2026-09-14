@@ -184,11 +184,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 }
 
 //========================================================================================
-//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe)
+//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype)
 //! \brief Initializes Photon packets before integration
 //========================================================================================
 
-void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
+void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
   for (int ip=ips; ip<=ipe; ip++) {
 
@@ -214,7 +214,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
         pphot->ep[ip] = energy0;
 
       // Initialize Stokes vector
-      if (pphot->polarized) {
+      if (IsPolarized(pphot->polarized)) {
         pphot->sip[ip] = 1.0;
         pphot->sqp[ip] = 0.0;
         pphot->sup[ip] = 0.0;
@@ -232,7 +232,8 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
       pphot->k1p[ip] = sth*cphi;
       pphot->k2p[ip] = sth*sphi;
       pphot->k3p[ip] = cth;
-      pphot->k0p[ip] = 1. / 2.99792458e10;
+      // k0p is the photon energy (set via ep); the light-travel time bookkeeping
+      // below now divides by c explicitly instead of stashing 1/c in k0p.
 
       // Get initial position of photon
       if (srcdist) {
@@ -327,7 +328,7 @@ void SphericalEscape(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher
   if (r >= rad0) {
     Real dr = r-rad0;
     // assume cartesian for now
-    pphot->x0p[ip] -= pphot->k0p[ip]*dr;
+    pphot->x0p[ip] -= dr/2.99792458e10;
     pphot->x1p[ip] -= pphot->k1p[ip]*dr;
     pphot->x2p[ip] -= pphot->k2p[ip]*dr;
     pphot->x3p[ip] -= pphot->k3p[ip]*dr;
@@ -347,7 +348,7 @@ void TimedEscape(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher,
   if (r >= rad0) {
     Real dr = r-rad0;
     // assume cartesian for now
-    pphot->x0p[ip] -= pphot->k0p[ip]*dr;
+    pphot->x0p[ip] -= dr/2.99792458e10;
     pphot->x1p[ip] -= pphot->k1p[ip]*dr;
     pphot->x2p[ip] -= pphot->k2p[ip]*dr;
     pphot->x3p[ip] -= pphot->k3p[ip]*dr;
@@ -358,7 +359,7 @@ void TimedEscape(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher,
   // Then check time condition -- ensures time is not over estimated
   if (pphot->x0p[ip] >= time0) {
     Real dt = pphot->x0p[ip] - time0;
-    pphot->x0p[ip] -= pphot->k0p[ip]*dt*2.99792458e10;
+    pphot->x0p[ip] -= dt;
     pphot->x1p[ip] -= pphot->k1p[ip]*dt*2.99792458e10;
     pphot->x2p[ip] -= pphot->k2p[ip]*dt*2.99792458e10;
     pphot->x3p[ip] -= pphot->k3p[ip]*dt*2.99792458e10;

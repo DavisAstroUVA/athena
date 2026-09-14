@@ -10,9 +10,60 @@
 
 // Athena++ classes headers
 #include "../athena.hpp"
-#include "montecarlo.hpp"
 
 #define NCOORD 4
+
+// The enums below are defined ahead of the montecarlo.hpp include deliberately.  That
+// header includes this one and declares members of these types, so they have to be
+// complete before it is processed.
+
+//----------------------------------------------------------------------------------------
+//! \brief which metric the Monte Carlo module is integrating on.
+//!
+//! COORDINATE_SYSTEM is not fully determinant. e.g. "gr_user" does not uniquely specify
+//! the metric. MCCoordSystem names the metric outright; see
+//! MonteCarlo::SetCoordinateSystem for how it is resolved from the configure-time
+//! coordinate system plus <montecarlo>/mc_coord.
+
+enum MCCoordSystem {
+  MCCOORD_CARTESIAN = 0,
+  MCCOORD_CYLINDRICAL = 1,
+  MCCOORD_SPHERICAL_POLAR = 2,
+  MCCOORD_MINKOWSKI = 3,
+  MCCOORD_KERR_SCHILD = 4,
+  MCCOORD_BOYER_LINDQUIST = 5,
+  MCCOORD_KERR_SCHILD_CARTESIAN = 6,
+  MCCOORD_SNAKE = 7
+};
+
+//----------------------------------------------------------------------------------------
+//! \brief shape of the coordinate triple (x1,x2,x3), independent of the metric.
+//!
+//! The metric and the grid topology are separate concepts.
+//! Kerr-Schild in Cartesian form is a curved metric on an (x,y,z) grid, so code that
+//! orthonormalizes directions, converts wavevectors for output or bins escape angles has
+//! to branch on this rather than on MCCoordSystem.
+
+enum MCTopology {
+  MCTOPO_CARTESIAN = 0,
+  MCTOPO_CYLINDRICAL = 1,
+  MCTOPO_SPHERICAL = 2
+};
+
+//! \brief grid topology implied by a given metric
+MCTopology GetMCTopology(MCCoordSystem c);
+//! \brief true when the metric is not flat in the coordinates being integrated
+bool IsMCMetricCurved(MCCoordSystem c);
+//! \brief human-readable name, used in error messages and for <montecarlo>/mc_coord
+const char *GetMCCoordSystemName(MCCoordSystem c);
+//! \brief true when the run integrates geodesics in a relativistic spacetime
+bool IsMCRelativistic(MCCoordSystem c);
+//! \brief true when GeneralPusher is used regardless of <montecarlo>/general_pusher
+bool IsMCPusherAlwaysGeneral(MCCoordSystem c);
+//! \brief true when the flat scale factors orthonormalize the coordinate basis
+bool HasFlatOrthonormalBasis(MCCoordSystem c);
+
+#include "montecarlo.hpp"
 
 //----------------------------------------------------------------------------------------
 //! \class MCCoord
@@ -30,6 +81,31 @@ public:
   AthenaArray<Real> vol;
   AthenaArray<Real> dmin;
 
+  // For a general-relativistic run on the general pusher:
+  //
+  //   Metric                   LIVE.  RK4Step converts k^mu -> k_mu and back and
+  //                            renormalizes to k.k = 0; also ComovingFrameMatrix and
+  //                            PhotonFrames.
+  //   InverseMetric            LIVE.  RK4Step, for dx^mu/dl = g^{mu nu} k_nu.
+  //   InverseMetricDerivative  LIVE.  RK4Step, for dk_mu/dl = -1/2 d_mu g^{ab} k_a k_b.
+  //                            This is the geodesic right-hand side.
+  //   MetricDerivative         Not called by anything, in any coordinate system.
+  //   Connect                  LIVE whenever polarization is tracked.  The geodesic itself
+  //                            is Hamiltonian and uses metric derivatives, so this is
+  //                            reached only through GeneralPusher::ConnectionContraction,
+  //                            which builds A^i_k = Gamma^i_kl k^l for the coherency
+  //                            tensor transport.  An unpolarized run never calls it.
+  //                            Also used in VerletStep, which is compiled only with
+  //                            MC_VERLET_DK (photon.hpp); RK4Step is the integrator.
+  //   Tetrad, InverseTetrad    Only the non-GR branches of TransformToComoving and
+  //                            TransformToCoordinate, and the flat branch of
+  //                            PhotonFrames::Fill (gr_tetrad_ is false there).  A GR run
+  //                            goes through boost_lab/boost_cmv, built by ConstructTetrad
+  //                            from the metric, and never reaches these.
+  //
+  // Derived classes should still implement them correctly for now. VerletStep may be revived
+  // and the non-GR paths are live for cartesian and spherical_polar.
+
   virtual void Metric(Real x[4],Real gcov[4][4]);
   virtual void MetricDerivative(Real x[4],Real dgcov[4][4][4]);
   virtual void InverseMetric(Real x[4],Real gcon[4][4]);
@@ -37,6 +113,15 @@ public:
   virtual void Connect(Real x[4],Real gamma[4][4][4]);
   virtual void Tetrad(Real x[4], Real tetrad[4][4]);
   virtual void InverseTetrad(Real x[4], Real invtet[4][4]);
+
+  //! Fused evaluations for the general pusher's step loop, which wants these pairs at
+  //! the same point: the geodesic right-hand side needs g^{mu nu} and its derivative,
+  //! and the end of a step needs g_{mu nu} and g^{mu nu} together.  The defaults call
+  //! the two single-purpose functions above, in that order. Kerr-Schild overrides them
+  //! to compute the shared intermediates once per point.
+  virtual void MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4]);
+  virtual void InverseMetricAndDerivative(Real x[4], Real gcon[4][4],
+                                          Real dgcon[4][4][4]);
 
   Real GetMass() const {return bh_mass_;}
   Real GetSpin() const {return bh_spin_;}
@@ -112,7 +197,23 @@ public:
   void InverseMetric(Real x[4], Real gcov[4][4]);
   void Connect(Real x[4], Real gamma[4][4][4]);
   void InverseMetricDerivative(Real x[4], Real dgcon[4][4][4]);
+  void MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4]);
+  void InverseMetricAndDerivative(Real x[4], Real gcon[4][4], Real dgcon[4][4][4]);
 
+private:
+  //! the point quantities every metric function of this class is built from, computed
+  //! once by PointQuantities and consumed by the Fill* assemblers.  The single-purpose
+  //! functions and the fused ones share these, so a value can only be defined here.
+  struct Point {
+    Real a, a2, r, r2, sth, cth, sth2, cth2, s2th, c2th, sigma, sigma2, delta, A, alts;
+    // reciprocals taken once here; the assemblers multiply by them.  Divisions were most
+    // of the cost of the derivative and the connection under the profiler.
+    Real inv_sigma, inv_sigma2, inv_sigma3, inv_sth, inv_sth2;
+  };
+  void PointQuantities(const Real x[4], Point &p) const;
+  static void FillMetric(const Point &p, Real gcov[4][4]);
+  static void FillInverse(const Point &p, Real gcon[4][4]);
+  static void FillInverseDerivative(const Point &p, Real dgcon[4][4][4]);
 };
 
 //----------------------------------------------------------------------------------------
@@ -130,7 +231,25 @@ public:
   void InverseMetric(Real x[4], Real gcov[4][4]);
   void Connect(Real x[4], Real gamma[4][4][4]);
   void InverseMetricDerivative(Real x[4], Real dgcon[4][4][4]);
+  void MetricAndInverse(Real x[4], Real gcov[4][4], Real gcon[4][4]);
+  void InverseMetricAndDerivative(Real x[4], Real gcon[4][4], Real dgcon[4][4][4]);
 
+private:
+  //! the point quantities of g = eta + f l l: the Kerr radius, f and the spatial null
+  //! vector, and, when PointDerivatives has run, their gradients.  Shared by the
+  //! single-purpose functions and the fused ones so that each formula has one home.
+  struct Point {
+    Real a, m, a2, rr2, r2, r, f, l1, l2, l3;
+    // reciprocals taken once: 1/(r^2+a^2), 1/r, 1/(r^4 + a^2 z^2)
+    Real inv_ra2, inv_r, inv_den;
+    Real dr_dx, dr_dy, dr_dz, df_dx, df_dy, df_dz;
+    Real dl1_dx, dl1_dy, dl1_dz, dl2_dx, dl2_dy, dl2_dz, dl3_dx, dl3_dy, dl3_dz;
+  };
+  void PointQuantities(const Real x[4], Point &p) const;
+  void PointDerivatives(const Real x[4], Point &p) const;
+  static void FillMetric(const Point &p, Real gcov[4][4]);
+  static void FillInverse(const Point &p, Real gcon[4][4]);
+  static void FillInverseDerivative(const Point &p, Real dgcon[4][4][4]);
 };
 
 //----------------------------------------------------------------------------------------
@@ -147,6 +266,55 @@ public:
   void Metric(Real x[4], Real gcov[4][4]);
   void InverseMetric(Real x[4], Real gcov[4][4]);
   void Connect(Real x[4], Real gamma[4][4][4]);
+
+};
+
+//----------------------------------------------------------------------------------------
+//! \class MCSnake
+//! \brief derived class for sinusoidal ("snake") coordinates
+//!
+//! Flat spacetime written in the sheared coordinates of White, Stone & Gammie (2016),
+//! ApJS 225, 22: y = y_M + a sin(k x_M) with the other three unchanged.  Writing
+//! beta = a k cos(k x),
+//!
+//!   g_tt = -1, g_xx = 1 + beta^2, g_xy = g_yx = -beta, g_yy = g_zz = 1
+//!
+//! Three properties make it a good test geometry.  sqrt(-g) = 1 exactly, so cell volumes
+//! match the Cartesian ones and volume normalization drops out of any comparison.  The
+//! lapse is unity, so the normal observer is the coordinate-time observer and the lab and
+//! coordinate moment bases must agree exactly.  And exactly one Christoffel symbol is
+//! non-zero, Gamma^y_xx = a k^2 sin(k x), with geodesics that are straight lines in the
+//! underlying Minkowski coordinates -- a closed-form answer to check the integrator
+//! against, which Kerr-Schild cannot provide.
+//!
+//! It is also the only supported metric whose coordinate basis is not orthogonal
+//! (g_xy != 0), so it is the first thing to exercise the off-diagonal Tetrad path.
+
+class MCSnake : public MCCoord {
+public:
+  MCSnake(Coordinates *pcoord, MonteCarloBlock *pmcb);
+  MCSnake(int ncells1, int ncells2, int ncells3, bool acc);
+  ~MCSnake();
+
+  // functions
+  void Metric(Real x[4], Real gcov[4][4]);
+  void InverseMetric(Real x[4], Real gcon[4][4]);
+  void MetricDerivative(Real x[4], Real dgcov[4][4][4]);
+  void InverseMetricDerivative(Real x[4], Real dgcon[4][4][4]);
+  void Connect(Real x[4], Real gamma[4][4][4]);
+  void Tetrad(Real x[4], Real tetrad[4][4]);
+  void InverseTetrad(Real x[4], Real invtet[4][4]);
+
+  //! amplitude and wavenumber of the shear; <coord>/snake_a and <coord>/snake_k.
+  //! Deliberately not <coord>/a: gr_user already requires that name for the black hole
+  //! spin, which GRUser reads unconditionally.
+  void SetSnakeParams(Real a, Real k) {snake_a_ = a; snake_k_ = k;}
+  Real GetSnakeAmplitude() const {return snake_a_;}
+  Real GetSnakeWavenumber() const {return snake_k_;}
+
+protected:
+  Real snake_a_;
+  Real snake_k_;
 
 };
 

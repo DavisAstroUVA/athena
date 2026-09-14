@@ -115,11 +115,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
 
 //========================================================================================
-//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe)
+//! \fn void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype)
 //! \brief Initializes Photon packets before integration
 //========================================================================================
 
-void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
+void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
 
   // Get meshblock dimensions
@@ -149,8 +149,8 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
     Real cth = 2. * pran->uniform() - 1.;
     Real sth = sqrt(1. - SQR(cth));
 
-    // Initialize wave vector with isotropic distribution
-    pphot->k0p[ip] = 1.;
+    // Initialize wave vector with isotropic distribution.  k0p carries the photon
+    // energy and is set via ep, so only the spatial components are set here.
     pphot->k1p[ip] = sth*cph;
     pphot->k2p[ip] = sth*sph;
     pphot->k3p[ip] = cth;
@@ -166,7 +166,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe) {
     }
 
     // Initialize Stokes vector
-    if (pphot->polarized) {
+    if (IsPolarized(pphot->polarized)) {
       pphot->sip[ip] = 1.0;
       pphot->sqp[ip] = 0.0;
       pphot->sup[ip] = 0.0;

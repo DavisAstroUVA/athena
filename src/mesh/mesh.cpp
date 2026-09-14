@@ -49,6 +49,7 @@
 #include "../reconstruct/reconstruction.hpp"
 #include "../scalars/scalars.hpp"
 #include "../utils/buffer_utils.hpp"
+#include "../monte_carlo/mcgrid.hpp"
 #include "../monte_carlo/montecarlo.hpp"
 #include "mesh.hpp"
 #include "mesh_refinement.hpp"
@@ -372,6 +373,12 @@ Mesh::Mesh(ParameterInput *pin, int mesh_test) :
   if (EOS_TABLE_ENABLED) peos_table = new EosTable(pin);
   InitUserMeshData(pin);
 
+  // A Monte Carlo run may take its grid from an athdf snapshot, in which case the block
+  // tree is replayed from the file rather than derived from <refinement> blocks.  Null
+  // for every other run, including a Monte Carlo run that describes its own grid.
+  MCGridFile *pmcgrid = nullptr;
+  if (MONTE_CARLO_ENABLED) pmcgrid = MCGridFile::Loaded();
+
   if (multilevel) {
     if (block_size.nx1 % 2 == 1 || (block_size.nx2 % 2 == 1 && f2)
         || (block_size.nx3 % 2 == 1 && f3)) {
@@ -381,7 +388,20 @@ Mesh::Mesh(ParameterInput *pin, int mesh_test) :
       ATHENA_ERROR(msg);
     }
 
-    InputBlock *pib = pin->pfirst_block;
+    // Replay the tree recorded in the snapshot.  An athdf file lists an arbitrary set of
+    // leaves, which no collection of <refinement> regions can express in general, so this
+    // takes the same route the restart constructor does rather than the region search
+    // below.  MeshBlockTree::AddMeshBlockWithoutRefine accepts the leaves in any order.
+    if (pmcgrid != nullptr) {
+      for (int i = 0; i < pmcgrid->nbtotal; ++i) {
+        tree.AddMeshBlockWithoutRefine(pmcgrid->loclist[i]);
+        if (pmcgrid->loclist[i].level > current_level)
+          current_level = pmcgrid->loclist[i].level;
+      }
+    }
+
+    // <refinement> blocks describe the tree only when it did not come from a file
+    InputBlock *pib = (pmcgrid == nullptr) ? pin->pfirst_block : nullptr;
     while (pib != nullptr) {
       if (pib->block_name.compare(0, 10, "refinement") == 0) {
         RegionSize ref_size;
@@ -526,6 +546,12 @@ Mesh::Mesh(ParameterInput *pin, int mesh_test) :
   loclist = new LogicalLocation[nbtotal];
   tree.GetMeshBlockList(loclist, nullptr, nbtotal);
   nrankmx = Globals::nranks;
+
+  // Match the file's blocks to the gids just assigned, now that loclist is in tree order.
+  // Done here rather than after the constructor returns so the mapping is never absent
+  // while the Mesh is usable: MCGridFile::FileIndex falls back to the identity until it
+  // is built, which is right for a uniform grid and wrong for a refined one.
+  if (pmcgrid != nullptr) pmcgrid->MapBlocks(loclist, nbtotal);
 
 #ifdef MPI_PARALLEL
   // check if there are sufficient blocks
@@ -1624,9 +1650,17 @@ void Mesh::Initialize(int res_flag, ParameterInput *pin) {
           if (pbval->nblevel[0][1][1] != -1) kl -= NGHOST;
           if (pbval->nblevel[2][1][1] != -1) ku += NGHOST;
         }
+        // This used to be skipped for general-relativistic Monte Carlo builds, because a
+        // snapshot in code units that put many cells at or below a pressure of 1e-12 had
+        // those cells fail the GR inversion and come back floored.  The inverter's
+        // tolerances now scale with the local energy density in a Monte Carlo build (see
+        // ConservedToPrimitiveNormal in eos/adiabatic_hydro_gr.cpp), so the primitives
+        // read from a file survive the round trip and the ghost zones are filled from the
+        // exchanged conserved variables like everywhere else.
         pmb->peos->ConservedToPrimitive(ph->u, ph->w1, pf->b,
                                         ph->w, pf->bcc, pmb->pcoord,
                                         il, iu, jl, ju, kl, ku);
+
         if (NSCALARS > 0) {
           // r1/r_old for GR is currently unused:
           pmb->peos->PassiveScalarConservedToPrimitive(ps->s, ph->u, ps->r, ps->r,

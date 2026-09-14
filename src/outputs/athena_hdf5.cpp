@@ -168,11 +168,17 @@ void ATHDF5Output::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool flag) {
     num_variables = new int[num_datasets];
     int n_dataset = 0;
     num_variables[n_dataset] = 2 + 13 * ntype; // 2+1+3+9
-  } else if (variable.compare("mccom") == 0) {
+  } else if (variable.compare("mccom") == 0 || variable.compare("mccoord") == 0) {
+    // One Ermc, three Frmc and nine Prmc per emission type.  This has to match the
+    // number of variable names built below, because the write buffer is sized from
+    // num_variables while the dataspace is sized from num_vars_; a short count here is a
+    // heap overflow rather than a wrong label.  It was previously a bare 13, which
+    // undercounted by a factor of ntype whenever more than one emission type was in use.
+    int ntype = pmb->pmy_mcb->pmy_mc->ntype;
     num_datasets = 1;
     num_variables = new int[num_datasets];
     int n_dataset = 0;
-    num_variables[n_dataset] = 13; // 1+3+9
+    num_variables[n_dataset] = 13 * ntype; // 1+3+9 per type
   } else if (variable.compare("mcsrc") == 0) {
     num_datasets = 1;
     num_variables = new int[num_datasets];
@@ -183,7 +189,7 @@ void ATHDF5Output::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool flag) {
     num_variables = new int[num_datasets];
     int n_dataset = 0;
     int nf_scat = pin->GetInteger("montecarlo","nf_scat");
-    num_variables[n_dataset] = nf_scat;
+    num_variables[n_dataset] = 2*nf_scat;
   } else {
     num_datasets = 1;
     num_variables = new int[num_datasets];
@@ -201,8 +207,15 @@ void ATHDF5Output::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool flag) {
       std::strncpy(dataset_names[n_dataset_names++], "cons", max_name_length+1);
     if (MAGNETIC_FIELDS_ENABLED)
       std::strncpy(dataset_names[n_dataset_names++], "B", max_name_length+1);
-  } else if (variable.compare("mcmom") == 0) {
-    std::strncpy(dataset_names[n_dataset_names++], "mcmom", max_name_length+1);
+  } else if (variable.compare("mclab") == 0 || variable.compare("mccom") == 0
+             || variable.compare("mccoord") == 0) {
+    // Name the dataset after the basis the moments are reported in.  This branch used to
+    // test for "mcmom", a name nothing produces -- it predates the split into separate
+    // lab and comoving variables -- so all three fell through to the final else and were
+    // written into a dataset called "hydro".  Readers select by variable name and
+    // enumerate DatasetNames from the file attributes, so they are unaffected; only code
+    // that asked for the "hydro" dataset by hand would notice.
+    std::strncpy(dataset_names[n_dataset_names++], variable.c_str(), max_name_length+1);
   } else if (variable.compare("mcsrc") == 0) {
     std::strncpy(dataset_names[n_dataset_names++], "mcsrc", max_name_length+1);
   } else if (variable.compare("mcscat") == 0) {

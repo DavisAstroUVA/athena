@@ -1,0 +1,97 @@
+<comment>
+problem   = Polarized parallel transport on a flat but sheared ("snake") metric
+reference = White, Stone & Gammie (2016), ApJS 225, 22
+configure = --prob=mc_poltest --coord=gr_user -mc -g
+
+# Launches a single photon with a definite polarization state and reports POLRESID: the
+# largest departure of the coherency tensor, projected onto the globally covariantly
+# constant frame, from its emitted value.  The spacetime is flat, so the exact answer is
+# zero and what is left is the transport truncation error.  Halving stepsize should halve
+# it, since PropogatePolarization evaluates the connection after the step.
+#
+# Set snake_a = 0 to degenerate to Minkowski, where POLRESID must be exactly zero.
+#
+# boosts and initialize_comoving are both required.  mc_poltest hands its emission over in
+# the comoving frame -- k as a unit direction, polarization as Stokes parameters -- and
+# TransferPhotonsOnBlock builds the coherency tensor and converts k, which is the path
+# every emitted photon in a production run takes.  Turning either off skips that
+# conversion and leaves the photon in the wrong frame.
+
+<job>
+problem_id = poltest
+
+<time>
+cfl_number = 0.3
+nlim       = 1
+tlim       = 1.0
+
+<coord>
+# GRUser reads m and a unconditionally; neither means anything for snake.
+m       = 0.0
+a       = 0.0
+snake_a = 4.774648292756861e+09
+snake_k = 6.283185307179586e-11
+
+<mesh>
+nx1        = 8
+x1min      = -5.0e10
+x1max      = 5.0e10
+ix1_bc     = periodic
+ox1_bc     = periodic
+ix1_mc_bc  = escape
+ox1_mc_bc  = escape
+
+nx2        = 8
+x2min      = -5.0e10
+x2max      = 5.0e10
+ix2_bc     = periodic
+ox2_bc     = periodic
+ix2_mc_bc  = escape
+ox2_mc_bc  = escape
+
+nx3        = 8
+x3min      = -5.0e10
+x3max      = 5.0e10
+ix3_bc     = periodic
+ox3_bc     = periodic
+ix3_mc_bc  = escape
+ox3_mc_bc  = escape
+
+<meshblock>
+nx1 = 8
+nx2 = 8
+nx3 = 8
+
+<hydro>
+gamma = 1.666666666666667
+
+<montecarlo>
+mc_coord            = snake
+general_pusher      = true
+nphot               = 1
+iseed               = 125787
+scattering          = none
+emission            = none
+absorption          = none
+polarized           = linear
+stepsize            = 1.0e-2
+varystep            = true
+boosts              = true
+initialize_comoving = true
+tmax                = 1.0e36
+
+<problem>
+# launch point, in coordinate components (cartesian topology)
+x0        = -4.0e10
+y0        = 0.0
+z0        = 0.0
+# direction, in degrees, measured in the comoving tetrad: zeta from the z axis, psi in the
+# x-y plane.  zeta = 0 is rejected: the meridian basis is undefined along the z axis.
+zeta      = 80.0
+psi       = 25.0
+# emitted polarization: linear position angle in degrees, plus a circular fraction.
+# polcirc /= 0 wants polarized = circular above so the Stokes V is also written out.
+polang    = 30.0
+polcirc   = 0.0
+scatopac  = 0.0
+outsphere = false

@@ -12,7 +12,7 @@ import matplotlib.gridspec as gridspec
 #from scipy import interpolate
 
 # Athena++ modules
-import athena_mc_spec as mcspec
+import athena_mc as athenamc
 import feautrier as feaut
 
 def interp_feaut(mu0,mu,varin):
@@ -24,6 +24,24 @@ def interp_feaut(mu0,mu,varin):
     for i in range(nnu):
         varout[i] = np.interp(mu0,mu,varin[i,:])
     return varout
+
+# athena_mc names the polarization y-axis options differently from the retired
+# athena_mc_spec module this script used to import
+YUNIT_ALIAS = {'frac': 'polfrac', 'angle': 'polangle'}
+
+def plot_panel(spectrum, imu, ax, yunit, iphi, xunit, plterr, **limits):
+    """
+    Draw one spectrum panel.  athena_mc.plot_frequency returns the data rather than
+    plotting it, so make_plot does the drawing.
+    """
+    yunit = YUNIT_ALIAS.get(yunit, yunit)
+    result = athenamc.plot_frequency(spectrum, imu, iphi, xunit=xunit, yunit=yunit,
+                                     plterr=plterr)
+    if result is None:
+        return None
+    x, y, yerr, xlabel, ylabel = result
+    athenamc.make_plot(x, y, yerr=yerr, xlabel=xlabel, ylabel=ylabel, ax=ax, **limits)
+    return x
 
 # Main function
 def main(**kwargs):
@@ -37,7 +55,7 @@ def main(**kwargs):
     outfile = kwargs.pop('outfile')
 
     # read spectrum as dict from infile
-    spectrum = mcspec.read_spectrum(infile)
+    spectrum = athenamc.read_spectrum(infile)
     # compute nu, assuming spectrum stored as ev
     xfaces = spectrum['xfaces']
     h = 6.62607015e-27
@@ -66,31 +84,38 @@ def main(**kwargs):
 
     # Get imu or imus for plotting different polar angles
     ilist = imu_handler(kwargs.pop('imu'))
-    
+
+    # Split the remaining arguments into what selects the data and what shapes the axes;
+    # make_plot forwards anything it does not recognize to matplotlib, so only the axis
+    # limits and scales may remain in limits.
+    yunit = kwargs.pop('yunit')
+    iphi = kwargs.pop('iphi')
+    xunit = kwargs.pop('xunit')
+    plterr = kwargs.pop('ploterr')
+    limits = dict(kwargs)
+
     # plot spectrum
-    if kwargs['yunit'] == 'specfrac':
-        kwargs.pop('yunit')
+    if yunit == 'specfrac':
         fig = plt.figure()
         gs = gridspec.GridSpec(5,1)
         ax1 = fig.add_subplot(gs[0:3,0])
-        kwargs1 = dict(kwargs)
-        kwargs1['yscale'] = 'log'
-        kwargs1['yunit'] = 'nulnu'
+        limits1 = dict(limits)
+        limits1['yscale'] = 'log'
         for imu in ilist:
-            x, nu, ax1 = mcspec.plot_spectrum(spectrum,imu,ax1,**kwargs1)
+            plot_panel(spectrum,imu,ax1,'nulnu',iphi,xunit,plterr,**limits1)
             ax1.tick_params(labelbottom=False)
             ax1.set_xlabel("")
             iinterp = interp_feaut(mumid[imu],muf,intensf)
             ax1.plot(evf,nuf*iinterp*fnorm)
 
         ax2 = fig.add_subplot(gs[3:5,0])
-        kwargs2 = dict(kwargs)
-        kwargs2['yunit'] = 'q'
-        kwargs2.pop('ymin','ymax')
+        limits2 = dict(limits)
+        limits2.pop('ymin',None)
+        limits2.pop('ymax',None)
         for imu in ilist:
-            x, nu, ax2 = mcspec.plot_polarization(spectrum,imu,ax2,**kwargs2)
+            plot_panel(spectrum,imu,ax2,'q',iphi,xunit,plterr,**limits2)
             pinterp = interp_feaut(mumid[imu],muf,polf)
-            
+
             ax2.plot(evf,pinterp*100)
 
         plt.tight_layout()
@@ -99,8 +124,9 @@ def main(**kwargs):
         fig = plt.figure()
         ax = fig.add_subplot(1,1,1)
         for imu in ilist:
-            x, nu, ax = mcspec.plot_polarization(spectrum,imu,ax,**kwargs)
-    
+            plot_panel(spectrum,imu,ax,yunit,iphi,xunit,plterr,**limits)
+
+
     # save plot to outfile
     if outfile is None:
         outfile = infile.replace('.spec','.pdf')

@@ -55,16 +55,52 @@ def plot_one(spectrum, ax, xunit, yunit, imu, iphi, plterr, **kwargs):
 
     # check for rebinning
     rebinx = kwargs.pop('rebinx')
+    mulegend = kwargs.pop('mulegend')
+
+    # Popped unconditionally: whatever is left in kwargs is forwarded to ax.plot via
+    # make_plot, which rejects any keyword it does not recognise.  Naming the file is what
+    # asks for it to be written, so there is no separate flag to get out of step with it.
+    txtfile = kwargs.pop('txtfile', None)
 
     # plot spectrum as function mu and phi
     mulist = imu_handler(imu)
     philist = imu_handler(iphi)
+    if txtfile is not None:
+        nmu = len(mulist)
+        nphi =len(philist)
+        nout = 2*nphi*nmu+1
+        nx = spectrum['nx']
+        print(nx,nout)
+        out_arr = np.zeros((nx,nout))
+        counter = 0
+
     for iphv in philist:
         for imuv in mulist:
-            x, y, yerr, xlabel, ylabel = athenamc.plot_frequency(spectrum, imuv, iphv,
+
+            result = athenamc.plot_frequency(spectrum, imuv, iphv,
                                          plterr=plterr, xunit=xunit, yunit=yunit, rebinx=rebinx)
+            # skip if no data
+            if result is None:
+                print("  skipping yunit={0!r} at imu={1}, iphi={2}".format(
+                    yunit, imuv, iphv))
+                continue
+            x, y, yerr, xlabel, ylabel = result
             athenamc.make_plot(x, y, yerr=yerr, xlabel=xlabel, ylabel=ylabel, ax=ax, **kwargs)
 
+            if txtfile is not None:
+                if counter == 0:
+                    out_arr[:,0] = x
+                out_arr[:,2*counter+1] = y
+                out_arr[:,2*counter+2] = yerr
+                counter += 1
+
+    if mulegend:
+        nmu = len(mulist)
+
+        ax.legend([f"μ={(mu+0.5)/nmu:.2f}" for mu in mulist])
+
+    if txtfile is not None:
+        np.savetxt(txtfile, out_arr)
 
 def plot_blackbody(spectrum, ax, xunit, yunit, bbtemp, bbnorm, imu = None, iphi = None):
     """
@@ -201,6 +237,15 @@ if __name__ == '__main__':
     parser.add_argument('--bbnorm',
         default = None,
         help = 'blackbody normalization')
+    parser.add_argument('-mulegend',
+        action = 'store_true',
+        help = 'add a legend for mu values')
+    parser.add_argument('--txtfile',
+        nargs = '?',
+        const = 'out.txt',
+        default = None,
+        help = 'write the plotted curves to this text file; give the flag with no name '
+               'to use out.txt, omit it entirely to write nothing')
 
     args = parser.parse_args()
     main(**vars(args))

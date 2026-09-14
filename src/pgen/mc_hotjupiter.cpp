@@ -298,9 +298,9 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     ion_str = etype;
     nsamp = nsamptype[etype] = nion;
     emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "ion_eqwt",true);
-    initialze_comoving[etype] = false; // ions initialized in lab frame
+    initialize_comoving[etype] = false; // ions initialized in lab frame
     std::string abs_meth = pin->GetOrAddString("problem","ion_str_abs","tau");
-    absorption_method[0] = GetAbsorptionMethodFlag(abs_meth);
+    absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
     EnrollUserEmissionFunction(SurfaceEmissivityIonizing,etype);
     emission_geometry[etype] = EMISAREA;
     emission_face[etype] = SetEmissionSurface("outer_x1");
@@ -318,7 +318,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     lya_str = etype;
     nsamp += nsamptype[etype] = nlyastr;
     emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "lys_eqwt",true);
-    initialze_comoving[etype] = false; // stellar  initialized in lab frame
+    initialize_comoving[etype] = false; // stellar  initialized in lab frame
     std::string abs_meth = pin->GetOrAddString("problem","lya_str_abs","weight");
     absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
     emission_geometry[etype] = EMISAREA;
@@ -338,7 +338,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     lya_rec = etype;
     nsamp += nsamptype[etype] = nlyarec;
     emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "lyr_eqwt",false);
-    initialze_comoving[etype] = true; // recomb. lyman alpha initialized in comoving frame
+    initialize_comoving[etype] = true; // recomb. lyman alpha initialized in comoving frame
     std::string abs_meth = pin->GetOrAddString("problem","lya_rec_abs","weight");
     absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
     emission_geometry[etype] = EMISVOL;
@@ -712,7 +712,6 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
         Real mu = 2.*pran->uniform()-1.0;
         Real stheta = std::sqrt(1.0-mu*mu);
         Real phi = 2.*PI*pran->uniform();
-        pphot->k0p[ip] = 1.;
         pphot->k1p[ip] = stheta * std::cos(phi);
         pphot->k2p[ip] = stheta * std::sin(phi);
         pphot->k3p[ip] = mu;
@@ -756,8 +755,8 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
             pphot->statp[ip] = DESTROYED;
           }
 
-          // Set direction vector - parallel to star-planet separation vector
-          pphot->k0p[ip] = 1.;
+          // Set direction vector - parallel to star-planet separation vector.
+          // k0p is the photon energy and is set from ep further below.
           pphot->k1p[ip] = -std::cos(th);
           pphot->k2p[ip] = std::sin(th);
           pphot->k3p[ip] = 0.0;
@@ -926,11 +925,19 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
           Real sph = std::sin(ph);
           Real cph = std::cos(ph);
 
-          // Set direction vector - parallel to star-planet separation vector
-          pphot->k0p[ip] = 1.;
+          // Set direction vector - parallel to star-planet separation vector.
+          // NB: k0p aliases ep on this branch, so it is NOT set to 1 here; the
+          // photon energy is assigned from ep further below.
           pphot->k1p[ip] = sth*cph;
           pphot->k2p[ip] = cth*cph;
           pphot->k3p[ip] = -sph;
+
+         // Real cph = std::cos(ph);
+				 // Real sph = std::sin(ph);
+         // Real xhat = sth*cph*pphot->k1p[ip] + cth*cph*pphot->k2p[ip] - sph*pphot->k3p[ip];
+         // Real yhat = sth*sph*pphot->k1p[ip] + cth*sph*pphot->k2p[ip] + cph*pphot->k3p[ip];
+         // Real zhat = cth*pphot->k1p[ip] - sth*pphot->k2p[ip];
+         // printf("photon x, y, z directions: %g, %g, %g\n", xhat, yhat, zhat);
 
         } // END IF INCIDENT_FROM_Z
 
