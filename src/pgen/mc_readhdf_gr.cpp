@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file mc_xrb_hdf_gr.cpp
+//! \file mc_readhdf_gr.cpp
 //! \brief Monte Carlo problem generator for an X-ray binary in Kerr-Schild coordinates,
 //! initialized from an athdf snapshot.
 
