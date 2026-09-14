@@ -5,9 +5,10 @@
 #include <stdexcept>
 
 #include "spectrum_reader.hpp"
+#include "montecarlo.hpp"
 #include "../athena.hpp"
 
-void ReadSpectrumToCDF(const std::string& filename, std::vector<Real>& wl, std::vector<Real>& cdf, Real& itot) {
+void ReadSpectrumToCDF(const std::string& filename, std::vector<Real>& wl, std::vector<Real>& cdf, Real& itot, Real& emean) {
   std::ifstream file(filename);
   if (!file.is_open()) {
     throw std::runtime_error("ReadSpectrumToCDF: cannot open file " + filename);
@@ -49,24 +50,29 @@ void ReadSpectrumToCDF(const std::string& filename, std::vector<Real>& wl, std::
     throw std::runtime_error("ReadSpectrumToCDF: need at least 2 data points for interpolation, found " + std::to_string(nrows));
   }
 
-  // compute CDF as int dlambda*ilam
+  // PDF = ilam / (int dlambda*ilam) = ilam / itot
+  // compute CDF[i] as int dlambda*ilam from wl[0] to wl[i]
+  // compute mean energy as int dlambda * (ilam/itot) * (h*c/lambda)
   // assumes wavelengths are uniformly spaced and increasing
   Real dlambda = wl[1] - wl[0];
-  //printf("dlambda=%g\n", dlambda);
   cdf.push_back(0.);
+  emean = 0.;
+
+  // integrate using trapezoid rule
   for (int i = 1; i < nrows; ++i) {
-    cdf.push_back(cdf[i-1] + ilam[i]*dlambda);
+    cdf.push_back(cdf[i-1] + 0.5*dlambda*(ilam[i-1] + ilam[i]));
+    emean += 0.5*dlambda*(ilam[i-1]/wl[i-1] + ilam[i]/wl[i]);
   }
+  emean *= MCConstants::h_cgs * MCConstants::c_cgs;
   
   // normalize: CDF runs from 0 to 1
   itot = cdf[nrows-1];
-  printf("ReadSpectrumToCDF: itot = %g [erg/cm^2/s]\n", itot);
   if (itot == 0.) {
     throw std::runtime_error("ReadSpectrumToCDF: cdf norm is zero");
   }
   for (int i=0; i<nrows; ++i) {
     cdf[i] = cdf[i] / itot;
-    //printf("i=%d, wl=%g, ilam=%g, cdf=%g\n", i, wl[i], ilam[i], cdf[i]);
   }
+  emean /= itot;
 
 } // end ReadSpectrumToCDF

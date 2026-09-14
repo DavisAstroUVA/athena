@@ -9,7 +9,7 @@
 //   - Column 0: wavelength [cm]
 //   - Column 1: intensity [erg/cm^2/s/cm]
 // Modifies wavelength 'wl' and cumulative density function 'cdf' as vectors
-// Also accumulates total intensity 'itot'
-void ReadSpectrumToCDF(const std::string& filename, std::vector<Real>& wl, std::vector<Real>& cdf, Real& itot);
+// Also accumulates total intensity 'itot' and average energy 'emean'
+void ReadSpectrumToCDF(const std::string& filename, std::vector<Real>& wl, std::vector<Real>& cdf, Real& itot, Real& emean);
 
 #endif // SPECTRUM_READER_HPP_

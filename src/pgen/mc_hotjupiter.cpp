@@ -84,14 +84,16 @@ bool flag_finite_star;
 bool flag_pow_law;
 bool flag_lya_abs;
 bool flag_core_skipping;
+bool flag_init_escaped;
 // initialization for timing photons
 const auto global_start_time = std::chrono::system_clock::now();
 
 // sampling from finite stellar spectrum
 bool flag_sample_lya;
 Real spectrum_lya_itot; // wavelength-integrated intensity [erg/cm^2/s]
+Real spectrum_lya_energy; // mean energy from spectrum [erg]
 std::vector<Real> spectrum_lya_wl; // lya wavelengths [cm]
-std::vector<Real> spectrum_lya_cdf; // lya CDF per bin
+std::vector<Real> spectrum_lya_cdf; // lya CDF per wl bin
 
 // gsl interpolation
 gsl_interp_accel *gsl_interp_accel_lya;
@@ -204,8 +206,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   // Time evolution
   // Set a constant timestep (best for photoionization equilibrium convergence tests)
-  user_dt = pin->GetReal("problem", "user_dt");
-  EnrollUserTimeStepFunction(ConstantTimestep);
+  //user_dt = pin->GetReal("problem", "user_dt");
+  //EnrollUserTimeStepFunction(ConstantTimestep);
 
   // Update ionization fraction
   flag_update_nh = pin->GetOrAddBoolean("problem", "update_nh", true);
@@ -374,15 +376,18 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     EnrollUserWorkInMove(CoreSkipping);
   }
 
+  flag_init_escaped = pin->GetOrAddBoolean("problem", "init_escaped", false);
+
   // sampling from an input stellar spectrum
   flag_sample_lya = pin->GetOrAddBoolean("problem", "sample_lya", false);
   if (flag_sample_lya) {
     std::string input_spectrum = pin->GetString("problem", "lya_filename");
     
-    ReadSpectrumToCDF(input_spectrum, spectrum_lya_wl, spectrum_lya_cdf, spectrum_lya_itot);
+    ReadSpectrumToCDF(input_spectrum, spectrum_lya_wl, spectrum_lya_cdf, spectrum_lya_itot, spectrum_lya_energy);
     if (report_setup && (Globals::my_rank == 0)) {
       std::cout << "Sampling from finite star:" << std::endl;
-      std::cout << "itot: " << spectrum_lya_itot << std::endl;
+      std::cout << "itot: " << spectrum_lya_itot << " [erg/cm^2/s]" << std::endl;
+      std::cout << "emean: " << spectrum_lya_energy << " [erg], emean / linecenter: " << spectrum_lya_energy/MCConstants::h_cgs/MCConstants::nu_lya << std::endl;
     }
 
     // initialize gsl interpolation objects
@@ -975,10 +980,13 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
     } // end switch
 
     // Set status flag
-    if (pphot->wp[ip] <= 0.0)
+    if (pphot->wp[ip] <= 0.0) {
       pphot->statp[ip] = DESTROYED;
-    else
+    } else if (flag_init_escaped) {
+      pphot->statp[ip] = ESCAPED;
+    } else {
       pphot->statp[ip] = EVOLVING;
+    }
 
     // Initialize the absorption and scattering extinction coefficients
     // to the values in the emitted zone
@@ -1490,29 +1498,27 @@ Real SurfaceEmissivityLya(MonteCarloBlock *pmcb, int k, int j, int i, int etype)
   if (flag_finite_star) {
     Real nintens; // number / area / time / solid angle
     if (flag_sample_lya) {
-      nintens = spectrum_lya_itot; // itot from integral over spectrum
+      nintens = spectrum_lya_itot / spectrum_lya_energy; // itot from integral over spectrum
     } else {
-      nintens = lya_flux / PI * SQR(sep / rstar); // convert flux to intensity
+      nintens = lya_flux / PI * SQR(sep / rstar) / energy_lya; // convert flux to intensity
     }
-    nintens /= energy_lya;
     Real area_omega = GetProjectedAreaOmegaFiniteStar(pmcb, k, j, i); // projected area on planet * solid angle on star
     ndot = nintens * area_omega;
     
   } else { // projections along coordinate directions
     Real nflux0; // number / area / time
     if (flag_sample_lya) {
-      nflux0 = spectrum_lya_itot * PI * SQR(rstar / sep);
+      nflux0 = spectrum_lya_itot * PI * SQR(rstar / sep) / spectrum_lya_energy;
     } else {
-      nflux0 = lya_flux;
+      nflux0 = lya_flux / energy_lya;
     }
-    nflux0 /= energy_lya;
     Real projected_area = GetProjectedArea(pmcb, k, j, i); // projected area on planet
     ndot = nflux0 * projected_area;
   }
 
   // normalize to the area of the cell for a uniform flux
   Real nflux = ndot / pmcb->pmy_block->pcoord->GetFace1Area(k,j,i+1); // number / perp area / time
-  pmcb->pmy_block->user_out_var(1,k,j,i) = nflux;
+  pmcb->pmy_block->user_out_var(1,k,j,i) = ndot;
   return nflux;
 }
 
@@ -1535,7 +1541,7 @@ Real SurfaceEmissivityIonizing(MonteCarloBlock *pmcb, int k, int j, int i, int e
 
   // normalize to the area of the cell for a uniform flux
   Real nflux = ndot / pmcb->pmy_block->pcoord->GetFace1Area(k,j,i+1); // number / perp area / time
-  pmcb->pmy_block->user_out_var(1,k,j,i) = nflux;
+  pmcb->pmy_block->user_out_var(1,k,j,i) = ndot;
   return nflux;
 }
 
