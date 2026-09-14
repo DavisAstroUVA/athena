@@ -131,7 +131,7 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
   const Real mp    = 1.6726e-24;
   const Real kb = 1.380649e-16;
   const Real c = 2.99792458e10;
-  const Real nu0 = 2.468e15;
+  const Real nu0 = MCConstants::nu_lya;
   const Real lorw = 6.265e8/(4.*PI);
   const Real h = 6.62607015e-27;
 

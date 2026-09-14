@@ -8,37 +8,58 @@ problem_id = sphlya   # problem ID: basename of output filenames
 
 <output1>
 file_type = phlist
+nuser     = 105 # 8 unbinned + 4x24 frequency bins + final nscp
+
+<output2>
+id = mclab
+file_type = hdf5
+variable = mclab
+xdmf = 0
+dt = 1.
+
+<output3>
+id = mcsrc
+file_type = hdf5
+variable = mcsrc
+xdmf = 0
+dt = 1.
 
 <mesh>
-nx1        = 1       # Number of zones in X1-direction
+nx1        = 32       # Number of zones in X1-direction
 x1min      = -5.0e11       # minimum value of X1
 x1max      = 5.0e11      # maximum value of X1
 ix1_mc_bc  = destroy  # inner-X1 boundary flag
 ox1_mc_bc  = destroy  # outer-X1 boundary flag
 
-nx2        = 1         # Number of zones in X2-direction
+nx2        = 33         # Number of zones in X2-direction
 x2min      = -5.0e11      # minimum value of X2
 x2max      = 5.0e11       # maximum value of X2
 ix2_mc_bc  = destroy  # inner-X2 boundary flag
 ox2_mc_bc  = destroy  # outer-X2 boundary flag
 
-nx3        = 1         # Number of zones in X3-direction
+nx3        = 33         # Number of zones in X3-direction
 x3min      = -5.0e11        # minimum value of X3
 x3max      = 5.0e11       # maximum value of X3
 ix3_mc_bc  = destroy  # inner-X3 boundary flag
 ox3_mc_bc  = destroy  # outer-X3 boundary flag
 
+<meshblock>
+nx1 = 16
+nx2 = 11
+nx3 = 11
+
 <hydro>
 gamma = 1.666666666666667 # gamma = C_p/C_v
+dfloor = 1.e-30
 
 <montecarlo>
-nphot     = 1000        # number of photon samples
+nphot     = 10000        # number of photon samples
 iseed     = 121501      # pseudorandom number seed
 scattering = resonance  # scattering method
 polarized = none       # polarization flag
 
 <problem>
 temp     = 1.e4    # isothermal temperature
-tau      = 1.e6    # line center optical depth
+tau      = 5.e6    # line center optical depth
 radius   = 1.e11   # radius of sphere
 x0 = 0.            # initial energy in Doppler units

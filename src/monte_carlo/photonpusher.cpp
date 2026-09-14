@@ -24,6 +24,7 @@ PhotonPusher::PhotonPusher(MonteCarloBlock *pmcb) {
   pmy_mc = pmcb->pmy_mc;
   pcoord = NULL;
   UserWorkInMove = pmcb->pmy_mc->UserWorkInMove;
+  UserEscapeDistance = pmcb->pmy_mc->UserEscapeDistance;
   capmove = pmcb->pmy_mc->capmove;
 
   // MRW acceleration
@@ -139,7 +140,7 @@ void PhotonPusher::MRWResonanceAcceleration(Photon *pphot, MCRandom *pran, Real 
   Real melectron = 9.10938215e-28;
   Real charge = 4.80320427e-10;
   Real osc_strength = 0.4164;
-  Real nu0 = 2.468e15;
+  Real nu0 = MCConstants::nu_lya;
   Real c = 2.99792458e10;
   Real h = 6.62607015e-27;
   Real kb = 1.380649e-16;

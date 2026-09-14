@@ -49,6 +49,7 @@ public:
 
   // function pointers
   UserMoveFunc_t UserWorkInMove;
+  UserEscapeDistanceFunc_t UserEscapeDistance;
 
   // Arrays for MRW acceleration
   AthenaArray<Real> mrwprob;

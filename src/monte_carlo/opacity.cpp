@@ -393,22 +393,6 @@ void InitializeAccelerationOpacity(MonteCarloBlock *pmcb) {
       }}}
 }
 
-// SWD: Useful to retain ability to do different lines but should ensure
-// computation only occurs once
-//----------------------------------------------------------------------------
-//! \fn Real ResLinePre()
-//! \brief Species dependent prefactor
-// SWD: no longer need -- remove?
-Real ResLinePre() {
-
-  Real charge = MCConstants::ec;
-  Real melectron = MCConstants::me_cgs;
-  Real c_cgs = MCConstants::c_cgs;
-  Real osc_strength = 0.4164;
-
-  return PI*charge*charge / (melectron*c_cgs) * osc_strength;
-}
-
 //----------------------------------------------------------------------------
 //! \fn Real xsec_lorentzian(Real nu)
 //! \brief lorentzian cross section, used for testing

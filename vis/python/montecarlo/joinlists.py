@@ -27,7 +27,6 @@ def list_match(list1, list2):
         return False
     if list1['polarized'] != list2['polarized']:
         return False
-
     return True
 
 def join(filelist, outfile, skip, nproc):

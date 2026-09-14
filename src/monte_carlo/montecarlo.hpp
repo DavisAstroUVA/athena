@@ -112,6 +112,8 @@ typedef Real (*OpacFunc_t)(MonteCarloBlock *pmcb,  Photon *pphot, int ip);
 typedef void (*ScatFunc_t)(MonteCarloBlock *pmcb, Photon *phot, int ips, int ipe);
 typedef void (*UserMoveFunc_t)(MonteCarloBlock *pmcb, Photon *phot, PhotonPusher *ppusher,
                                int ip);
+//! Return the forward distance to a user escape surface in code-length units.
+typedef Real (*UserEscapeDistanceFunc_t)(MonteCarloBlock *pmcb, Photon *phot, int ip);
 typedef void (*GetZonePos_t)(Photon *phot, MCRandom *pran, MCCoord *pco, int ip);
 //! User moment functions receive the photon already projected into the frame they were
 //! enrolled with, so they never have to reimplement a tetrad projection.  pphot is still
@@ -134,7 +136,6 @@ void GenerateComptonTable(int io);
 Real ComptonCrossSection(Real energy, Real theta);
 Real Maxwell(Real theta, Real gamma);
 Real KleinNishina(Real x);
-Real ResLinePre();
 Real XsecLorentzian(Real nu);
 Real XsecDoppler(Real nu, Real tgas);
 Real XsecVoigt(Real nu, Real tgas);
@@ -290,6 +291,7 @@ public:
 
   // function pointers
   UserMoveFunc_t UserWorkInMove;
+  UserEscapeDistanceFunc_t UserEscapeDistance;
   EmisFunc_t *GetEmission; // array of function pointers
   DensFunc_t UserGetDensity;
   TempFunc_t UserGetTemperature;
@@ -334,6 +336,7 @@ public:
   void EnrollUserGetTemperature(TempFunc_t tempfunc);
   void EnrollUserGetNumberDensity(NumbFunc_t numbunc);
   void EnrollUserWorkInMove(UserMoveFunc_t userfunc);
+  void EnrollUserEscapeDistance(UserEscapeDistanceFunc_t userfunc);
   void EnrollUserOpacityFunction(OpacFunc_t opacfunc, bool abs);
   void AllocateUserMoments(int n);
   void EnrollUserMoment(int i, UserMomentFunc_t my_func, const char *name,

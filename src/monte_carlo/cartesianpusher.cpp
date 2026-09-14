@@ -68,6 +68,7 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
         break;
       }
       iter++;
+      bool user_escape = false;
 
       // Compute distance to all faces
       Real dlx, dly, dlz;
@@ -135,6 +136,13 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
             break;
           // compute distance remaining in cell
           dl = tauremaining / chi / l_cgs;
+          if (UserEscapeDistance != NULL) {
+            const Real escape_distance = UserEscapeDistance(pmcb,pphot,ip);
+            if ((escape_distance >= 0.) && (escape_distance <= dl)) {
+              dl = escape_distance;
+              user_escape = true;
+            }
+          }
           pphot->dtp[ip] -= dl / c_code; // SWD: set with k0p instead
 
   
@@ -157,11 +165,20 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
           pphot->x2p[ip] += pphot->k2p[ip] * dl;
           pphot->x3p[ip] += pphot->k3p[ip] * dl;
         }
+        if (user_escape) pphot->statp[ip] = ESCAPED;
         // Perform any user work
         if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
         break;
 
-      } else { // Photon moves to next cell and reduce tauremaining
+      } else { // Photon moves to next zone and reduce tauremaining
+        if (UserEscapeDistance != NULL) {
+          const Real escape_distance = UserEscapeDistance(pmcb,pphot,ip);
+          if ((escape_distance >= 0.) && (escape_distance <= dl)) {
+            dl = escape_distance;
+            user_escape = true;
+          }
+        }
+
         // Account for absorption (if needed) and update moments
         if (pmcb->call_moments) {
           Real dl_cgs = dl * l_cgs;
@@ -185,9 +202,12 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
         tauremaining -= chi * l_cgs * dl;
         pphot->dtp[ip] -= dl / c_code;
 
+        if (user_escape) pphot->statp[ip] = ESCAPED;
         // Perform any user work
         if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
-        MovePhotonToNextZone(pphot,pco,pmcb,face,ascend,ip);
+
+        // Only move to next zone if photon is still evolving
+        if (pphot->statp[ip] == EVOLVING) MovePhotonToNextZone(pphot,pco,pmcb,face,ascend,ip);
       }
     }
 
