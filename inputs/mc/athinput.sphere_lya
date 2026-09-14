@@ -8,7 +8,7 @@ problem_id = sphlya   # problem ID: basename of output filenames
 
 <output1>
 file_type = phlist
-nuser     = 57  # 8 unbinned + denominator/numerator for 24 |x| bins + final nscp
+nuser     = 105 # 8 unbinned + 4x24 frequency bins + final nscp
 
 <output2>
 id = mclab

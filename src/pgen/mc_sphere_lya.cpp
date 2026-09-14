@@ -56,7 +56,10 @@ namespace {
       FREQUENCY_PATH_ENERGY_OFFSET + NUM_FREQUENCY_BINS;
   constexpr int SCATTERING_COUNT =
       FREQUENCY_PATH_EXTINCTION_OFFSET + NUM_FREQUENCY_BINS;
-  constexpr int NUM_ESTIMATORS = SCATTERING_COUNT + 1;
+  constexpr int FREQUENCY_RADIAL_FLUX_OFFSET = SCATTERING_COUNT + 1;
+  constexpr int FREQUENCY_RADIAL_FORCE_OFFSET =
+      FREQUENCY_RADIAL_FLUX_OFFSET + NUM_FREQUENCY_BINS;
+  constexpr int NUM_ESTIMATORS = FREQUENCY_RADIAL_FORCE_OFFSET + NUM_FREQUENCY_BINS;
 
   // Finite upper edges of the |x| bins.  Resolve the Doppler core at dx=0.5, the expected
   // escape-frequency range at dx=1, and retain a broad-wing bin before the final overflow.
@@ -336,6 +339,25 @@ void AccumulateUserEstimators(MonteCarloBlock *pmcb, Photon *pphot,
 
   const Real dl = ppusher->dl;
 
+  // Project this straight segment onto the local radial direction.  Since
+  // d|r|/dl = n.rhat, its path-averaged radial projection is exactly
+  // (r_end-r_start)/dl.  Reconstruct the start because UserWorkInMove runs after the
+  // Cartesian position update.  Zero-length face crossings carry zero estimator weight.
+  const Real r_end = sqrt(SQR(pphot->x1p[ip]) + SQR(pphot->x2p[ip])
+                          + SQR(pphot->x3p[ip]));
+  const Real x1start = pphot->x1p[ip] - k1 * dl;
+  const Real x2start = pphot->x2p[ip] - k2 * dl;
+  const Real x3start = pphot->x3p[ip] - k3 * dl;
+  const Real r_start = sqrt(SQR(x1start) + SQR(x2start) + SQR(x3start));
+  Real radial_projection = 0.;
+  if ((dl > 0.) && (r_end + r_start > 0.)) {
+    // Use (r_end^2-r_start^2)/(r_end+r_start) to avoid subtracting nearly equal radii.
+    radial_projection =
+        (k1 * (pphot->x1p[ip] + x1start)
+       + k2 * (pphot->x2p[ip] + x2start)
+       + k3 * (pphot->x3p[ip] + x3start)) / (r_end + r_start);
+  }
+
   // Match the lab-frame path-length estimator used by AccumulateMoments.  k0p now aliases
   // ep, so it must not appear as an additional factor in these non-relativistic moments.
   const Real c_cgs = MCConstants::c_cgs;
@@ -358,6 +380,10 @@ void AccumulateUserEstimators(MonteCarloBlock *pmcb, Photon *pphot,
     pphot->user[FREQUENCY_PATH_ENERGY_OFFSET + frequency_bin][ip] += weight;
     pphot->user[FREQUENCY_PATH_EXTINCTION_OFFSET + frequency_bin][ip]
         += extinction * weight;
+    pphot->user[FREQUENCY_RADIAL_FLUX_OFFSET + frequency_bin][ip]
+        += weight * c_cgs * radial_projection;
+    pphot->user[FREQUENCY_RADIAL_FORCE_OFFSET + frequency_bin][ip]
+        += extinction * weight * radial_projection;
   }
 }
 
