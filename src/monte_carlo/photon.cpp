@@ -14,17 +14,19 @@
 #include "photon.hpp"
 #include "../athena.hpp"
 #include "../athena_arrays.hpp"
+#include "mcexchange.hpp"
 
 // class variable initialization
 bool Photon::initialized = false;
-bool Photon::polarized = false;
+MCPolarization Photon::polarized = MCPOL_NONE;
 bool Photon::general_pusher_flag = false;
 
-int Photon::inscp = -1, Photon::istatp = -1, Photon::ityp = -1;
+int Photon::inscp = -1, Photon::istatp = -1, Photon::ityp = -1, Photon::inmvp = -1;
 int Photon::ii1p = -1, Photon::ii2p = -1, Photon::ii3p = -1;
 int Photon::ix0p = -1, Photon::ix1p = -1, Photon::ix2p = -1, Photon::ix3p = -1;
 int Photon::ik0p = -1, Photon::ik1p = -1, Photon::ik2p = -1, Photon::ik3p = -1;
 int Photon::idk0p = -1, Photon::idk1p = -1, Photon::idk2p = -1, Photon::idk3p = -1;
+std::vector<Real> Photon::dk_scratch_;
 int Photon::iep = -1, Photon::iwp = -1, Photon::iscp = -1, Photon::iacp = -1;
 int Photon::isip = -1, Photon::isqp = -1, Photon::isup = -1, Photon::isvp = -1;
 int Photon::iuserp = -1, Photon::ipolp = -1, Photon::idtp = -1;
@@ -43,15 +45,21 @@ static int nmpi = 0;
 
 Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
   : Particles(pmcb->pmy_block, pin),
+    has_incoming_(false), has_offrank_neighbor_(false),
   // Allocate space for photon data via initialization list
     //user(new std::vector<Real> [pmcb->pmy_mc->nuser_var]),
     //polten(new std::vector<std::complex<Real>> [ncplx]),
     nphot(npar),nscp(intprop[inscp]), statp(intprop[istatp]),
-    type(intprop[ityp]), i1p(intprop[ii1p]), i2p(intprop[ii2p]), i3p(intprop[ii3p]),
+    type(intprop[ityp]), nmvp(intprop[inmvp]),
+    i1p(intprop[ii1p]), i2p(intprop[ii2p]), i3p(intprop[ii3p]),
     x0p(rp[ix0p]), x1p(rp[ix1p]), x2p(rp[ix2p]), x3p(rp[ix3p]),
     k0p(rp[ik0p]), k1p(rp[ik1p]), k2p(rp[ik2p]), k3p(rp[ik3p]),
+#if MC_VERLET_DK
     dk0p(rp[idk0p]), dk1p(rp[idk1p]), dk2p(rp[idk2p]),
     dk3p(rp[idk3p]),
+#else
+    dk0p(dk_scratch_), dk1p(dk_scratch_), dk2p(dk_scratch_), dk3p(dk_scratch_),
+#endif
     ep(rp[iep]), wp(rp[iwp]), scp(rp[iscp]), acp(rp[iacp]),
     sip(rp[isip]), sqp(rp[isqp]), sup(rp[isup]), svp(rp[isvp]),
     dtp(rp[idtp]) {
@@ -61,7 +69,7 @@ Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
   nuser_var = pmcb->pmy_mc->nuser_var;
   // SWD: should these be set or controlled by flags?
   user = &(rp[iuserp]);
-  polten = &(cplxprop[ipolp]);
+  polten = &(rp[ipolp]);
   npar = 0;
 
 
@@ -99,17 +107,20 @@ void Photon::PrintPhoton(int ip) const {
             << std::endl
             << "k: " << k0p[ip] << " " << k1p[ip] << " " << k2p[ip] << " " << k3p[ip]
             << std::endl;
+#if MC_VERLET_DK
   if (general_pusher_flag) {
     std::cout << "dk: " << dk0p[ip] << " " << dk1p[ip] << " " << dk2p[ip] << " "
               << dk3p[ip] << std::endl;
   }
-  if (polarized) {
-    std:: cout << "stokes: " << sip[ip] << " " << sqp[ip] << " " << sup[ip] << std::endl;
+#endif
+  if (IsPolarized(polarized)) {
+    std:: cout << "stokes: " << sip[ip] << " " << sqp[ip] << " " << sup[ip]
+              << " " << svp[ip] << std::endl;
     if (general_pusher_flag) {
       std:: cout << "pol tensor: ";
         for (int k = 0; k < 4; k++) {
           for (int l = 0; l < 4; l++) {
-            std:: cout << polten[k*4+l][ip] << " ";
+            std:: cout << Tensor(ip, k, l) << " ";
           }
           std::cout << std::endl;
         }
@@ -156,15 +167,45 @@ bool Photon::IsNanPhoton(int ip) {
   if (std::isnan(k1p[ip])) return true;
   if (std::isnan(k2p[ip])) return true;
   if (std::isnan(k3p[ip])) return true;
-  if (polarized) {
+  if (IsPolarized(polarized)) {
     if (std::isnan(sip[ip])) return true;
     if (std::isnan(sqp[ip])) return true;
     if (std::isnan(sup[ip])) return true;
+    // Only the general pusher carries the tensor.
+    if (general_pusher_flag) {
+      for (int i = 0; i < 16; ++i) {
+        if (std::isnan(polten[i][ip]) || std::isinf(polten[i][ip])) return true;
+      }
+    }
   }
   if (std::isnan(scp[ip])) return true;
   if (std::isnan(acp[ip])) return true;
 
   return false;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Photon::EnsureScratch()
+//! \brief keep the shared dk scratch column at least as long as this block's arrays
+//
+// One column per process, shared by all four dk*p references of every block, so a
+// problem generator's dk0p[ip] = 0 lands in bounds for any ip < npar.  Called wherever
+// npar can grow: AllocatePhotons and the receive flush.  A no-op with MC_VERLET_DK on.
+
+void Photon::EnsureScratch() {
+#if !MC_VERLET_DK
+  if (dk_scratch_.size() < static_cast<std::size_t>(npar)) dk_scratch_.resize(npar);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool Photon::IsNanTransport(int ip) const
+//! \brief NaN in the weight, position or wavevector
+
+bool Photon::IsNanTransport(int ip) const {
+  return std::isnan(wp[ip]) || std::isnan(x0p[ip]) || std::isnan(x1p[ip]) ||
+         std::isnan(x2p[ip]) || std::isnan(x3p[ip]) || std::isnan(k0p[ip]) ||
+         std::isnan(k1p[ip]) || std::isnan(k2p[ip]) || std::isnan(k3p[ip]);
 }
 
 //--------------------------------------------------------------------------------------
@@ -173,8 +214,18 @@ bool Photon::IsNanPhoton(int ip) {
 
 // SWD: Temporary --> converts protected function to public :(
 void Photon::AllocatePhotons(int nphot) {
+  const int nold = npar;
   // Call Resize function
   Resize(nphot);
+  EnsureScratch();
+
+  // Zero the free-flight step counter on the slots just claimed for new photons.  Resize
+  // only value-initializes when the underlying vector actually grows, and it does not:
+  // RemoveOneParticle swaps the last photon down into the freed slot and decrements the
+  // count without shrinking the storage, so a slot handed out here has usually held a
+  // photon before and still carries its count.  Left alone, a new photon would inherit
+  // it and could be retired by capmove before travelling anywhere.
+  for (int ip = nold; ip < npar; ++ip) nmvp[ip] = 0;
 }
 
 //----------------------------------------------------------------------------------------
@@ -186,6 +237,9 @@ void Photon::AllocatePhotons(int nphot) {
 void Photon::PolarizationToTetrad(std::complex<Real> ttet[4][4], Real ecov[4][4],
                                   const int ip) {
 
+  std::complex<Real> n[4][4];
+  LoadTensor(ip, n);
+
   for (int i = 0; i < 4; i++)
     for (int j = 0; j < 4; j++)
       ttet[i][j] = std::complex<Real>(0.,0.);
@@ -194,7 +248,7 @@ void Photon::PolarizationToTetrad(std::complex<Real> ttet[4][4], Real ecov[4][4]
     for (int j = 0; j < 4; j++)
       for (int k = 0; k < 4; k++)
         for (int l = 0; l < 4; l++) {
-          ttet[i][j] += polten[k*4+l][ip] * ecov[i][k] * ecov[j][l];
+          ttet[i][j] += n[k][l] * ecov[i][k] * ecov[j][l];
         }
 
 }
@@ -208,17 +262,66 @@ void Photon::PolarizationToTetrad(std::complex<Real> ttet[4][4], Real ecov[4][4]
 void Photon::PolarizationToCoord(std::complex<Real> ttet[4][4], Real econ[4][4],
                                  const int ip) {
 
+  std::complex<Real> n[4][4];
   for(int i = 0; i < NCOORD; i++)
     for(int j = 0; j < NCOORD; j++)
-      polten[i*4+j][ip] = std::complex<Real>(0.,0.);
+      n[i][j] = std::complex<Real>(0.,0.);
 
   for(int i = 0; i < NCOORD; i++)
     for(int j = 0; j < NCOORD; j++)
       for(int k = 0; k < NCOORD; k++)
         for(int l = 0; l < NCOORD; l++) {
-          polten[i*4+j][ip] += ttet[k][l] * econ[k][i] * econ[l][j];
+          n[i][j] += ttet[k][l] * econ[k][i] * econ[l][j];
         }
 
+  StoreTensor(ip, n);
+}
+
+//----------------------------------------------------------------------------------------
+//! Hermitian storage of the coherency tensor.  See the declaration in photon.hpp.
+//
+// The transport in GeneralPusher::AdvanceStep preserves Hermiticity exactly in floating
+// point (each lower-triangle term is the conjugate of the matching upper-triangle term,
+// operation for operation). The frame transforms above sum the same terms in a different
+// order for (i,j) and (j,i)
+
+namespace {
+// index of the pair (i,j), i < j, in the order (0,1) (0,2) (0,3) (1,2) (1,3) (2,3)
+const int kPairIndex[4][4] = {{-1, 0, 1, 2}, {0, -1, 3, 4}, {1, 3, -1, 5}, {2, 4, 5, -1}};
+} // namespace
+
+int Photon::TensorSlot(int i, int j, bool imag) {
+  if (i == j) return i;
+  return 4 + 2*kPairIndex[i][j] + (imag ? 1 : 0);
+}
+
+void Photon::LoadTensor(int ip, std::complex<Real> n[4][4]) const {
+  for (int i = 0; i < 4; i++) {
+    n[i][i] = std::complex<Real>(polten[i][ip], 0.);
+    for (int j = i+1; j < 4; j++) {
+      const int p = 4 + 2*kPairIndex[i][j];
+      n[i][j] = std::complex<Real>(polten[p][ip], polten[p+1][ip]);
+      n[j][i] = std::conj(n[i][j]);
+    }
+  }
+}
+
+void Photon::StoreTensor(int ip, const std::complex<Real> n[4][4]) {
+  for (int i = 0; i < 4; i++) {
+    polten[i][ip] = n[i][i].real();
+    for (int j = i+1; j < 4; j++) {
+      const int p = 4 + 2*kPairIndex[i][j];
+      polten[p][ip] = n[i][j].real();
+      polten[p+1][ip] = n[i][j].imag();
+    }
+  }
+}
+
+std::complex<Real> Photon::Tensor(int ip, int i, int j) const {
+  if (i == j) return std::complex<Real>(polten[i][ip], 0.);
+  const int p = 4 + 2*kPairIndex[i][j];
+  const std::complex<Real> upper(polten[p][ip], polten[p+1][ip]);
+  return (i < j) ? upper : std::conj(upper);
 }
 
 //--------------------------------------------------------------------------------------
@@ -237,6 +340,7 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
   inscp = AddIntProperty("nscp");
   istatp = AddIntProperty("statp");
   ityp = AddIntProperty("type");
+  inmvp = AddIntProperty("nmv");
 
   // Add photon position.
   ix0p = AddRealProperty("x0");
@@ -252,11 +356,13 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
 
   if (pmc->general_pusher_flag) {
     general_pusher_flag = true;
-    // Add change in photon momentum.
+#if MC_VERLET_DK
+    // Add change in photon momentum (Verlet only; see MC_VERLET_DK in photon.hpp).
     idk0p = AddRealProperty("dk0");
     idk1p = AddRealProperty("dk1");
     idk2p = AddRealProperty("dk2");
     idk3p = AddRealProperty("dk3");
+#endif
   }
 
   // Add energy, weight, and opacities.
@@ -275,21 +381,19 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
   // Add time remaining parameter
   idtp = AddRealProperty("dtp");
 
-  if (pmc->polarized) {
-    polarized = true;
+  if (IsPolarized(pmc->polarized)) {
+    polarized = pmc->polarized;
     // Add stokes vectors
     isip = AddRealProperty("sip");
     isqp = AddRealProperty("sqp");
     isup = AddRealProperty("sup");
     isvp = AddRealProperty("svp");
     if (general_pusher_flag) {
-      // Add complex polarization tensor
-      for (int i=0; i<4; i++) {
-        for (int j=0; j<4; j++) {
-          int idummy = AddComplexProperty("pol"+std::to_string(i)+std::to_string(j));
-          if ( (i==0) && (j==0))
-            ipolp = idummy;
-          }
+      // The coherency tensor, as sixteen consecutive real columns (Hermitian storage; the
+      // layout is TensorSlot's).  Consecutive because polten is a pointer to the first.
+      for (int n = 0; n < 16; n++) {
+        int idummy = AddRealProperty("pol"+std::to_string(n));
+        if (n == 0) ipolp = idummy;
       }
     }
   }
@@ -401,14 +505,14 @@ void Photon::SendToNeighbors() {
     for (int j = 0; j < nint; ++j)
       *pi++ = intprop[j][k];
     Real *pr(ppb->rbuf + ParticleBuffer::nreal * ppb->npar);
-    for (int j = 0; j < nreal; ++j) {
+    // rp1 deliberately not sent: it is the dust integrator's second register and no
+    // Monte Carlo code path reads it.  See Particles::Resize.
+    for (int j = 0; j < nreal; ++j)
       *pr++ = rp[j][k];
-      *pr++ = rp1[j][k];
-    }
     for (int j = 0; j < naux; ++j)
       *pr++ = aux[j][k];
-    // copy complex properties
-    if (general_pusher_flag && polarized) {
+    // copy complex properties (none at present: the coherency tensor travels as reals)
+    if (ParticleBuffer::ncplx > 0) {
       std::complex<Real> *pc(ppb->cbuf + ParticleBuffer::ncplx * ppb->npar);
       for (int j = 0; j < ncplx; ++j) {
         *pc++ = cplxprop[j][k];
@@ -420,15 +524,43 @@ void Photon::SendToNeighbors() {
     --k;
   }
 
+  // Nothing was handed off and no neighbor is on another rank, so there is nobody to
+  // notify: same-rank neighbors already sit at "completed" (see Photon::ClearBoundary),
+  // and walking the neighbor list to tell each of them "nothing for you" is exactly the
+  // per-block, per-round cost that dominates a run with many small blocks.
+  const bool rank_exchange = (pmy_mcb->pmy_mc->pexch != nullptr
+                              && pmy_mcb->pmy_mc->pexch->Active());
+  if (nbuf == 0 && (rank_exchange || !has_offrank_neighbor_)) return;
+
   // Send to neighbor processes and update boundary status.
   for (int i = 0; i < pbval_->nneighbor; ++i) {
     NeighborBlock& nb = pbval_->neighbor[i];
     int dst = nb.snb.rank;
     if (dst == Globals::my_rank) {
-      Particles *ppar = pmy_mesh->FindMeshBlock(nb.snb.gid)->pmy_mcb->pphot;
-      ppar->bstatus_[nb.targetid] =
-          (ppar->recv_[nb.targetid].npar > 0) ? BoundaryStatus::arrived
-                                              : BoundaryStatus::completed;
+      Photon *ppar = pmy_mesh->FindMeshBlock(nb.snb.gid)->pmy_mcb->pphot;
+      if (ppar->recv_[nb.targetid].npar > 0) {
+        ppar->bstatus_[nb.targetid] = BoundaryStatus::arrived;
+        // tell the receive sweep this block has something waiting for it
+        ppar->has_incoming_ = true;
+      } else {
+        ppar->bstatus_[nb.targetid] = BoundaryStatus::completed;
+      }
+    } else if (pmy_mcb->pmy_mc->pexch != nullptr
+               && pmy_mcb->pmy_mc->pexch->Active()) {
+#ifdef MPI_PARALLEL
+      // Hand these to the rank exchange instead of opening a conversation with this one
+      // neighbor block.  Everything leaving for that rank, from every block here, goes in
+      // one message at the end of the round.  Nothing is sent when there is nothing to
+      // send: the receiver no longer waits on a per-link count, so silence is the signal.
+      ParticleBuffer& send = send_[nb.bufid];
+      if (send.npar > 0) {
+        pmy_mcb->pmy_mc->pexch->Stage(nb.snb.rank, nb.snb.lid, nb.targetid,
+                                      send.ibuf, send.rbuf, send.cbuf, send.npar);
+        // Handed over, so empty the slot: the send sweep runs more than once per round
+        // now, and anything still sitting here would be staged a second time.
+        send.npar = 0;
+      }
+#endif
     } else {
 #ifdef MPI_PARALLEL
       ParticleBuffer& send = send_[nb.bufid];
@@ -453,7 +585,7 @@ void Photon::SendToNeighbors() {
                   dst, send.tag + 2, my_comm, &req);
         MPI_Request_free(&req);
         // Send complex properties
-        if (general_pusher_flag && polarized) {
+        if (ParticleBuffer::ncplx > 0) {
           MPI_Isend(send.cbuf, npsend * ParticleBuffer::ncplx, MPI_ATHENA_COMPLEX,
                     dst, send.tag + 3, my_comm, &req);
           MPI_Request_free(&req);
@@ -592,7 +724,7 @@ bool Photon::ReceiveFromNeighbors() {
 	    //MPI_Status stat;
 	    //MPI_Request_get_status(recv.reqr,&test,&stat);
 	    //printf("t2: %d %d %d %d %d %d %d %d %d %d\n",Globals::my_rank,nb_rank,nb.snb.lid,nb.bufid,recv.tag+1,pmy_block->lid,test,stat.MPI_SOURCE,stat.MPI_TAG,stat.MPI_ERROR);
-            if (general_pusher_flag && polarized) {
+            if (ParticleBuffer::ncplx > 0) {
               MPI_Irecv(recv.cbuf, recv.npar * ParticleBuffer::ncplx, MPI_ATHENA_COMPLEX,
                         nb_rank, recv.tag + 3, my_comm, &recv.reqc);
             }
@@ -609,7 +741,7 @@ bool Photon::ReceiveFromNeighbors() {
         if (!recv.flagr) {
           MPI_Test(&recv.reqr, &recv.flagr, MPI_STATUS_IGNORE);
 	}
-        if (general_pusher_flag && polarized) {
+        if (general_pusher_flag && IsPolarized(polarized)) {
           if (!recv.flagc)
             MPI_Test(&recv.reqc, &recv.flagc, MPI_STATUS_IGNORE);
           if (recv.flagi && recv.flagr && recv.flagc) {
@@ -645,6 +777,7 @@ bool Photon::ReceiveFromNeighbors() {
         ParticleBuffer& recv = recv_[nb.bufid];
         int nparold = npar;
         FlushReceiveBuffer(recv);
+        EnsureScratch();
         // Update Photon position indices
         GetPositionIndices(nparold,npar-1);
         //        printf("recv %d %d %d\n",Globals::my_rank,nparold,npar-1);
@@ -654,6 +787,107 @@ bool Photon::ReceiveFromNeighbors() {
   }
 
   return flag;
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn int Photon::PropertyCountInt()
+//! \brief per-photon property counts, exposed for MCRankExchange's buffer arithmetic
+
+int Photon::PropertyCountInt()  { return ParticleBuffer::nint; }
+int Photon::PropertyCountReal() { return ParticleBuffer::nreal; }
+int Photon::PropertyCountCplx() { return ParticleBuffer::ncplx; }
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::CollectPeerRanks(std::vector<bool> &seen) const
+//! \brief mark every rank this block has a neighbor on
+
+void Photon::CollectPeerRanks(std::vector<bool> &seen) const {
+  for (int i = 0; i < pbval_->nneighbor; ++i)
+    seen[pbval_->neighbor[i].snb.rank] = true;
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::AcceptPhotons(int bufid, ...)
+//! \brief fill one receive slot from the rank exchange
+//!
+//! Leaves the buffer in exactly the state an off-rank MPI receive used to leave it in, so
+//! FlushReceiveBuffer downstream cannot tell the two apart.
+
+void Photon::AcceptPhotons(int bufid, const int *ib, const Real *rb,
+                           const std::complex<Real> *cb, int npar) {
+  if (npar <= 0) return;
+  ParticleBuffer& recv = recv_[bufid];
+  // Append rather than overwrite.  Several rounds of local transport can happen before
+  // the ranks exchange, so the same neighbor link may contribute more than once to a
+  // single message, and the second batch must not land on top of the first.
+  const int nold = recv.npar;
+  if (nold + npar > recv.nparmax) recv.Reallocate(nold + npar);
+  const int ni = PropertyCountInt(), nr = PropertyCountReal(), nc = PropertyCountCplx();
+  for (int n = 0; n < npar*ni; ++n) recv.ibuf[nold*ni + n] = ib[n];
+  for (int n = 0; n < npar*nr; ++n) recv.rbuf[nold*nr + n] = rb[n];
+  if (nc > 0 && cb != nullptr) {
+    for (int n = 0; n < npar*nc; ++n) recv.cbuf[nold*nc + n] = cb[n];
+  }
+  recv.npar = nold + npar;
+  bstatus_[bufid] = BoundaryStatus::arrived;
+  has_incoming_ = true;
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::SetOffRankNeighborFlag()
+//! \brief record whether any neighbor of this block lives on another rank
+//!
+//! Fixed for the life of the mesh, so it is worked out once after LinkNeighbors rather
+//! than rediscovered every transfer round.
+
+void Photon::SetOffRankNeighborFlag() {
+  has_offrank_neighbor_ = false;
+#ifdef MPI_PARALLEL
+  for (int i = 0; i < pbval_->nneighbor; ++i) {
+    if (pbval_->neighbor[i].snb.rank != Globals::my_rank) {
+      has_offrank_neighbor_ = true;
+      return;
+    }
+  }
+#endif
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::ClearBoundary()
+//! \brief reset the boundary state between transfer rounds
+//!
+//! See the note in photon.hpp: same-rank neighbors start "completed" rather than
+//! "waiting", because a same-rank hand-off is a direct write during the send sweep and
+//! there is nothing to poll for.  That is what lets a block with no photons and no
+//! delivery be skipped entirely, instead of having to report "nothing for you" to each
+//! of its neighbors every round.
+
+void Photon::ClearBoundary() {
+  // With the rank exchange running there is nothing to poll for on either kind of
+  // neighbor: same-rank hand-offs are direct writes, and off-rank photons are delivered
+  // by MCRankExchange before the receive sweep.  A slot only becomes "arrived" when
+  // something was actually put in it.
+  const bool rank_exchange = (pmy_mcb->pmy_mc->pexch != nullptr
+                              && pmy_mcb->pmy_mc->pexch->Active());
+  for (int i = 0; i < pbval_->nneighbor; ++i) {
+    NeighborBlock& nb = pbval_->neighbor[i];
+    if (nb.snb.rank == Globals::my_rank || rank_exchange) {
+      bstatus_[nb.bufid] = BoundaryStatus::completed;
+#ifdef MPI_PARALLEL
+      if (nb.snb.rank != Globals::my_rank) send_[nb.bufid].npar = 0;
+#endif
+    } else {
+      bstatus_[nb.bufid] = BoundaryStatus::waiting;
+#ifdef MPI_PARALLEL
+      ParticleBuffer& recv = recv_[nb.bufid];
+      recv.mpi_active = false;
+      recv.flagn = recv.flagi = recv.flagr = recv.flagc = 0;
+      recv.reqn = recv.reqi = recv.reqr = recv.reqc = MPI_REQUEST_NULL;
+      send_[nb.bufid].npar = 0;
+#endif
+    }
+  }
+  has_incoming_ = false;
 }
 
 //--------------------------------------------------------------------------------------
@@ -705,7 +939,7 @@ void Photon::GetPositionIndices(int ibegin, int iend) {
     }
     // MeshCoordsToIndicies can fail for refined grids so we make some checks
 
-    // First check to make zone index is correct
+    // First check to make cell index is correct
     MCCoord *pco = pmy_mcb->pcoord;
     while (x1p[k] > pco->x1f(i1p[k]+1)) {
       i1p[k]++;
@@ -744,7 +978,7 @@ void Photon::GetPositionIndices(int ibegin, int iend) {
       }
     }
     bool on_block = true;
-    // Next check to see if sample landed in active zone or adjacent
+    // Next check to see if sample landed in active cell or adjacent
     if ( (i1p[k] < is-1) || (i1p[k] > ie+1) || (i2p[k] < js-1) || (i2p[k] > je+1)
          || (i3p[k] < ks-1) || (i3p[k] > ke+1) ) {
       on_block = false;

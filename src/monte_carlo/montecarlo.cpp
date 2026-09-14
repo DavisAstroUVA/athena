@@ -7,9 +7,22 @@
 //! \brief implementation of functions in class MonteCarlo, MCRandom
 
 // C++ headers
-#include <stdexcept>  // runtime_error
+#include <algorithm>  // min, max
+#include <cstdio>
+#include <iostream>
 #include <random>
+#include <stdexcept>  // runtime_error
+// C++ headers
+#include <cstring>  // strcmp
+#include <string>
+#include <vector>
+
+#ifdef MPI_PARALLEL
+#include <sched.h>  // sched_yield, for the idle wait in TransportAsync
+#endif
+
 // Athena++ headers
+#include "mcexchange.hpp"
 #include "montecarlo.hpp"
 #include "../globals.hpp"
 #include "../parameter_input.hpp"
@@ -62,7 +75,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   dynamic = pin->GetOrAddBoolean("montecarlo","dynamic",false);
   coupled = pin->GetOrAddBoolean("montecarlo","coupled",false);
   boosts = pin->GetOrAddBoolean("montecarlo","boosts",false);
-  polarized = pin->GetOrAddBoolean("montecarlo","polarized",false);
+  polarized = GetMCPolarizationFlag(pin->GetOrAddString("montecarlo","polarized","none"));
   acceleration = pin->GetOrAddBoolean("montecarlo","acceleration",false);
   time_acc = pin->GetOrAddBoolean("montecarlo","time_acc",false);
   verbose = pin->GetOrAddBoolean("montecarlo", "verbose", true);
@@ -73,9 +86,16 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     general_pusher_flag = pin->GetOrAddBoolean("montecarlo","general_pusher",false);
   scattering_meth = GetScatteringFlag(pin->GetOrAddString("montecarlo","scattering",
                                                           "none"));
+  // Which metric the module integrates on.  Must come before SetGeometryTag and before
+  // any MonteCarloBlock is constructed.
+  SetCoordinateSystem(pin);
   // Canonical tag describing the geometry and wavevector convention of the outputs.
   // Must come after general_pusher_flag is known.
   SetGeometryTag(pin);
+  // free parameters of that metric, for the output headers
+  SetMetricParams(pin);
+  // The frame the outputs measure directions and polarization in
+  frame_tag = general_pusher_flag ? "normal" : "lab";
   nuser_var = 0; // photon user variables to zero
   nuser_mom = 0; // user moments
 
@@ -92,7 +112,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   max_phots_init = pin->GetOrAddInteger("montecarlo","max_phots_init",10000);
   list_size_init = pin->GetOrAddInteger("montecarlo","list_size_init",10000);
   checkscat = pin->GetOrAddInteger("montecarlo","checkscat",10000);
-  checkmove = pin->GetOrAddInteger("montecarlo","checkmove",10000);
+  capmove = pin->GetOrAddInteger("montecarlo","capmove",0);
 
   // Initialize user MonteCarlo data before initializing MonteCarloBlocks
   // Should be caleld before Output constuctor
@@ -132,6 +152,25 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     int nrbx2 = pmy_mesh->mesh_size.nx2/pmb->block_size.nx2;
     int nrbx3 = pmy_mesh->mesh_size.nx3/pmb->block_size.nx3;
     my_blocks(i)->pphot->LinkNeighbors(pmy_mesh->tree, nrbx1, nrbx2, nrbx3, root_level);
+    // Which blocks straddle a rank boundary is fixed once the neighbors are linked, and
+    // the transfer round needs it every time, so record it here rather than rediscover
+    // it each round.
+    my_blocks(i)->pphot->SetOffRankNeighborFlag();
+  }
+
+  // Photons crossing a rank boundary move a rank at a time rather than a block-neighbor
+  // at a time.  Off by setting <montecarlo>/rank_exchange = false, which restores the
+  // per-block protocol; the two give identical results, the difference is message count.
+  local_max_sweeps = pin->GetOrAddInteger("montecarlo", "local_max_sweeps", 1000);
+  async_term = pin->GetOrAddBoolean("montecarlo", "async_term", true);
+  pexch = nullptr;
+  if (pin->GetOrAddBoolean("montecarlo", "rank_exchange", true)) {
+    pexch = new MCRankExchange(this);
+    pexch->BuildPeerList();
+    if (Globals::my_rank == 0 && pexch->Active() && verbose) {
+      std::cout << "Monte Carlo photon exchange: aggregated by rank, "
+                << pexch->NumPeers() << " peer(s) on rank 0" << std::endl;
+    }
   }
 }
 
@@ -141,6 +180,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 MonteCarlo::~MonteCarlo() {
 
   delete pmcout;
+  delete pexch;
   for (int i=0; i<nblocal; i++)
     delete my_blocks(i);
 }
@@ -185,6 +225,33 @@ enum AbsorptionMethodFlag GetAbsorptionMethodFlag(std::string input_string) {
     ATHENA_ERROR(msg);
   }
 
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn enum MCPolarization GetMCPolarizationFlag(std::string input_string)
+//! \brief set polarization tracking flag
+//
+// Accepts the legacy booleans as well as the named modes, so existing input files keep
+// working: false means none, true means linear, which is what "true" has always done.
+
+enum MCPolarization GetMCPolarizationFlag(std::string input_string) {
+  if (input_string == "none" || input_string == "false"
+      || input_string == "0" || input_string == "False") {
+    return MCPOL_NONE;
+  } else if (input_string == "linear" || input_string == "true"
+             || input_string == "1" || input_string == "True") {
+    return MCPOL_LINEAR;
+  } else if (input_string == "circular") {
+    return MCPOL_CIRCULAR;
+  } else {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in GetMCPolarizationFlag" << std::endl
+        << "Input string=" << input_string << " not a valid polarization mode."
+        << std::endl
+        << "Use none, linear or circular (true and false are still accepted, "
+        << "as linear and none)." << std::endl;
+    ATHENA_ERROR(msg);
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -492,12 +559,44 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
   tmax *= time_cgs;
 
   // Initialize monte carlo blocks
+ 
+  // loop_max_size caps the photons resident on ONE block, so the memory it authorizes is
+  // multiplied by however many blocks land on a rank. max_resident_photons bounds that
+  // product instead, which is the quantity that has to fit in memory. The per-block cap
+  // still applies on top.
+  const int per_block_cap = pin->GetOrAddInteger("montecarlo","loop_max_size",10000);
+  const int photon_budget =
+      pin->GetOrAddInteger("montecarlo","max_resident_photons",1000000);
+  int loop_max = per_block_cap;
+  if (photon_budget > 0 && nblocal > 0)
+    loop_max = std::min(per_block_cap, std::max(1, photon_budget/nblocal));
+
+  // Report only when the budget actually binds; otherwise this is noise.  The range is
+  // taken across ranks because an unbalanced mesh gives them different block counts and so
+  // different shares.
+  {
+    int lo = loop_max, hi = loop_max, nbmax = nblocal;
+#ifdef MPI_PARALLEL
+    MPI_Allreduce(MPI_IN_PLACE, &lo, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &hi, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &nbmax, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+#endif
+    if (Globals::my_rank == 0 && lo < per_block_cap) {
+      std::cout << "Monte Carlo: loop_max_size cut from " << per_block_cap << " to ";
+      if (lo == hi) std::cout << lo;
+      else std::cout << lo << "-" << hi;
+      std::cout << " by <montecarlo>/max_resident_photons = " << photon_budget
+                << " (up to " << nbmax << " blocks per rank)" << std::endl;
+    }
+  }
+
   for (int i=0; i<nblocal; i++) {
     MonteCarloBlock *pmcb = my_blocks(i);
     // Initialize variables over all blocks
     pmcb->GetDensity();
     pmcb->GetTemperature();
     pmcb->GetNumberDensity();
+    pmcb->ComputeFreeFreePrefactor();
     if (boosts) {
       pmcb->GetVelocity();
       pmcb->ComputeTransformations();
@@ -511,7 +610,7 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
 
     // initialize counters to zero
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
-    pmcb->loop_max_size = pin->GetOrAddInteger("montecarlo","loop_max_size",10000);
+    pmcb->loop_max_size = loop_max;
 
     // Call problem generators for Monte Carlo
     pmcb->MonteCarloProblemGenerator(pin);
@@ -520,55 +619,208 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::SetCoordinateSystem(ParameterInput *pin)
+//! \brief resolve the metric the Monte Carlo module will integrate on
+//
+// COORDINATE_SYSTEM fixes the choice where it can, and <montecarlo>/mc_coord
+// supplies it where it cannot.  mc_coord is required for gr_user and optional elsewhere,
+// where it is checked for consistency rather than obeyed -- naming a metric that
+// contradicts the build is a mistake worth reporting, not a request.
+//
+// Must be called before SetGeometryTag and before any MonteCarloBlock is constructed.
+
+void MonteCarlo::SetCoordinateSystem(ParameterInput *pin) {
+
+  // std::strcmp, not ==: COORDINATE_SYSTEM is a bare string literal, so == compares
+  // addresses.  This is the one place in the module that has to look at it.
+  bool implied_known = true;
+  MCCoordSystem implied;
+  if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+    implied = MCCOORD_CARTESIAN;
+  } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+    implied = MCCOORD_CYLINDRICAL;
+  } else if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0) {
+    implied = MCCOORD_SPHERICAL_POLAR;
+  } else if (std::strcmp(COORDINATE_SYSTEM, "minkowski") == 0) {
+    implied = MCCOORD_MINKOWSKI;
+  } else if (std::strcmp(COORDINATE_SYSTEM, "kerr-schild") == 0) {
+    // Retained rather than folded into mc_coord so existing input files keep working.
+    implied = pin->GetOrAddBoolean("montecarlo","boyerlindquist",false)
+              ? MCCOORD_BOYER_LINDQUIST : MCCOORD_KERR_SCHILD;
+  } else {
+    // gr_user, or a coordinate system the module does not support at all
+    implied_known = false;
+    implied = MCCOORD_KERR_SCHILD_CARTESIAN;
+  }
+
+  std::string name = pin->GetOrAddString("montecarlo","mc_coord","");
+
+  if (name.empty()) {
+    if (!implied_known) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo::SetCoordinateSystem" << std::endl
+          << "Coordinate system '" << COORDINATE_SYSTEM << "' does not determine the "
+          << "Monte Carlo metric." << std::endl
+          << "Set <montecarlo>/mc_coord to one of: kerr_schild_cartesian, snake."
+          << std::endl
+          << "Note that this previously defaulted to kerr_schild_cartesian; set that "
+          << "explicitly to reproduce the old behaviour." << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    coord_system = implied;
+  } else {
+    bool matched = false;
+    for (int c = MCCOORD_CARTESIAN; c <= MCCOORD_SNAKE; ++c) {
+      if (name == GetMCCoordSystemName(static_cast<MCCoordSystem>(c))) {
+        coord_system = static_cast<MCCoordSystem>(c);
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo::SetCoordinateSystem" << std::endl
+          << "Unrecognized <montecarlo>/mc_coord = '" << name << "'." << std::endl
+          << "Valid values are:";
+      for (int c = MCCOORD_CARTESIAN; c <= MCCOORD_SNAKE; ++c)
+        msg << " " << GetMCCoordSystemName(static_cast<MCCoordSystem>(c));
+      msg << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    if (implied_known && coord_system != implied) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo::SetCoordinateSystem" << std::endl
+          << "<montecarlo>/mc_coord = '" << name << "' contradicts the configured "
+          << "coordinate system '" << COORDINATE_SYSTEM << "', which implies '"
+          << GetMCCoordSystemName(implied) << "'." << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+
+  // The pusher is chosen from the coordinate system, not from general_pusher_flag: the
+  // MonteCarloBlock constructor honours the flag only for Cartesian and spherical-polar
+  // and builds a GeneralPusher unconditionally for everything else.  The flag still
+  // selects the four-vector storage convention and gates the polarization and frame
+  // machinery, so the two must agree.  Reject rather than silently correct: the flag also
+  // changes what the outputs mean, so flipping it under the user would misdescribe files
+  // they are about to write.
+  if (IsMCPusherAlwaysGeneral(coord_system) && !general_pusher_flag) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo::SetCoordinateSystem" << std::endl
+        << "Coordinate system '" << GetMCCoordSystemName(coord_system)
+        << "' is always integrated with GeneralPusher, but <montecarlo>/general_pusher"
+        << std::endl
+        << "is false.  Set <montecarlo>/general_pusher = true." << std::endl
+        << std::endl
+        << "general_pusher does not select the pusher.  It selects the four-vector "
+        << "storage" << std::endl
+        << "convention -- with it false, TransformToCoordinate stores a unit spatial "
+        << "direction" << std::endl
+        << "plus ep while RK4Step reads k1p..k3p as contravariant components, so the "
+        << "geodesics" << std::endl
+        << "are integrated on the wrong vector.";
+    if (IsPolarized(polarized)) {
+      msg << "  With polarized = "
+          << GetMCPolarizationName(polarized) << " it also silently disables the"
+          << std::endl
+          << "Stokes/coherency conversions in polarization.cpp and drops the "
+          << "polarization" << std::endl
+          << "tensor whenever a photon crosses a MeshBlock boundary.";
+    }
+    msg << std::endl;
+    ATHENA_ERROR(msg);
+  }
+
+  topology = GetMCTopology(coord_system);
+  curved_metric = IsMCMetricCurved(coord_system);
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::SetMetricParams(ParameterInput *pin)
+//! \brief record the metric's free parameters for the output headers
+//
+// Parameters of special metrics, such as spin and mass in Kerr.  Written as
+// "key=value" pairs so readers can parse it generically and so a metric added
+// later needs no reader change.
+
+void MonteCarlo::SetMetricParams(ParameterInput *pin) {
+
+  char buf[256];
+  switch (coord_system) {
+    case MCCOORD_KERR_SCHILD:
+    case MCCOORD_BOYER_LINDQUIST:
+    case MCCOORD_KERR_SCHILD_CARTESIAN:
+      std::snprintf(buf, sizeof(buf), "m=%.17g,a=%.17g",
+                    pin->GetOrAddReal("coord", "m", 1.0),
+                    pin->GetOrAddReal("coord", "a", 0.0));
+      metric_params = buf;
+      break;
+    case MCCOORD_SNAKE:
+      std::snprintf(buf, sizeof(buf), "snake_a=%.17g,snake_k=%.17g",
+                    pin->GetOrAddReal("coord", "snake_a", 0.0),
+                    pin->GetOrAddReal("coord", "snake_k", 0.0));
+      metric_params = buf;
+      break;
+    default:
+      // flat metrics in their own coordinates have no free parameters
+      metric_params = "";
+      break;
+  }
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarlo::SetGeometryTag(ParameterInput *pin)
 //! \brief build the canonical geometry tag written into photon list/trajectory headers
-//!
-//! COORDINATE_SYSTEM alone does not say enough to interpret an output list.  Three
-//! distinctions are invisible in it:
-//!
-//!   - gr_user is always instantiated as MCKerrSchildCartesian, so the name says nothing
-//!     about the actual metric;
-//!   - kerr-schild with boyerlindquist = true is really Boyer-Lindquist, not Kerr-Schild;
-//!   - cartesian and spherical_polar select GeneralPusher or the legacy pusher depending
-//!     on general_pusher, and the two store the wavevector differently.  The legacy
-//!     pushers keep a unit orthonormal three-vector alongside the energy, while
-//!     GeneralPusher keeps genuine contravariant components -- in spherical coordinates
-//!     k^theta and k^phi then need factors of r and r sin(theta) to be orthonormalized.
-//!
-//! Post-processing has to know all three, so the tag encodes them.  It doubles as a
-//! format discriminator: the tags below are new strings, so a list written before this
-//! change (coord=kerr-schild, gr_user, minkowski, ...) is recognizably the old layout,
-//! in which the energy column held k^t rather than the conserved -k_t.
+//
+// coord_system fixes the metric but still does not say enough to interpret an output
+// list: cartesian and spherical_polar select GeneralPusher or the legacy pusher
+// depending on general_pusher, and the two store the wavevector differently.  The legacy
+// pushers keep a unit orthonormal three-vector alongside the energy, while GeneralPusher
+// keeps genuine contravariant components 
+//
+//! Post-processing has to know both, so the tag encodes them.  It doubles as a format
+//! discriminator: the tags below are new strings, so a list written before this change
+//! (coord=kerr-schild, gr_user, minkowski, ...) is recognizably the old layout, in which
+//! the energy column held k^t rather than the conserved -k_t.
+//
+// Must be called after SetCoordinateSystem and after general_pusher_flag is known.
 
 void MonteCarlo::SetGeometryTag(ParameterInput *pin) {
 
-  bool bl = pin->GetOrAddBoolean("montecarlo","boyerlindquist",false);
-
-  if (COORDINATE_SYSTEM == "cartesian") {
-    geometry_tag = general_pusher_flag ? "cartesian_gp" : "cartesian";
-    relativistic_output = false;
-  } else if (COORDINATE_SYSTEM == "spherical_polar") {
-    geometry_tag = general_pusher_flag ? "spherical_gp" : "spherical_polar";
-    relativistic_output = false;
-  } else if (COORDINATE_SYSTEM == "cylindrical") {
-    geometry_tag = "cylindrical_gp";
-    relativistic_output = false;
-  } else if (COORDINATE_SYSTEM == "minkowski") {
-    geometry_tag = "minkowski_cart";
-    relativistic_output = true;
-  } else if (COORDINATE_SYSTEM == "kerr-schild") {
-    geometry_tag = bl ? "bl_spherical" : "ks_spherical";
-    relativistic_output = true;
-  } else if (COORDINATE_SYSTEM == "gr_user") {
-    geometry_tag = "ks_cartesian";
-    relativistic_output = true;
-  } else {
-    std::stringstream msg;
-    msg << "### FATAL ERROR in MonteCarlo::SetGeometryTag" << std::endl
-        << "No output geometry tag defined for coordinate system "
-        << COORDINATE_SYSTEM << std::endl;
-    ATHENA_ERROR(msg);
+  switch (coord_system) {
+    case MCCOORD_CARTESIAN:
+      geometry_tag = general_pusher_flag ? "cartesian_gp" : "cartesian";
+      break;
+    case MCCOORD_SPHERICAL_POLAR:
+      geometry_tag = general_pusher_flag ? "spherical_gp" : "spherical_polar";
+      break;
+    case MCCOORD_CYLINDRICAL:
+      geometry_tag = "cylindrical_gp";
+      break;
+    case MCCOORD_MINKOWSKI:
+      geometry_tag = "minkowski_cart";
+      break;
+    case MCCOORD_KERR_SCHILD:
+      geometry_tag = "ks_spherical";
+      break;
+    case MCCOORD_BOYER_LINDQUIST:
+      geometry_tag = "bl_spherical";
+      break;
+    case MCCOORD_KERR_SCHILD_CARTESIAN:
+      geometry_tag = "ks_cartesian";
+      break;
+    case MCCOORD_SNAKE:
+      geometry_tag = "snake_cart";
+      break;
   }
+
+  // Flat-but-relativistic metrics (Minkowski, snake) carry -k_t in the list just as the
+  // curved ones do, so this asks IsMCRelativistic rather than curved_metric.
+  relativistic_output = IsMCRelativistic(coord_system);
 
   return;
 }
@@ -831,6 +1083,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       pmcb->GetDensity();
       pmcb->GetTemperature();
       pmcb->GetNumberDensity();
+      pmcb->ComputeFreeFreePrefactor();
       if (boosts) {
         pmcb->GetVelocity();
         pmcb->ComputeTransformations();
@@ -872,20 +1125,45 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     DistributeSamples(etype);
     emission_method = etype;
 
+    // The peer list and the lids staged against it were fixed when the mesh was built, so
+    // check here, before any photon moves, that nothing has since redistributed blocks
+    // across ranks.  Once per transport is the right place: blocks can only move between
+    // hydro steps, and a per-round check would cost a scan of every block.
+    if (pexch != nullptr && pexch->Active()) pexch->CheckLayoutUnchanged();
+
     // Run Monte Carlo until all photons have escaped/been absorbed
-    bool photons_remain = true; // True if photons on any process
-    while(photons_remain) {
-      for(int nb=0; nb<nblocal; ++nb){
-        if (raytrace_flag)
-          my_blocks(nb)->RayTracePhotonsOnBlock(etype);
-        else
-          my_blocks(nb)->TransferPhotonsOnBlock(etype);
+    if (async_term && pexch != nullptr && pexch->Active()) {
+      TransportAsync(etype);
+    } else {
+      bool photons_remain = true; // True if photons on any process
+      while(photons_remain) {
+        // Keep transporting while photons are only moving between blocks on this rank.
+        // Every pass of the outer loop costs a barrier on every rank, so a photon that
+        // has to cross many blocks should not be buying one per crossing; see
+        // ExchangeLocal.  Capped so that a pair of blocks passing a photon back and forth
+        // cannot hold the other ranks at the barrier indefinitely.
+        const bool local_loop = (pexch != nullptr && pexch->Active());
+        if (local_loop) pexch->Reset();
+        int sweeps = 0;
+        bool local_progress = true;
+        while (local_progress) {
+          for(int nb=0; nb<nblocal; ++nb){
+            if (raytrace_flag)
+              my_blocks(nb)->RayTracePhotonsOnBlock(etype);
+            else
+              my_blocks(nb)->TransferPhotonsOnBlock(etype);
+          }
+          local_progress = ExchangeLocal() && local_loop
+                           && (++sweeps < local_max_sweeps);
+        }
+        photons_remain = FinishRound();
       }
-      photons_remain = CheckAndBroadCastPhotonsRemaining();
     }
 
-    // Report diagnostic results from all blocks
-    int ntot = 0;
+    // Report diagnostic results from all blocks.  All six are reduced as MPI_INT64_T
+    // below, so all six have to be 64 bits wide: reducing into a 32-bit ntot writes four
+    // bytes past it.
+    int64_t ntot = 0;
     int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0;
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
@@ -896,15 +1174,17 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       nscat += pmcb->nscat;
       ntot += pmcb->nphrun;
     }
-    pmcout->UpdateOutputCount(ntot);
+    // Local count only -- this runs before the reduction, so it is bounded by the photons
+    // this rank ran and fits the int the output counters use.
+    pmcout->UpdateOutputCount(static_cast<int>(ntot));
 
   #ifdef MPI_PARALLEL
-    MPI_Allreduce(MPI_IN_PLACE,&nesc,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&nabs,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&ndes,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&nscat,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&ntot,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nesc,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nabs,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&ndes,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nscat,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&ntot,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
   #endif
     if (Globals::my_rank == 0) {
       std::cout  << "ntot: " << ntot
@@ -933,30 +1213,97 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
 //!        process if none remaining.
 
 bool MonteCarlo::CheckAndBroadCastPhotonsRemaining() {
+  if (pexch != nullptr && pexch->Active()) pexch->Reset();
+  ExchangeLocal();
+  return FinishRound();
+}
 
-  // Send photons from all blocks
-  for(int nb=0; nb<nblocal; ++nb){
-    my_blocks(nb)->pphot->SendToNeighbors();
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::ExchangeLocal()
+//! \brief hand photons to blocks on this rank, and set the rest aside for later
+//!
+//! Returns true when something landed here, meaning there is more transport to do without
+//! talking to anyone else.  Photons bound elsewhere are staged in MCRankExchange and go
+//! out once, in FinishRound.
+//!
+//! Separating this from the global step is what lets a rank keep working instead of
+//! taking a barrier for every block a photon crosses.  A nearly horizontal photon in a
+//! domain with periodic sides crosses blocks essentially without end, and measured on a
+//! 32-rank test 99.6% of all rounds were transporting a single such photon while every
+//! rank went through the full round for it.
+//!
+//! Only blocks that can take part are swept.  One with no photons and nothing delivered
+//! cannot send, receive or dirty any boundary state.  Sweeping all of them regardless
+//! costs O(nblocal * nneighbor) whatever the photon count, which is what made a mesh of
+//! many small blocks slow: cost grew as nblocal^1.3 at fixed photon number.
+
+bool MonteCarlo::ExchangeLocal() {
+  const bool rank_exchange = (pexch != nullptr && pexch->Active());
+
+  // A block can only hand photons over if it holds some.  Without the rank exchange one
+  // with an off-rank neighbor takes part regardless, because the receiving rank is
+  // waiting on a per-link count message from it whether or not there is anything to
+  // report; with the exchange running, silence is the signal and it can be skipped.
+  send_list_.clear();
+  for (int nb=0; nb<nblocal; ++nb) {
+    Photon *pp = my_blocks(nb)->pphot;
+    if (pp->nphot > 0 || (!rank_exchange && pp->has_offrank_neighbor_))
+      send_list_.push_back(nb);
   }
+  for (std::size_t n=0; n<send_list_.size(); ++n)
+    my_blocks(send_list_[n])->pphot->SendToNeighbors();
 
-  // Receive photons from all blocks
-  bool complete = false;
-  //int count = 0;
-  while(!complete) {
-    complete = true;
-    for(int nb=0; nb<nblocal; ++nb) {
-      bool success = my_blocks(nb)->pphot->ReceiveFromNeighbors();
-      if (!success)
-        complete = false;
+  return DrainArrivals();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::DrainArrivals()
+//! \brief flush whatever is sitting in receive buffers into the blocks that own them
+
+bool MonteCarlo::DrainArrivals() {
+  const bool rank_exchange = (pexch != nullptr && pexch->Active());
+
+  recv_list_.clear();
+  for (int nb=0; nb<nblocal; ++nb) {
+    Photon *pp = my_blocks(nb)->pphot;
+    if (pp->has_incoming_ || (!rank_exchange && pp->has_offrank_neighbor_))
+      recv_list_.push_back(nb);
+  }
+  const bool landed = !recv_list_.empty();
+
+  // Blocks that report themselves finished drop out rather than being rescanned on every
+  // later pass.  With the rank exchange the first pass finishes all of them: a same-rank
+  // hand-off already happened during the send sweep, and anything from another rank was
+  // delivered before this was called, so there is nothing to poll for.
+  std::vector<int> pending(recv_list_);
+  while (!pending.empty()) {
+    std::size_t keep = 0;
+    for (std::size_t n=0; n<pending.size(); ++n) {
+      if (!my_blocks(pending[n])->pphot->ReceiveFromNeighbors())
+        pending[keep++] = pending[n];
     }
-    //count++;
-    //if (count % 100000 == 0)
-    //printf("here %d %d \n",count, Globals::my_rank);
+    pending.resize(keep);
   }
 
-  // Clear Boundaries
-  for(int nb=0; nb<nblocal; ++nb)
-    my_blocks(nb)->pphot->ClearBoundary();
+  // Only the receivers need clearing: a same-rank send writes into the target's buffer
+  // and leaves the sender's own boundary state untouched.
+  for (std::size_t n=0; n<recv_list_.size(); ++n)
+    my_blocks(recv_list_[n])->pphot->ClearBoundary();
+
+  return landed;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::FinishRound()
+//! \brief send what was staged for other ranks, take delivery, and test for completion
+
+bool MonteCarlo::FinishRound() {
+  // Collective over the peer set, so it runs on every rank whether or not this one had
+  // anything to contribute.
+  if (pexch != nullptr && pexch->Active()) {
+    pexch->ExchangeAndDeliver();
+    DrainArrivals();
+  }
 
   // Check if photons have completed
   int nremain=0,nprop=0;
@@ -964,14 +1311,13 @@ bool MonteCarlo::CheckAndBroadCastPhotonsRemaining() {
     MonteCarloBlock *pmcb = my_blocks(nb);
     nremain += pmcb->nphremain;
     nprop += pmcb->pphot->nphot;
-    //if (pmcb->nphremain > 0)
-    //  printf("rem: %d %d \n",pmcb->pmy_block->gid,pmcb->nphremain);
-    //if (pmcb->pphot->nphot > 0)
-    //  printf("prop: %d %d \n",pmcb->pmy_block->gid,pmcb->pphot->nphot);
   }
 #ifdef MPI_PARALLEL
-  MPI_Allreduce(MPI_IN_PLACE,&nprop,1,MPI_INT,MPI_MAX,MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE,&nremain,1,MPI_INT,MPI_MAX,MPI_COMM_WORLD);
+  // One reduction, blocking over all ranks
+  int counts[2] = {nprop, nremain};
+  MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  nprop = counts[0];
+  nremain = counts[1];
 #endif
 
   bool active;
@@ -980,10 +1326,149 @@ bool MonteCarlo::CheckAndBroadCastPhotonsRemaining() {
   } else {
     active = false;
   }
-  //if (Globals::my_rank == 0) {
-  //  printf("nremain: %d nprop: %d active: %d\n",nremain,nprop,active);
-  //}
   return active;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::TransportAsync(int etype)
+//! \brief transport to completion, deciding the end from photon counters, not a barrier
+//!
+//! FinishRound settles every round with a blocking Allreduce, so the whole run advances
+//! in lockstep at the pace of whichever rank still has a photon.
+//!
+//! So no rank waits on any other here.  A rank transports what it holds, posts what is
+//! leaving without waiting for it to be taken, and picks up whatever has arrived.  The
+//! only question left is when everyone is finished, and that is answered from two running
+//! counters: photons handed to other ranks, and photons taken from them.  Their global
+//! sums differ by exactly the number of photons in flight, so the mesh is done when no
+//! rank holds a photon and the two sums agree.
+//!
+//! That test is taken with a nonblocking reduction, and a single one of them is not
+//! enough to trust.  Its inputs are read at different instants on different ranks, so a
+//! photon can be counted as received before the rank that sent it counted it as sent, and
+//! a lone reduction can report a quiet mesh that is not quiet.  Two consecutive ones are
+//! enough: this rank posts the second only after the first has completed, so if both
+//! report no photons anywhere and the identical pair of totals, then nothing was sent
+//! anywhere between them and nothing was in flight.
+
+void MonteCarlo::TransportAsync(int etype) {
+#ifdef MPI_PARALLEL
+  int64_t sbuf[3] = {0, 0, 0}, rbuf[3] = {0, 0, 0};
+  int64_t prev_sent = -1, prev_recv = -1;
+  int quiet_streak = 0;
+  bool pending = false;
+  MPI_Request treq = MPI_REQUEST_NULL;
+  // Passes spent with neither work nor an arrival, and how many to spin through before
+  // handing the core back.  Small enough that a rank stays responsive to a peer, large
+  // enough that a busy rank alternating between work and short waits never yields.
+  int idle_passes = 0;
+  const int kSpinBeforeYield = 64;
+
+  while (true) {
+    // Retire the previous round's sends before anything can overwrite their buffers.  It
+    // has to come before taking delivery rather than after posting, because it receives
+    // while it waits and a rank that posted nothing must still reach the drain below.
+    //
+    // Both of the calls below can deliver photons -- CompleteSends receives while it
+    // waits -- so what landed is read from the counter across the pair rather than from
+    // the return of the second.  Taking only the latter loses every photon the first one
+    // took: the flush below is skipped, they sit in the receive buffers where the
+    // activity test cannot see them, and the run terminates with photons still in hand.
+    const int64_t recv_before = pexch->NumRecv();
+    pexch->CompleteSends();
+    pexch->DrainIncoming();
+    const bool landed = (pexch->NumRecv() != recv_before);
+
+    // Flushing the receive buffers is only needed when something actually landed: the
+    // sub-loop below already drains what it hands between blocks on this rank, and
+    // ClearBoundary leaves has_incoming_ false behind it, so with nothing delivered here
+    // there is nothing waiting anywhere.  This matters because it is the whole idle path:
+    // a rank waiting on a straggler goes round this loop as fast as it can, and a scan of
+    // every block on each pass would cost more than the barrier it replaced.
+    if (landed) DrainArrivals();
+
+    // Anything to push forward?  A rank with nothing skips the transport sweep entirely
+    // rather than walking every block to find that out.
+    bool have_work = false;
+    for (int nb = 0; nb < nblocal; ++nb) {
+      MonteCarloBlock *pmcb = my_blocks(nb);
+      if (pmcb->pphot->nphot > 0 || pmcb->nphremain > 0) { have_work = true; break; }
+    }
+
+    if (have_work) {
+      pexch->Reset();
+      // local_max_sweeps bounds a same-rank ping-pong here.  Its other job in the
+      // synchronous loop -- keeping two blocks trading a photon from holding every other
+      // rank at the barrier -- does not apply, because there is no barrier to hold them
+      // at.  What it still buys is a return to the drain above, so photons arriving from
+      // other ranks are not left waiting behind an unbounded local sweep.
+      int sweeps = 0;
+      bool local_progress = true;
+      while (local_progress) {
+        for (int nb = 0; nb < nblocal; ++nb) {
+          if (raytrace_flag)
+            my_blocks(nb)->RayTracePhotonsOnBlock(etype);
+          else
+            my_blocks(nb)->TransferPhotonsOnBlock(etype);
+        }
+        local_progress = ExchangeLocal() && (++sweeps < local_max_sweeps);
+      }
+      pexch->SendStaged();
+      idle_passes = 0;
+    } else if (!landed) {
+      // Nothing to do and nothing arrived.  This rank is waiting on someone else's
+      // straggler and will go round this loop as fast as the probe returns, holding a core
+      // at full tilt for as long as that takes -- which is exactly the cycles the rank
+      // still working needs, once a node is oversubscribed.  Yield after a short spin, so
+      // a peer that is about to send still gets an immediate response but a long wait
+      // costs the scheduler rather than the run.
+      if (++idle_passes > kSpinBeforeYield) sched_yield();
+    }
+
+    // Local contribution to the termination test.  has_incoming_ has to count: a photon
+    // that has been delivered into a block's receive buffer but not yet flushed into the
+    // block is neither in flight nor visible in nphot, and would otherwise vanish from
+    // both sides of the test at once.  A rank that neither had work nor took delivery has
+    // none of the three and does not need to look.
+    int64_t act = 0;
+    if (have_work || landed) {
+      for (int nb = 0; nb < nblocal; ++nb) {
+        MonteCarloBlock *pmcb = my_blocks(nb);
+        act += pmcb->pphot->nphot;
+        act += pmcb->nphremain;
+        if (pmcb->pphot->has_incoming_) ++act;
+      }
+    }
+
+    if (!pending) {
+      sbuf[0] = act;
+      sbuf[1] = pexch->NumSent();
+      sbuf[2] = pexch->NumRecv();
+      MPI_Iallreduce(sbuf, rbuf, 3, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD, &treq);
+      pending = true;
+    } else {
+      int done = 0;
+      MPI_Test(&treq, &done, MPI_STATUS_IGNORE);
+      if (done) {
+        pending = false;
+        const bool quiet = (rbuf[0] == 0 && rbuf[1] == rbuf[2]);
+        if (quiet && rbuf[1] == prev_sent && rbuf[2] == prev_recv) {
+          ++quiet_streak;
+        } else {
+          quiet_streak = quiet ? 1 : 0;
+        }
+        prev_sent = rbuf[1];
+        prev_recv = rbuf[2];
+        if (quiet_streak >= 2) break;
+      }
+    }
+  }
+
+  if (pending) MPI_Wait(&treq, MPI_STATUS_IGNORE);
+  // Termination means every photon this rank sent has been taken, so nothing is left to
+  // wait on here; this just releases the request handles.
+  pexch->CompleteSends();
+#endif
 }
 
 //----------------------------------------------------------------------------------------

@@ -98,8 +98,7 @@ def write_athinput(iseed,nphot,vel,dens,tgas,emin,emax,absmeth='weight',
         outfile.write("scattering = none\n")
     outfile.write("emission   = freefree\n")
     outfile.write("absorption = freefree\n")
-    outfile.write("polarized = false\n")
-    outfile.write("checkmove = 100000\n")
+    outfile.write("polarized = none\n")
     outfile.write("abs_method = "+absmeth+"\n")
     if boosts:
         outfile.write("boosts     = true\n")

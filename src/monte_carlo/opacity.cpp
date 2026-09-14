@@ -44,26 +44,20 @@ Real NoOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
 Real FreeFreeAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
-  Real &energy = pphot->ep[ip];
-  int &i1 = pphot->i1p[ip];
-  int &i2 = pphot->i2p[ip];
-  int &i3 = pphot->i3p[ip];
+  // chi_ff = [ffnrm n_e n_ion / sqrt(T)] nu^{-3} (1 - exp(-h nu / k T)).  The bracket
+  // and 1/(k T) are per cell and come from ff_cell, filled by
+  // MonteCarloBlock::ComputeFreeFreePrefactor.
+  
+  const Real energy = pphot->ep[ip];
+  const int i1 = pphot->i1p[ip];
+  const int i2 = pphot->i2p[ip];
+  const int i3 = pphot->i3p[ip];
 
-  Real ffnrm = 3.692146e8;
-  Real h = 6.62607015e-27;
-  Real kb = 1.380649e-16;
+  const Real h = 6.62607015e-27;
+  const Real nu = energy / h;
+  const Real ehnu = exp(-energy * pmcb->ff_cell(1,i3,i2,i1));
 
-  //ffnrm *= 12.;  // Added to match the Athena++ prescription
-
-  Real nu = energy / h;
-  Real tgas = pmcb->tgas(i3,i2,i1);
-  Real ehnu = exp(-energy / (kb * tgas) );
-
-  Real aff = ffnrm/sqrt(tgas)/pow(nu,3);
-  Real nel = pmcb->species(0,i3,i2,i1);
-  Real nion = pmcb->species(1,i3,i2,i1);
-
-  return nel * nion * aff * (1. - ehnu);
+  return pmcb->ff_cell(0,i3,i2,i1) * (1. - ehnu) / (nu * nu * nu);
 
 }
 
@@ -201,12 +195,21 @@ Real DustScatteringOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 //! \fn void GenerateComptonTable(int io)
 //! \brief Generates lookup table used by ComptonOpacity()
 //
-// Computes look up table for integrated cross section of a Maxwellian
-// distribution of electrons. Current version uses direct integration as
-// in GRMONTY rather than approximate method of PSS.  Values are chosen to
-// match GRMONTY (Dolence et al. 2009) defaults
+// Computes look up table for integrated cross section of a Maxwellian distribution of
+// electrons. Current version uses direct integration asin GRMONTY rather than
+// approximate method of PSS.  Values are chosen to match GRMONTY (Dolence+ 2009) defaults
+//
+// Builds at most once per process.  xsect and the four scale factors are file-scope
+// globals derived from compile-time constants and, for io == 0, from a file that does not
+// change during a run, so a second call can only write the same numbers into the same
+// memory.
+//
+// io == 2 writes the table to disk, and that side effect likewise happens only on the
+// first call.  The caller passes the same io for every block, so this is what is wanted.
 
 void GenerateComptonTable(int io) {
+  static bool table_built = false;
+  if (table_built) return;
 
   if (io > 0) {
     // generate table from scratch
@@ -274,6 +277,9 @@ void GenerateComptonTable(int io) {
     fclose(pfile);
   }
 
+  // Only after the table is actually populated: both branches above throw on a file they
+  // cannot open, and a failure must not be remembered as a success by the next block.
+  table_built = true;
 }
 //----------------------------------------------------------------------------------------
 //! \fn Real ComptonCrossSection(Real energy, Real theta)
@@ -358,7 +364,7 @@ void InitializeAccelerationOpacity(MonteCarloBlock *pmcb) {
     dx[i] = 0.5 * (x[i+1]-x[i-1]);
   }
 
-  // Loop over grid zones
+  // Loop over grid cells
   int il = pmcb->is; int iu = pmcb->ie;
   int jl = pmcb->js; int ju = pmcb->je;
   int kl = pmcb->ks; int ku = pmcb->ke;

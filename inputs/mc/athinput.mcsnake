@@ -1,0 +1,112 @@
+<comment>
+problem   = Uniform periodic box in sinusoidal ("snake") coordinates
+reference = White, Stone & Gammie (2016), ApJS 225, 22
+configure = --prob=mc_snake --coord=gr_user -mc -g
+
+# Snake coordinates are flat spacetime in a sheared chart:
+#   t = t_M, x = x_M, y = y_M + a sin(k x_M), z = z_M
+# so with beta = a k cos(k x),
+#   ds^2 = -dt^2 + (1 + beta^2) dx^2 - 2 beta dx dy + dy^2 + dz^2.
+#
+# Deliberately the same physical problem as the mink case in tst/montecarlo/frames --
+# same box, same density, same temperature, same energy range.  Because the spacetime
+# really is flat, every frame-invariant scalar must match the Minkowski run to round-off.
+# That is the main point of the test.
+#
+# Set snake_a = 0 to degenerate exactly to Minkowski.
+
+<job>
+problem_id = mcsnake
+
+<output1>
+file_type = tab
+variable  = mclab
+id        = lab
+dt        = 1.0
+
+<output2>
+file_type = tab
+variable  = mccom
+id        = com
+dt        = 1.0
+
+<output3>
+file_type = tab
+variable  = mccoord
+id        = crd
+dt        = 1.0
+
+<time>
+cfl_number = 0.3
+nlim       = 1
+tlim       = 1.0
+
+<coord>
+# GRUser reads m and a unconditionally; neither means anything for snake.
+m       = 0.0
+a       = 0.0
+# beta_max = snake_a * snake_k = 0.3, a substantial shear.  snake_k = 2*pi/Lx1 puts
+# exactly one period across the box so the metric is continuous across a periodic x1.
+snake_a = 4.774648292756861e+09
+snake_k = 6.283185307179586e-11
+
+<mesh>
+# The metric depends on x1 through beta = a k cos(k x), so a periodic x1 boundary only
+# makes sense when snake_k * Lx1 is a multiple of 2 pi.  mc_snake checks this and refuses
+# to run otherwise.
+nx1        = 8
+x1min      = -5.0e10
+x1max      = 5.0e10
+ix1_bc     = periodic
+ox1_bc     = periodic
+ix1_mc_bc  = periodic
+ox1_mc_bc  = periodic
+
+nx2        = 8
+x2min      = -5.0e10
+x2max      = 5.0e10
+ix2_bc     = periodic
+ox2_bc     = periodic
+ix2_mc_bc  = periodic
+ox2_mc_bc  = periodic
+
+nx3        = 8
+x3min      = -5.0e10
+x3max      = 5.0e10
+ix3_bc     = periodic
+ox3_bc     = periodic
+ix3_mc_bc  = periodic
+ox3_mc_bc  = periodic
+
+<meshblock>
+nx1 = 4
+nx2 = 4
+nx3 = 4
+
+<hydro>
+gamma = 1.666666666666667
+
+<montecarlo>
+mc_coord       = snake
+general_pusher = true
+nphot          = 20000
+iseed          = 125787
+scattering     = none
+emission       = freefree
+absorption     = freefree
+polarized      = none
+stepsize       = 1.0e-2
+varystep       = true
+abs_method     = weight
+boosts         = true
+
+<problem>
+dens_code = 1.0
+pgas_code = 1.0e-6
+rho_cgs   = 1.0e-10
+tgas_cgs  = 1.0e12          # T_physical / pgas_code
+l_cgs     = 1.0
+velocity  = 0.0             # fraction of c, along x3
+
+emin      = 1.380649e-13    # 0.001 * kb * T
+emax      = 6.903245e-09    # 50    * kb * T

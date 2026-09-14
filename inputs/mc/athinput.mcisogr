@@ -32,9 +32,14 @@ configure = --prob=mc_isoth_gr -mc -g -hdf5 --coord=kerr-schild
 <job>
 problem_id = isothgr   # problem ID: basename of output filenames
 
-# The spec output type does not support Kerr-Schild: Spectrum::UpdateSpectrum only bins
-# angles for cartesian/minkowski/spherical_polar, so phibin and mubin are left
-# uninitialized and the accumulation writes out of bounds (this segfaults under MPI).
+# The spec output type is rejected for Kerr-Schild, at setup.  Its angle binning applies
+# the flat r and r sin(theta) scale factors and treats the result as a unit direction,
+# which needs a diagonal metric with g_rr = 1; in Kerr-Schild g_rr = 1 + 2M/r, g_tr does
+# not vanish and the normal observer has n^r < 0, so the recovered direction is off by up
+# to ~20 degrees at r = 6M.  Its energy axis has the matching problem: it bins k^t, not
+# the conserved -k_t.  (Before that check existed this combination matched no branch at
+# all and accumulated with phibin and mubin uninitialized, writing out of bounds -- that
+# segfaulted under MPI.)
 # Bin the photon list instead, with vis/python/montecarlo/make_spectrum.py.  The energy
 # column of the list already carries the conserved -k_t, the energy at infinity.
 <output1>
@@ -94,7 +99,7 @@ iseed     = 121500
 scattering = none
 emission   = freefree
 absorption = freefree
-polarized = false
+polarized = none
 general_pusher = true
 boosts    = true
 stepsize  = 0.1

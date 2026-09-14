@@ -12,7 +12,7 @@
 //!
 //! Two operations live here and are easy to conflate.  PhotonFrames projects a single
 //! photon, per crossing; ComovingFrameMatrix and DeriveComovingMoments transform an
-//! accumulated tensor, once per zone at output.
+//! accumulated tensor, once per cell at output.
 
 // C headers
 
@@ -25,6 +25,7 @@
 #include "montecarlo.hpp"
 #include "tetrad.hpp"
 #include "photon.hpp"
+#include "mccoord.hpp"
 #include "../athena.hpp"
 #include "../athena_arrays.hpp"
 #include "../mesh/mesh.hpp"
@@ -52,7 +53,7 @@ void PhotonFrames::Fill(MCFrame f) {
   const int i1 = pphot_->i1p[ip_], i2 = pphot_->i2p[ip_], i3 = pphot_->i3p[ip_];
 
   if (f == MCFRAME_COORD) {
-    // Not orthonormal: n holds k^i/k^0 and is deliberately not normalised.
+    // Not orthonormal: n holds k^i/k^0 and is deliberately not normalized.
     s.e = kco_[IMC0];
     for (int i=0; i<3; ++i) s.n[i] = kco_[IMC1+i]/ep;
     s.dl = dl_;
@@ -68,8 +69,8 @@ void PhotonFrames::Fill(MCFrame f) {
       for (int b=0; b<4; ++b) p[a] += m(i3,i2,i1,a,b) * kco_[b];
     }
     // k is null at the photon to machine precision, but the tetrad is orthonormal with
-    // respect to the metric at the zone centre, so the projection is not exactly null.
-    // Normalising by the spatial magnitude keeps n a genuine direction and the moment
+    // respect to the metric at the cell center, so the projection is not exactly null.
+    // Normalzing by the spatial magnitude keeps n a genuine direction and the moment
     // tensor exactly traceless; the energy comes from the time component.
     Real mag = std::sqrt(SQR(p[IMC1]) + SQR(p[IMC2]) + SQR(p[IMC3]));
     s.e = p[IMC0];
@@ -90,31 +91,21 @@ void PhotonFrames::Fill(MCFrame f) {
       }
       // The tetrad time leg is unity for every flat coordinate system, so kf[0] == ep and
       // dividing the spatial parts by ep is the same unit direction the legacy pushers
-      // store.  Kept in this form rather than normalised by the spatial magnitude so the
+      // store.  Kept in this form rather than normalized by the spatial magnitude so the
       // arithmetic is unchanged from before this was factored out.
       s.e = kf[IMC0];
       for (int i=0; i<3; ++i) s.n[i] = kf[IMC1+i]/ep;
+      // InverseTetrad is evaluated at the photon, so what comes back is the direction in
+      // the orthonormal basis there.  The same rotation the legacy pushers apply carries
+      // it to the cell center, which is the basis the moments are summed in; without it
+      // this branch and the legacy one disagree about the same photon.
+      ToCellCenterBasis(s.n);
     } else {
       s.e = ep;
       s.n[0] = pphot_->k1p[ip_];
       s.n[1] = pphot_->k2p[ip_];
       s.n[2] = pphot_->k3p[ip_];
-      if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0) {
-        // Re-express the direction in the orthonormal basis at the zone centre, which is
-        // the basis the moments are accumulated in.
-        Real sth = std::sin(pphot_->x2p[ip_]), cth = std::cos(pphot_->x2p[ip_]);
-        Real sph = std::sin(pphot_->x3p[ip_]), cph = std::cos(pphot_->x3p[ip_]);
-        Real nx = sth*cph*s.n[0] + cth*cph*s.n[1] - sph*s.n[2];
-        Real ny = sth*sph*s.n[0] + cth*sph*s.n[1] + cph*s.n[2];
-        Real nz = cth*s.n[0] - sth*s.n[1];
-        sth = std::sin(pmcb_->pmy_block->pcoord->x2v(i2));
-        cth = std::cos(pmcb_->pmy_block->pcoord->x2v(i2));
-        sph = std::sin(pmcb_->pmy_block->pcoord->x3v(i3));
-        cph = std::cos(pmcb_->pmy_block->pcoord->x3v(i3));
-        s.n[0] = sth*cph*nx + sth*sph*ny + cth*nz;
-        s.n[1] = cth*cph*nx + cth*sph*ny - sth*nz;
-        s.n[2] = -sph*nx + cph*ny;
-      }
+      ToCellCenterBasis(s.n);
     }
     s.dl = dl_;
     return;
@@ -135,8 +126,90 @@ void PhotonFrames::Fill(MCFrame f) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void ComovingFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
+//!                        Real econ[4][4], Real ecov[4][4])
+//! \brief the comoving orthonormal frame at a photon; see photon_frames.hpp
+//!
+//! econ and ecov are indexed [tetrad leg][coordinate component], for CoordinateToTetrad,
+//! TetradToCoordinate, PolarizationToTetrad and PolarizationToCoord.
+
+void ComovingFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
+                   Real econ[4][4], Real ecov[4][4]) {
+
+  Real x[4];
+  x[IMC0] = pphot->x0p[ip];
+  x[IMC1] = pphot->x1p[ip];
+  x[IMC2] = pphot->x2p[ip];
+  x[IMC3] = pphot->x3p[ip];
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+
+  // The metric at the photon rather than at the cell center, so the leg is a unit
+  // timelike vector where it is used.
+  Real gcov[4][4];
+  pmcb->pcoord->Metric(x, gcov);
+
+  Real ucon[4];
+  if (GENERAL_RELATIVITY) {
+    pmcb->FluidFourVelocity(x, i3, i2, i1, ucon);
+  } else {
+    // vel is (gamma, gamma*beta^i) on the local orthonormal legs.  Carry it onto
+    // coordinate components with the static tetrad, whose legs are those of the
+    // orthonormal frame at rest; the boost then happens inside ConstructTetrad, by growing
+    // the frame from the moving four-velocity.  Tetrad maps orthonormal to coordinate
+    // components as ucon[j] = tet[j][i] vel[i], the convention TransformToCoordinate uses.
+    Real tet[4][4];
+    pmcb->pcoord->Tetrad(x, tet);
+    for (int j = 0; j < 4; ++j) {
+      ucon[j] = 0.0;
+      for (int i = 0; i < 4; ++i) ucon[j] += tet[j][i] * pmcb->vel(i3, i2, i1, i);
+    }
+  }
+  ConstructTetrad(ucon, gcov, econ, ecov);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonFrames::ToCellCenterBasis(Real n[3]) const
+//! \brief carry a unit direction from the orthonormal basis at the photon to the one at
+//!        its cell center
+//
+// The moments are summed over the photons crossing a cell, so they need every
+// contribution referred to one basis.  On a curvilinear grid the orthonormal legs turn
+// with position, by the full angular width of a cell between one face and the other, so
+// the choice of basis may not be small. In flat spacetime this is an exact rotation.
+
+void PhotonFrames::ToCellCenterBasis(Real n[3]) const {
+  Coordinates *pco = pmcb_->pmy_block->pcoord;
+
+  if (pmcb_->topology == MCTOPO_SPHERICAL) {
+    const int i2 = pphot_->i2p[ip_], i3 = pphot_->i3p[ip_];
+    Real sth = std::sin(pphot_->x2p[ip_]), cth = std::cos(pphot_->x2p[ip_]);
+    Real sph = std::sin(pphot_->x3p[ip_]), cph = std::cos(pphot_->x3p[ip_]);
+    Real nx = sth*cph*n[0] + cth*cph*n[1] - sph*n[2];
+    Real ny = sth*sph*n[0] + cth*sph*n[1] + cph*n[2];
+    Real nz = cth*n[0] - sth*n[1];
+    sth = std::sin(pco->x2v(i2));
+    cth = std::cos(pco->x2v(i2));
+    sph = std::sin(pco->x3v(i3));
+    cph = std::cos(pco->x3v(i3));
+    n[0] = sth*cph*nx + sth*sph*ny + cth*nz;
+    n[1] = cth*cph*nx + cth*sph*ny - sth*nz;
+    n[2] = -sph*nx + cph*ny;
+  } else if (pmcb_->topology == MCTOPO_CYLINDRICAL) {
+    // (R, phi, z) with the azimuth in x2.  Only R-hat and phi-hat turn, by the azimuthal
+    // offset, so this is a rotation in the first two components and z is untouched.
+    Real d = pphot_->x2p[ip_] - pco->x2v(pphot_->i2p[ip_]);
+    Real cd = std::cos(d), sd = std::sin(d);
+    Real nr = n[0]*cd - n[1]*sd;
+    Real np = n[0]*sd + n[1]*cd;
+    n[0] = nr;
+    n[1] = np;
+  }
+  // Cartesian topology: the basis does not depend on position, so there is nothing to do.
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::ComovingFrameMatrix(...)
-//! \brief the lab to comoving transformation for one zone
+//! \brief the lab to comoving transformation for one cell
 //!
 //! Both frames are orthonormal at the same event, so this is a Lorentz transformation.
 //! In general relativity it must be composed from the two tetrads rather than rebuilt as
@@ -171,8 +244,10 @@ void MonteCarloBlock::ComovingFrameMatrix(int k, int j, int i, const AthenaArray
   Real econL[4][4], ecovL[4][4];
   ConstructTetrad(ncon, gcov, econL, ecovL);
 
+  // Rebuilt at the cell center, which is the right point here: this matrix is per cell
+  // and transforms the accumulated moments, which are cell averages.
   Real ucon[4];
-  for (int m=0; m<4; ++m) ucon[m] = vel(k,j,i,m);
+  FluidFourVelocity(x, k, j, i, ucon);
   Real econF[4][4], ecovF[4][4];
   ConstructTetrad(ucon, gcov, econF, ecovF);
 
@@ -189,7 +264,7 @@ void MonteCarloBlock::ComovingFrameMatrix(int k, int j, int i, const AthenaArray
 //! \brief fill moments_com by transforming the accumulated lab moments
 //!
 //! The moments are a rank two tensor and the transformation is the same matrix for every
-//! photon in the zone, so sum Lp Lp == L (sum p p) L exactly.  Deriving is therefore not
+//! photon in the cell, so sum Lp Lp == L (sum p p) L exactly.  Deriving is therefore not
 //! an approximation of accumulating, and it removes the second per-photon projection --
 //! measured at 5% of runtime on the general pusher and 12% on the legacy pusher.
 

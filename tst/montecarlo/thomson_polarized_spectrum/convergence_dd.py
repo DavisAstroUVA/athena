@@ -92,7 +92,7 @@ def write_athinput(iseed,nphot,nen,emin,emax,file='athinput.mciso'):
     outfile.write("scattering = thomson\n")
     outfile.write("emission   = freefree\n")
     outfile.write("absorption = freefree\n")
-    outfile.write("polarized = true\n")
+    outfile.write("polarized = linear\n")
     #outfile.write("abs_method = tau\n")
     outfile.write("\n<problem>\n")
     outfile.write("temp     = 1.0e5\n")
@@ -158,7 +158,7 @@ def main(**kwargs):
         # average spectrum over phi
         intensity = spectrum['intensity']
         intens = np.sum(intensity[0,:,:,:],axis=0)/float(spectrum['nphi'])
-        qpol = -np.sum(intensity[1,:,:,:],axis=0)/float(spectrum['nphi'])
+        qpol = np.sum(intensity[1,:,:,:],axis=0)/float(spectrum['nphi'])
         # Bins that collected no photons have intens == 0; the polarization
         # fraction is undefined there, so mask them out rather than letting a
         # nan poison the whole norm.

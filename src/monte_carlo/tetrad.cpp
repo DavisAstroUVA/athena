@@ -7,6 +7,7 @@
 //! \brief implementation of functions for constructing and transforming tetrad frames
 
 // C++ libraries
+#include <cmath>
 #include <complex>
 
 // Athena++ classes headers
@@ -104,6 +105,58 @@ void ConstructTetrad(Real ucon[4], Real gcov[4][4],
 }
 
 
+
+//----------------------------------------------------------------------------------------
+//! \fn Real ObserverEnergy(Real ucon[4], Real kcon[4], Real gcov[4][4])
+//! \brief the energy of kcon as measured by an observer with four-velocity ucon
+//
+// This is the time component that ConstructTetrad(ucon,...) followed by
+// CoordinateToTetrad would produce, obtained without building the other three legs.
+// Row zero of the covariant tetrad is fixed entirely by ucon: ConstructTetrad sets
+// econ[0] = ucon/sqrt(|ucon.ucon|), lowers it, and flips the sign, so
+//
+//     ecov[0][mu] = -u_mu / sqrt(|u.u|)   and   k^(0) = -u_mu k^mu / sqrt(|u.u|).
+//
+// The Gram-Schmidt orthogonalization of legs 1-3 costs roughly ten metric contractions
+// and four square roots and does not enter the answer, which matters because the callers
+// that only want an energy -- the opacity frequency shift above all -- sit in the inner
+// loop of the general pusher.
+//
+// The normalization is now a no-op for the Monte Carlo's own callers and is kept for
+// generality only.  It used to do real work: a four-velocity was assembled and normalized
+// at the cell center and then contracted with the metric at a photon, where u.u was -1
+// only to first order in the offset -- 3e-3 at r = 2M on a Kerr-Schild grid.  Callers now
+// obtain ucon from MonteCarloBlock::FluidFourVelocity, which rebuilds it from the stored
+// primitives against the metric at the very point gcov is evaluated, so u.u = -1 there to
+// roundoff.  Anything passing a vector normalized somewhere else still gets the division,
+// which is why it stays; note it only ever corrected the magnitude, never the direction.
+//
+// The arithmetic below deliberately mirrors ConstructTetrad step for step, dividing ucon
+// by the norm before lowering rather than after, and keeps the same degenerate branch.
+// Lowering first would be algebraically identical but would round differently, and
+// reproducing the operation order exactly means this can be swapped in for the tetrad
+// without perturbing a single output bit.
+
+Real ObserverEnergy(Real ucon[4], Real kcon[4], Real gcov[4][4]) {
+
+  Real e0[4];
+  Real mag = sqrt(fabs(DotVec(ucon, ucon, gcov)));
+  if (mag > SMALL_NUMBER) {
+    Real unorm[4];
+    for (int j = 0; j < 4; j++) unorm[j] = ucon[j]/mag;
+    ConToCov(unorm, e0, gcov);
+  } else {
+    // ucon is degenerate; fall back to the coordinate time direction, as ConstructTetrad
+    // does in the same situation.
+    Real unorm[4] = {1., 0., 0., 0.};
+    NormalizeVec(unorm, gcov);
+    ConToCov(unorm, e0, gcov);
+  }
+
+  Real energy = 0.;
+  for (int j = 0; j < 4; j++) energy += -e0[j] * kcon[j];
+  return energy;
+}
 //----------------------------------------------------------------------------------------
 //! \fn void ConstructTetrad(Real ucon[4], Real vcon[4],
 //!                          Real gcov[4][4], Real ecov[4][4],
@@ -446,6 +499,26 @@ void CovToCon(Real ucov[4], Real ucon[4], Real gcon[4][4]) {
       ucon[i] += gcon[i][j] * ucov[j];
   }
 
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool NormalObserver(Real gcon[4][4], Real ncon[4])
+//! \brief four-velocity of the normal (Eulerian) observer
+//
+// n^mu = -alpha g^{mu t} with lapse alpha = 1/sqrt(-g^{tt}).  This is the frame the
+// outputs reference directions and polarization to, so it lives here rather than being
+// rebuilt at each call site: the wavevector and the Stokes parameters must be projected
+// onto the same frame
+//
+// Returns false when g^{tt} is not negative, meaning the slice is not spacelike and there
+// is no such observer.
+
+bool NormalObserver(Real gcon[4][4], Real ncon[4]) {
+
+  if (gcon[IMC0][IMC0] >= 0.) return false;
+  Real alpha = 1.0/std::sqrt(-gcon[IMC0][IMC0]);
+  for (int m = 0; m < 4; ++m) ncon[m] = -alpha*gcon[m][IMC0];
+  return true;
 }
 
 //----------------------------------------------------------------------------------------

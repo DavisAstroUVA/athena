@@ -48,12 +48,11 @@ emax      = 100.0
 scattering = none
 emission   = user
 absorption = none
-polarized = false
+polarized = none
 stepsize = 1.0e-3
 boyerlindquist = true
 varystep = true
 raytrace = true
-checkmove = 10000000
 
 <problem>
 phi = 0.      # azimuthal angle in pi radians

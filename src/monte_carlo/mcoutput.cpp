@@ -9,6 +9,8 @@
 // C++ headers
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstdint>    // int64_t
+#include <vector>
 #include <stdexcept>  // runtime_error
 #include <iomanip>    // setfill(), setw()
 #include <errno.h>
@@ -18,6 +20,7 @@
 #include "mccoord.hpp"
 #include "mcoutput.hpp"
 #include "photonpusher.hpp"
+#include "tetrad.hpp"
 #include "../globals.hpp"
 #include "../outputs/io_wrapper.hpp"
 #include "../utils/buffer_utils.hpp"
@@ -51,7 +54,7 @@ namespace mcoutput {
 //----------------------------------------------------------------------------------------
 //! Spectrum constructor from input
 
-Spectrum::Spectrum(MomentumRange input_range, bool pol, bool xlog) {
+Spectrum::Spectrum(MomentumRange input_range, MCPolarization pol, bool xlog) {
 
   // SWD some of this should be used to initialization outside constructor
   next = nullptr;
@@ -69,11 +72,9 @@ Spectrum::Spectrum(MomentumRange input_range, bool pol, bool xlog) {
   // Allocate arrays for intensities
   intensity.NewAthenaArray(range.nphi,range.ncth,range.ne);
   intensity_sq.NewAthenaArray(range.nphi,range.ncth,range.ne);
-  if (polarized) {
-    stokesq.NewAthenaArray(range.nphi,range.ncth,range.ne);
-    stokesq_sq.NewAthenaArray(range.nphi,range.ncth,range.ne);
-    stokesu.NewAthenaArray(range.nphi,range.ncth,range.ne);
-    stokesu_sq.NewAthenaArray(range.nphi,range.ncth,range.ne);
+  for (int m = 0; m < NumStokesStored(polarized); ++m) {
+    stokes[m].NewAthenaArray(range.nphi,range.ncth,range.ne);
+    stokes_sq[m].NewAthenaArray(range.nphi,range.ncth,range.ne);
   }
 }
 
@@ -113,11 +114,9 @@ Spectrum::Spectrum(Spectrum *pspec) {
   // Allocate arrays for intensities
   intensity.NewAthenaArray(range.nphi,range.ncth,range.ne);
   intensity_sq.NewAthenaArray(range.nphi,range.ncth,range.ne);
-  if (polarized) {
-    stokesq.NewAthenaArray(range.nphi,range.ncth,range.ne);
-    stokesq_sq.NewAthenaArray(range.nphi,range.ncth,range.ne);
-    stokesu.NewAthenaArray(range.nphi,range.ncth,range.ne);
-    stokesu_sq.NewAthenaArray(range.nphi,range.ncth,range.ne);
+  for (int m = 0; m < NumStokesStored(polarized); ++m) {
+    stokes[m].NewAthenaArray(range.nphi,range.ncth,range.ne);
+    stokes_sq[m].NewAthenaArray(range.nphi,range.ncth,range.ne);
   }
 }
 
@@ -129,11 +128,9 @@ Spectrum::~Spectrum() {
   energies.DeleteAthenaArray();
   intensity.DeleteAthenaArray();
   intensity_sq.DeleteAthenaArray();
-  if (polarized) {
-    stokesq.DeleteAthenaArray();
-    stokesq_sq.DeleteAthenaArray();
-    stokesu.DeleteAthenaArray();
-    stokesu_sq.DeleteAthenaArray();
+  for (int m = 0; m < NumStokesStored(polarized); ++m) {
+    stokes[m].DeleteAthenaArray();
+    stokes_sq[m].DeleteAthenaArray();
   }
 }
 
@@ -161,6 +158,36 @@ void Spectrum::BuildEnergyGrid(Real emin, Real emax, int nen, bool logarthmic) {
     for(int i=0; i<nen; ++i) {
       energies(i+1) = energies(i) + de;
     }
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn static void LocalToCartesian(MCTopology topo, Real x2, Real x3,
+//!                                  Real &k1, Real &k2, Real &k3)
+//! \brief rotate orthonormal components on the local legs onto the global cartesian ones
+//
+// The outputs reference Q and U to the meridian plane of the global z axis, and the
+// wavevector they write has to live in the same frame or a reader cannot rebuild that
+// plane from the file.  On a spherical or cylindrical grid the local orthonormal legs
+// turn with position, so the direction is rotated here, once, at output.  Cartesian
+// topology needs nothing: its legs already are the global ones.  The components are
+// assumed to be orthonormal on entry.
+
+static void LocalToCartesian(MCTopology topo, Real x2, Real x3,
+                             Real &k1, Real &k2, Real &k3) {
+  if (topo == MCTOPO_SPHERICAL) {
+    Real cth = std::cos(x2), sth = std::sin(x2);
+    Real cph = std::cos(x3), sph = std::sin(x3);
+    Real kr = k1, kth = k2, kph = k3;
+    k1 = kr*sth*cph + kth*cth*cph - kph*sph;
+    k2 = kr*sth*sph + kth*cth*sph + kph*cph;
+    k3 = kr*cth     - kth*sth;
+  } else if (topo == MCTOPO_CYLINDRICAL) {
+    // (R, phi, z) with the azimuth in x2; only R-hat and phi-hat turn
+    Real cph = std::cos(x2), sph = std::sin(x2);
+    Real kR = k1, kph = k2;
+    k1 = kR*cph - kph*sph;
+    k2 = kR*sph + kph*cph;
   }
 }
 
@@ -203,7 +230,7 @@ bool Spectrum::AngleBinsCartesian(Real k[4], int &phibin, int &cthbin) {
   Real kz = k[IMC3];
 
   Real ctheta, phi, stheta;
-  if (COORDINATE_SYSTEM == "cartesian") {
+  if (pmy_mc->topology == MCTOPO_CARTESIAN) {
     // Set ctheta, phi according to face
     switch(face) {
       case BoundaryFace::inner_x1:
@@ -259,7 +286,7 @@ bool Spectrum::AngleBinsCartesian(Real k[4], int &phibin, int &cthbin) {
         throw std::runtime_error(msg.str().c_str());
         break;
     }
-  } else if (COORDINATE_SYSTEM == "spherical_polar") {
+  } else if (pmy_mc->topology == MCTOPO_SPHERICAL) {
     if (kz >= 0.0) {
       ctheta = kz;
       stheta = sqrt(SQR(kx)+SQR(ky));
@@ -273,6 +300,13 @@ bool Spectrum::AngleBinsCartesian(Real k[4], int &phibin, int &cthbin) {
       if(ky < 0.0)
         phi = 2 * PI - phi;
     }
+  } else {
+    // Previously fell through with ctheta, phi and stheta uninitialized.
+    std::stringstream msg;
+    msg << "### FATAL ERROR in function [Spectrum::AngleBinsCartesian]" << std::endl
+        << "No angle binning defined for the topology of coordinate system "
+        << GetMCCoordSystemName(pmy_mc->coord_system) << std::endl;
+    throw std::runtime_error(msg.str().c_str());
   }
 
   // Get ctheta bin
@@ -368,8 +402,8 @@ bool Spectrum::AngleBinsSphericalPolar(Real k[4], int &phibin, int &cthbin) {
       break;
     default:
       std::stringstream msg;
-      msg << "### FATAL ERROR in function [Spectrum::AngleBinsCartesian]" << std::endl
-          << "Face not valid" << std::endl;
+      msg << "### FATAL ERROR in function [Spectrum::AngleBinsSphericalPolar]"
+          << std::endl << "Face not valid" << std::endl;
       throw std::runtime_error(msg.str().c_str());
       break;
   }
@@ -458,54 +492,57 @@ void Spectrum::UpdateSpectrum(Photon *pphot, int ip) {
         return;
     }
 
+    // For curved spacetimes, bin the conserved -k_t, matching PhotonList::AddPhoton.
+    // use ep otherwise
     int ebin;
-    // SWD: general pusher may require adjustment here
-    ebin = EnergyBinUniform(pphot->ep[ip],logarithmic);
+    Real ebin_energy = pmy_mc->relativistic_output
+                       ? PhotonEnergyAtInfinity(pphot,ip) : pphot->ep[ip];
+    ebin = EnergyBinUniform(ebin_energy,logarithmic);
     if (ebin < 0) return;
 
     // Get angle bins
     int phibin, mubin;
     if (polar_axis) {
+      // The direction on the normal observer's orthonormal legs, then rotated onto the
+      // global cartesian legs, in every topology.  Under GeneralPusher k1,k2,k3 are
+      // contravariant coordinate components, neither orthonormal nor a unit vector, so
+      // they are projected into the normal observer's frame first, which is the same one
+      // PhotonList::AddPhoton writes. Cartesian topology is a no-op in the rotation, and
+      // a topology AngleBinsCartesian cannot bin is rejected there.
       Real kcart[4];
-      if ((COORDINATE_SYSTEM == "cartesian") || (COORDINATE_SYSTEM == "minkowski"))  {
+      if (pphot->pmy_mcb->pmy_mc->general_pusher_flag) {
+        Real econ[4][4], ecov[4][4], ktet[4];
+        if (!NormalFrameWavevector(pphot->pmy_mcb, pphot, ip, econ, ecov, ktet)) return;
+        for (int a = IMC1; a < 4; ++a) kcart[a] = ktet[a];
+      } else {
         kcart[IMC1] = pphot->k1p[ip];
         kcart[IMC2] = pphot->k2p[ip];
         kcart[IMC3] = pphot->k3p[ip];
-      } else  if (COORDINATE_SYSTEM == "spherical_polar") {
-        Real cth = cos(pphot->x2p[ip]);
-        Real sth = sin(pphot->x2p[ip]);
-        Real cph = cos(pphot->x3p[ip]);
-        Real sph = sin(pphot->x3p[ip]);
-        Real kr, kth, kph;
-        // SWD: This should be adjusted
-        if (pphot->pmy_mcb->pmy_mc->general_pusher_flag) {
-          kr = pphot->k1p[ip];
-          kth = pphot->k2p[ip]*pphot->x1p[ip];
-          kph = pphot->k3p[ip]*pphot->x1p[ip]*sth;
-        } else {
-          kr = pphot->k1p[ip];
-          kth = pphot->k2p[ip];
-          kph = pphot->k3p[ip];
-        }
-        // Compute cartesian
-        kcart[IMC1] = kr*sth*cph + kth*cth*cph - kph*sph;
-        kcart[IMC2] = kr*sth*sph + kth*cth*sph + kph*cph;
-        kcart[IMC3] = kr*cth - kth*sth;
       }
-      // SWD: Add cylindrical
+      LocalToCartesian(pmy_mc->topology, pphot->x2p[ip], pphot->x3p[ip],
+                       kcart[IMC1], kcart[IMC2], kcart[IMC3]);
+      Real knorm = std::sqrt(SQR(kcart[IMC1]) + SQR(kcart[IMC2]) + SQR(kcart[IMC3]));
+      if (knorm <= TINY_NUMBER) return;
+      for (int a = IMC1; a < 4; ++a) kcart[a] /= knorm;
       if (!AngleBinsCartesian(kcart,phibin,mubin))
         return;
     } else {
-      if (COORDINATE_SYSTEM == "spherical_polar") {
+      if (pmy_mc->topology == MCTOPO_SPHERICAL) {
         Real ksph[4];
-        // SWD: This should be adjusted
+        // Binned against the boundary normal, so the direction is wanted on the local
+        // legs e_r, e_theta, e_phi and is not rotated.  Under GeneralPusher those are the
+        // normal observer's legs, reached by the same tetrad projection the polar_axis
+        // branch uses; it replaces the flat scale factors that were written out by hand
+        // here and holds in a curved metric too.
         if (pphot->pmy_mcb->pmy_mc->general_pusher_flag) {
-          ksph[IMC1] = pphot->k1p[ip];
-          ksph[IMC2] = pphot->k2p[ip]*pphot->x1p[ip];
-          ksph[IMC3] = pphot->k3p[ip]*pphot->x1p[ip]*sin(pphot->x2p[ip]);
-          Real norm = sqrt(SQR(ksph[IMC1])+SQR(ksph[IMC2])+SQR(ksph[IMC3]));
-          for (int i=0; i<4; ++i)
-            ksph[i] /= norm;
+          Real econ[4][4], ecov[4][4], ktet[4];
+          if (!NormalFrameWavevector(pphot->pmy_mcb, pphot, ip, econ, ecov, ktet)) return;
+          Real norm = sqrt(SQR(ktet[IMC1])+SQR(ktet[IMC2])+SQR(ktet[IMC3]));
+          if (norm <= TINY_NUMBER) return;
+          // from IMC1: ksph[IMC0] is never set, and AngleBinsSphericalPolar reads only
+          // the spatial components
+          for (int i=IMC1; i<4; ++i)
+            ksph[i] = ktet[i]/norm;
         } else {
           ksph[IMC1] = pphot->k1p[ip];
           ksph[IMC2] = pphot->k2p[ip];
@@ -513,6 +550,14 @@ void Spectrum::UpdateSpectrum(Photon *pphot, int ip) {
         }
         if(!AngleBinsSphericalPolar(ksph,phibin,mubin))
             return;
+      } else {
+        // Previously fell through and binned with phibin and mubin uninitialized.
+        std::stringstream msg;
+        msg << "### FATAL ERROR in function [Spectrum::UpdateSpectrum]" << std::endl
+            << "Spectra with polar_axis = false require a spherical topology; coordinate "
+            << "system " << GetMCCoordSystemName(pmy_mc->coord_system) << " has none."
+            << std::endl;
+        throw std::runtime_error(msg.str().c_str());
       }
     } // if (polar_axis) else
 
@@ -520,11 +565,13 @@ void Spectrum::UpdateSpectrum(Photon *pphot, int ip) {
     intensity_sq(phibin,mubin,ebin) += weight * weight;
     //intensity(phibin,mubin,ebin) += pphot->sip[ip] * weight;
     //intensity_sq(phibin,mubin,ebin) += SQR(pphot->sip[ip] * weight);
-    if (polarized) {
-      stokesq(phibin,mubin,ebin) += pphot->sqp[ip] * weight;
-      stokesq_sq(phibin,mubin,ebin) += SQR(pphot->sqp[ip] * weight);
-      stokesu(phibin,mubin,ebin) += pphot->sup[ip] * weight;
-      stokesu_sq(phibin,mubin,ebin) += SQR(pphot->sup[ip] * weight);
+    // The Stokes arrays on the photon only exist when polarization is tracked
+    if (IsPolarized(polarized)) {
+      const Real spol[3] = {pphot->sqp[ip], pphot->sup[ip], pphot->svp[ip]};
+      for (int m = 0; m < NumStokesStored(polarized); ++m) {
+        stokes[m](phibin,mubin,ebin) += spol[m] * weight;
+        stokes_sq[m](phibin,mubin,ebin) += SQR(spol[m] * weight);
+      }
     }
   }
 }
@@ -597,11 +644,9 @@ void Spectrum::ResetSpectrum() {
       for(int k=0; k<range.ne; ++k) {
         intensity(i,j,k) = 0.;
         intensity_sq(i,j,k) = 0.;
-        if (polarized) {
-          stokesq(i,j,k) = 0.;
-          stokesq_sq(i,j,k) = 0.;
-          stokesu(i,j,k) = 0.;
-          stokesu_sq(i,j,k) = 0.;
+        for (int m = 0; m < NumStokesStored(polarized); ++m) {
+          stokes[m](i,j,k) = 0.;
+          stokes_sq[m](i,j,k) = 0.;
         }
       }
     }
@@ -628,11 +673,9 @@ void Spectrum::AddSpectrum(Spectrum *pspec) {
         for(int k=0; k<range.ne; ++k) {
           intensity(i,j,k) += pspec->intensity(i,j,k);
           intensity_sq(i,j,k) += pspec->intensity_sq(i,j,k);
-          if (pspec->polarized) {
-            stokesq(i,j,k) += pspec->stokesq(i,j,k);
-            stokesq_sq(i,j,k) += pspec->stokesq_sq(i,j,k);
-            stokesu(i,j,k) += pspec->stokesu(i,j,k);
-            stokesu_sq(i,j,k) += pspec->stokesu_sq(i,j,k);
+          for (int m = 0; m < NumStokesStored(pspec->polarized); ++m) {
+            stokes[m](i,j,k) += pspec->stokes[m](i,j,k);
+            stokes_sq[m](i,j,k) += pspec->stokes_sq[m](i,j,k);
           }
         }
       }
@@ -667,14 +710,20 @@ enum BoundaryFace Spectrum::GetPhotonFace(Photon *pphot, int ip) {
 //----------------------------------------------------------------------------------------
 //! PhotonList constructor from input
 
-PhotonList::PhotonList(int list_size_init, bool pol, int nuser) {
+PhotonList::PhotonList(int list_size_init, MCPolarization pol, int nuser,
+                       int max_res) {
+
+  // Incremental output state; nothing is open until the list first spills or is written.
+  fp_ = nullptr;
+  nwritten_ = 0;
+  dt_pos_ = length_pos_ = ntot_pos_ = 0;
+  max_resident = max_res;
 
   // Allocate memory for photon list
   len_limit = list_size_init;
   nparams = 11;
   polarized = pol;
-  if (polarized)
-    nparams += 2; // print only stokes q and u
+  nparams += NumStokesStored(polarized); // stokes q and u, plus v when circular
   nparams += nuser;
   nuser_out = nuser;
   photons.NewAthenaArray(len_limit,nparams);
@@ -731,6 +780,9 @@ Real PhotonEnergyAtInfinity(Photon *pphot, int ip) {
 
 void PhotonList::AddPhoton(Photon *pphot, int ip) {
 
+  // Bound the resident list.  Past max_resident the photons already collected are
+  // streamed to the file and the array is reused, so the memory held is bounded.
+  if (max_resident > 0 && length >= max_resident) SpillToFile();
   if (length == len_limit) {
     // double array size when list is full
     ResizeList(2*len_limit);
@@ -748,14 +800,44 @@ void PhotonList::AddPhoton(Photon *pphot, int ip) {
   photons(length,n++) = pphot->x2p[ip];
   photons(length,n++) = pphot->x3p[ip];
   photons(length,n++) = pphot->x0p[ip];
-  photons(length,n++) = pphot->k1p[ip];
-  photons(length,n++) = pphot->k2p[ip];
-  photons(length,n++) = pphot->k3p[ip];
-  photons(length,n++) = pphot->k0p[ip];
-  photons(length,n++) = static_cast<Real>(pphot->nscp[ip]);
-  if (polarized) {
-    photons(length,n++) = pphot->sqp[ip];
-    photons(length,n++) = pphot->sup[ip];
+  // The wavevector goes out on the "global" cartesian legs, the frame whose z axis the
+  // Stokes parameters are referenced to, so the two columns describe the same physical
+  // direction and a reader can rebuild the meridian plane from the file alone.  Under
+  // the general pusher it is first projected into the normal observer's frame, which is
+  // what CoherencyToObserverStokes measured against; the legacy pushers already hold an
+  // orthonormal unit direction. The local legs are then rotated onto the "global" ones,
+  // declared to the reader by the basis line in the header.
+  const MCTopology topo = pmy_mc->topology;
+  if (pmy_mc->general_pusher_flag) {
+    Real econ[4][4], ecov[4][4], ktet[4];
+    if (NormalFrameWavevector(pphot->pmy_mcb, pphot, ip, econ, ecov, ktet)) {
+      LocalToCartesian(topo, pphot->x2p[ip], pphot->x3p[ip],
+                       ktet[IMC1], ktet[IMC2], ktet[IMC3]);
+      photons(length,n++) = ktet[IMC1];
+      photons(length,n++) = ktet[IMC2];
+      photons(length,n++) = ktet[IMC3];
+      photons(length,n++) = ktet[IMC0];
+    } else {
+      // no normal observer here; fall back to the stored components rather than drop the
+      // photon, and leave it detectable as a zero time component
+      photons(length,n++) = pphot->k1p[ip];
+      photons(length,n++) = pphot->k2p[ip];
+      photons(length,n++) = pphot->k3p[ip];
+      photons(length,n++) = pphot->k0p[ip];
+    }
+  } else {
+    Real k1 = pphot->k1p[ip], k2 = pphot->k2p[ip], k3 = pphot->k3p[ip];
+    LocalToCartesian(topo, pphot->x2p[ip], pphot->x3p[ip], k1, k2, k3);
+    photons(length,n++) = k1;
+    photons(length,n++) = k2;
+    photons(length,n++) = k3;
+    photons(length,n++) = pphot->k0p[ip];
+  }
+  if (IsPolarized(polarized)) {
+    const Real spol[3] = {pphot->sqp[ip], pphot->sup[ip], pphot->svp[ip]};
+    for (int m = 0; m < NumStokesStored(polarized); ++m) {
+      photons(length,n++) = spol[m];
+    }
   }
   for (int i=0; i<nuser_out; i++) {
     photons(length,n++) = pphot->user[i][ip];
@@ -765,47 +847,122 @@ void PhotonList::AddPhoton(Photon *pphot, int ip) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn std::string PhotonList::Filename() const
+//! \brief name of the file this list writes to
+//
+// One definition, used by both the spill path and the final write.  They open the same
+// file at different times and must not be able to disagree about which one it is.
+
+std::string PhotonList::Filename() const {
+  std::stringstream n;
+  n << base_name << "." << std::setw(5) << std::setfill('0') << output_number << ".list";
+  return n.str();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonList::OpenAndWriteHeader(const std::string &filename, Real tint_out)
+//! \brief open the list file and write its header
+//
+// length and ntot are padded to a fixed width and corrected in place once the data has been
+// written, because neither is known if/when the first photons spill: both depend on how many
+// photons ultimately arrive.  dt is padded for the one case where it is not known either --
+// a dynamic run accumulating several steps into one list, where the header records the
+// elapsed time since the previous output rather than the integration time of any one step.
+// A static run writes the final value at the outset and its correction changes nothing.
+// The reader
+// takes the first space-delimited token on each line (athena_mc.parse_line_value), so the
+// trailing blanks are ignored and the format is unchanged as far as it is concerned.
+
+void PhotonList::OpenAndWriteHeader(const std::string &filename, Real tint_out) {
+  std::stringstream msg;
+  if ((fp_ = fopen(filename.c_str(),"wb")) == nullptr) {
+    msg << "### FATAL ERROR in function [PhotonList::WriteList]" << std::endl
+        << "Output file '" << filename << "' could not be opened";
+    throw std::runtime_error(msg.str().c_str());
+  }
+  dt_pos_ = ftell(fp_);
+  fprintf(fp_,"dt=%-24.8e\n",tint_out);
+  length_pos_ = ftell(fp_);
+  fprintf(fp_,"length=%-20lld\n",static_cast<long long>(0));
+  fprintf(fp_,"npars=%d\n",nparams);
+  ntot_pos_ = ftell(fp_);
+  fprintf(fp_,"ntot=%-20d\n",nsrun);
+  fprintf(fp_,"polarized=%s\n",GetMCPolarizationName(polarized));
+  fprintf(fp_,"coord=%s\n",pmy_mc->geometry_tag.c_str());
+  // free parameters of the metric, so the file is self-describing; absent for
+  // metrics that have none
+  if (!pmy_mc->metric_params.empty())
+    fprintf(fp_,"metric_params=%s\n",pmy_mc->metric_params.c_str());
+  fprintf(fp_,"frame=%s\n",pmy_mc->frame_tag.c_str());
+  // The spatial basis of the wavevector columns.  Always the global cartesian legs, in
+  // every topology, so that they share a frame with the Stokes parameters.  Files
+  // written before this line carry the local orthonormal legs instead, and a reader
+  // rotates those itself; the line is what tells it not to.
+  fprintf(fp_,"basis=cartesian\n");
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonList::StreamResident()
+//! \brief convert and append the resident photons, a chunk at a time
+//
+// A fixed buffer rather than one the size of the list
+
+void PhotonList::StreamResident() {
+  if (length <= 0) return;
+  const int kChunk = 65536;
+  std::vector<double> buf(static_cast<std::size_t>(kChunk)*nparams);
+  int i = 0;
+  while (i < length) {
+    const int nthis = (length - i < kChunk) ? length - i : kChunk;
+    std::size_t n = 0;
+    for (int m = 0; m < nthis; ++m)
+      for (int j = 0; j < nparams; ++j)
+        buf[n++] = static_cast<double>(photons(i+m,j));
+    // write data in big endian order
+    if (!(mcoutput::IsBigEndian()))
+      for (std::size_t m = 0; m < n; ++m) mcoutput::Swap8Bytes(&buf[m]);
+    fwrite(buf.data(),sizeof(double),n,fp_);
+    i += nthis;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonList::SpillToFile()
+//! \brief push the resident photons to disk and reuse the array
+
+void PhotonList::SpillToFile() {
+  if (length == 0) return;
+  // pmy_mc->tint, not the member dt: tint is the integration time already folded into
+  // every photon weight (ComputeEmissionArray multiplies the emissivity by it), whereas dt
+  // is this output's cadence.  For a static run tint is what WriteList will finally record,
+  // so the header goes out correct and the later correction is a no-op.  The file name has
+  // to match the one WriteList will use, which is why both go through Filename().
+  if (fp_ == nullptr) OpenAndWriteHeader(Filename(), pmy_mc->tint);
+  StreamResident();
+  nwritten_ += length;
+  length = 0;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void PhotonList::WriteList(std::string filename, Real tint_out)
 //! \brief write photon list to binary file
 
 void PhotonList::WriteList(std::string filename, Real tint_out) {
   // Since list lengths are variable each process writes its own list
+  if (fp_ == nullptr) OpenAndWriteHeader(filename, tint_out);
+  StreamResident();
+  nwritten_ += length;
+  length = 0;
 
-  // open file for output
-  FILE *pfile;
-  std::stringstream msg;
-
-  //if ((pfile = fopen("temp.out","w")) == nullptr) {
-  if ((pfile = fopen(filename.c_str(),"w")) == nullptr) {
-    msg << "### FATAL ERROR in function [PhotonList::WriteList]" << std::endl
-        << "Output file '" << filename << "' could not be opened";
-    throw std::runtime_error(msg.str().c_str());
-  }
-
-  // write header information
-  fprintf(pfile,"dt=%.8e\n",tint_out);
-  fprintf(pfile,"length=%d\nnpars=%d\n",length,nparams);
-  fprintf(pfile,"ntot=%d\n",nsrun);
-  fprintf(pfile,"polarized=%d\n",polarized);
-  fprintf(pfile,"nscp=1\n");
-  fprintf(pfile,"coord=%s\n",pmy_mc->geometry_tag.c_str());
-  // write data
-  int ndata = length*nparams;
-  double *data;
-  data = new double[ndata];
-  int n=0;
-  for (int i=0; i<length; ++i) {
-    for (int j=0; j<nparams; ++j) {
-      data[n++] = static_cast<double>(photons(i,j));
-    }}
-  // write data in big endian order
-  if (!(mcoutput::IsBigEndian())) {
-    for (int i=0; i<ndata; ++i)
-      mcoutput::Swap8Bytes(&data[i]);
-  }
-  fwrite(data,sizeof(double),static_cast<size_t>(ndata),pfile);
-  fclose(pfile);
-  delete [] data;
+  // Correct the fields that were placeholders when the header went out.
+  fseek(fp_, dt_pos_, SEEK_SET);
+  fprintf(fp_,"dt=%-24.8e",tint_out);
+  fseek(fp_, length_pos_, SEEK_SET);
+  fprintf(fp_,"length=%-20lld",static_cast<long long>(nwritten_));
+  fseek(fp_, ntot_pos_, SEEK_SET);
+  fprintf(fp_,"ntot=%-20d",nsrun);
+  fclose(fp_);
+  fp_ = nullptr;
 }
 
 //----------------------------------------------------------------------------------------
@@ -814,6 +971,7 @@ void PhotonList::WriteList(std::string filename, Real tint_out) {
 
 void PhotonList::ResetList() {
   length = 0;
+  nwritten_ = 0;
   nsrun = 0;
 }
 
@@ -938,6 +1096,11 @@ void PhotonTrajectoryList::WriteList(std::string filename) {
   fprintf(pfile,"maxstep=%d\n",maxstep);
   fprintf(pfile,"npars=%d\n",nparams);
   fprintf(pfile,"coord=%s\n",pmy_mc->geometry_tag.c_str());
+  // free parameters of the metric, so the file is self-describing; absent for
+  // metrics that have none
+  if (!pmy_mc->metric_params.empty())
+    fprintf(pfile,"metric_params=%s\n",pmy_mc->metric_params.c_str());
+  fprintf(pfile,"frame=%s\n",pmy_mc->frame_tag.c_str());
   int *idata = new int[length];
   for (int i=0; i<length; ++i)
     idata[i] = nsteps[i];
@@ -945,14 +1108,15 @@ void PhotonTrajectoryList::WriteList(std::string filename) {
   if (!(mcoutput::IsBigEndian()))
     for (int i=0; i<length; ++i) mcoutput::Swap4Bytes(&idata[i]);
   fwrite(idata,sizeof(int),static_cast<size_t>(length),pfile);
-  // Get total length of array
-  int ndata = 0;
+  // Get total length of array.  64-bit for the same reason as PhotonList::WriteList:
+  // steps summed over trajectories, times nparams, outgrows a 32-bit int.
+  std::int64_t ndata = 0;
   for (int i=0; i<length; ++i)
     ndata += nsteps[i];
   ndata *= nparams;
   double *data = new double[ndata];
   // write data
-  int n=0;
+  std::int64_t n=0;
   for (int i=0; i<length; ++i) {
     for (int j=0; j<nsteps[i]; ++j) {
       for (int k=0; k<nparams; ++k) {
@@ -960,7 +1124,7 @@ void PhotonTrajectoryList::WriteList(std::string filename) {
       }}}
   // write data in big endian order
   if (!(mcoutput::IsBigEndian()))
-    for (int i=0; i<ndata; ++i) mcoutput::Swap8Bytes(&data[i]);
+    for (std::int64_t i=0; i<ndata; ++i) mcoutput::Swap8Bytes(&data[i]);
   fwrite(data,sizeof(double),static_cast<size_t>(ndata),pfile);
   fclose(pfile);
   delete [] data;
@@ -1034,6 +1198,22 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
       std::string type = pin->GetString(pib->block_name,"file_type");
 
       if (type.compare("spec") == 0) {
+        // Spectra used to be refused for a curved metric, for two reasons that no longer
+        // hold.  The angle binning orthonormalized the wavevector with the flat scale
+        // factors, which in Kerr-Schild put the direction off by ~20 degrees at r = 6M
+        // and silently dropped photons below mu ~ 0.35 as ingoing; UpdateSpectrum now
+        // projects through the normal-observer tetrad instead, the same frame the
+        // Stokes parameters are referenced to and the photon list writes.  And the
+        // energy axis binned ep = k^t rather than the conserved -k_t; it now bins
+        // PhotonEnergyAtInfinity under relativistic_output.
+        //
+        // What remains is a convention, shared with PhotonList::AddPhoton: the "global
+        // z" the polar_axis binning measures against is the normal observer's third leg
+        // rotated by the flat R(theta, phi).  In a flat chart that is the global z axis
+        // exactly; in a curved one it is the natural observer's-eye analogue, and it is
+        // the same axis the list's wavevector columns are written against, so spectrum
+        // and list agree with each other by construction.
+        //
         // set momentum range and polarization, logarithmic flags for spectrum constructor
         MomentumRange range;
         range.ne = pin->GetInteger(pib->block_name,"ne");
@@ -1046,7 +1226,8 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         range.ncth = pin->GetOrAddInteger(pib->block_name,"ncth",8);
         range.cthmin = pin->GetOrAddReal(pib->block_name,"cthmin",0.);
         range.cthmax = pin->GetOrAddReal(pib->block_name,"cthmax",1.);
-        bool polarized = pin->GetOrAddBoolean(pib->block_name,"polarized",pmc->polarized);
+        MCPolarization polarized = GetMCPolarizationFlag(pin->GetOrAddString(
+            pib->block_name,"polarized",GetMCPolarizationName(pmc->polarized)));
         bool xlog = pin->GetOrAddBoolean(pib->block_name,"xlog",true);
 
         // Create spectrum
@@ -1099,8 +1280,12 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
           pspec->x3max = pin->GetReal(pib->block_name,"x3max");
           pspec->coordinates = true;
         }
-        // Set axis for determining output angles
-        if (COORDINATE_SYSTEM == "cartesian")
+        // Set axis for determining output angles.  A Cartesian-topology grid has no
+        // polar axis of its own, so escape angles have to be binned against the
+        // Cartesian axes; the alternative branch of UpdateSpectrum has nothing to use.
+        // Previously tested cartesian only, which left minkowski and gr_user defaulting
+        // to polar_axis = false and then binning uninitialized angle indices.
+        if (pmc->topology == MCTOPO_CARTESIAN)
           pspec->polar_axis = true;
         else
           pspec->polar_axis = pin->GetOrAddBoolean(pib->block_name,"polar_axis",false);
@@ -1123,7 +1308,11 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
               << " greater than user variables: " << pmy_mc->nuser_var << std::endl;
           throw std::runtime_error(msg.str().c_str());
         }
-        pphlist = new PhotonList(pmc->list_size_init,pmc->polarized,nuser_out);
+        // Photons held in memory before the list spills to its file.  At ~13 columns
+        // the default is a couple of hundred MB per rank, large enough that a modest run
+        // never spills and small enough that a large one cannot grow without bound.
+        int max_res = pin->GetOrAddInteger(pib->block_name,"max_resident",2000000);
+        pphlist = new PhotonList(pmc->list_size_init,pmc->polarized,nuser_out,max_res);
         pphlist->pmy_mc = pmc;
         // Initialize photon list
         if (pmc->dynamic) {
@@ -1252,15 +1441,16 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
   fprintf(pfile,"nmu=%d\n",nmu);
   fprintf(pfile,"nphi=%d\n",nphi);
   fprintf(pfile,"ntot=%d\n",nsrun);
-  int nintens = 1;
-  if (polarized) nintens += 2;
+  int nintens = 1 + NumStokesStored(polarized);
   fprintf(pfile,"nintens=%d\n",nintens);
   fprintf(pfile,"units=ev\n");
-  if (polarized)
-    fprintf(pfile,"polarized=true\n");
-  else
-    fprintf(pfile,"polarized=false\n");
+  fprintf(pfile,"polarized=%s\n",GetMCPolarizationName(polarized));
   fprintf(pfile,"yerror=true\n");
+  // Coordinates and metric paramters
+  fprintf(pfile,"coord=%s\n",pmy_mc->geometry_tag.c_str());
+  if (!pmy_mc->metric_params.empty())
+    fprintf(pfile,"metric_params=%s\n",pmy_mc->metric_params.c_str());
+  fprintf(pfile,"frame=%s\n",pmy_mc->frame_tag.c_str());
   // Output bin faces with fwrite
   bool bigend = mcoutput::IsBigEndian();
   int nface = (ne+1 > nmu+1) ? ne+1 : nmu+1;
@@ -1294,7 +1484,9 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
   Real norms;
   if (nsrun != pmy_mc->nsamp) {
     norms = static_cast<Real>(nsrun)/static_cast<Real>(pmy_mc->nsamp);
-    printf("nsrun != nsamp: %d %d\n",nsrun,pmy_mc->nsamp);
+    // nsamp is 64-bit; %d on it is undefined and prints garbage.
+    printf("nsrun != nsamp: %d %lld\n",nsrun,
+           static_cast<long long>(pmy_mc->nsamp));
   } else {
     norms = 1.;
   }
@@ -1302,34 +1494,24 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
   intens.NewAthenaArray(nintens,nphi,nmu,ne);
   errors.NewAthenaArray(nintens,nphi,nmu,ne);
   Real fac1 = norms*static_cast<Real>(nmu)*static_cast<Real>(nphi)/2./PI;
-  for(int k=0; k<nphi; ++k) {
-    for(int j=0; j<nmu; ++j) {
+  // One normalization for every plane, intensity and Stokes alike, which is what
+  // make_spectrum in athena_mc.py does: it builds a single factor and applies it to the
+  // whole intensity array.  The Stokes planes used to be scaled in a separate loop that
+  // omitted tint_out, so Q/U/V came out larger than I by the integration time and Q/I
+  // read off a .spec was not the polarization fraction.  Invisible whenever tint_out
+  // happens to be one, which it is in every test deck here.  Sharing one fac2 makes
+  // the two impossible to get out of step again.
+  for (int k = 0; k < nphi; ++k) {
+    for (int j = 0; j < nmu; ++j) {
       Real mumid = (static_cast<Real>(j)+0.5)/static_cast<Real>(nmu);
-      for(int i=0; i<ne; ++i) {
+      for (int i = 0; i < ne; ++i) {
         Real fac2 = fac1*emid[i]/(mumid*dnu[i]*tint_out);
         intens(0,k,j,i) = static_cast<double>(intensity(k,j,i)*fac2);
         errors(0,k,j,i) = sqrt(intensity_sq(k,j,i)*SQR(fac2));
-      }
-    }
-  }
-  if (polarized) {
-    for(int k=0; k<nphi; ++k) {
-      for(int j=0; j<nmu; ++j) {
-        Real mumid = (static_cast<Real>(j)+0.5)/static_cast<Real>(nmu);
-        for(int i=0; i<ne; ++i) {
-          Real fac2 = fac1*emid[i]/(mumid*dnu[i]);
-          intens(1,k,j,i) = static_cast<double>(stokesq(k,j,i)*fac2);
-          errors(1,k,j,i) = sqrt(stokesq_sq(k,j,i)*SQR(fac2));
-        }
-      }
-    }
-    for(int k=0; k<nphi; ++k) {
-      for(int j=0; j<nmu; ++j) {
-        Real mumid = (static_cast<Real>(j)+0.5)/static_cast<Real>(nmu);
-        for(int i=0; i<ne; ++i) {
-          Real fac2 = fac1*emid[i]/(mumid*dnu[i]);
-          intens(2,k,j,i) = static_cast<double>(stokesu(k,j,i)*fac2);
-          errors(2,k,j,i) = sqrt(stokesu_sq(k,j,i)*SQR(fac2));
+        // Stokes planes follow the intensity in the order Q, U, V
+        for (int m = 0; m < NumStokesStored(polarized); ++m) {
+          intens(m+1,k,j,i) = static_cast<double>(stokes[m](k,j,i)*fac2);
+          errors(m+1,k,j,i) = sqrt(stokes_sq[m](k,j,i)*SQR(fac2));
         }
       }
     }
@@ -1444,10 +1626,7 @@ void MCOutput::SendMonteCarloSpectrum(Spectrum *pspect, int dest) {
   int ne = pspect->range.ne;
   int ncth = pspect->range.ncth;
   int nphi = pspect->range.nphi;
-  int size = 2;
-  if (pspect->polarized) {
-    size += 4;
-  }
+  int size = 2 + 2*NumStokesStored(pspect->polarized);
   size *= (ne*ncth*nphi);
 
   Real *send_buf;
@@ -1461,11 +1640,9 @@ void MCOutput::SendMonteCarloSpectrum(Spectrum *pspect, int dest) {
   MPI_Wait(&send_rq, MPI_STATUS_IGNORE);
   BufferUtility::PackData(pspect->intensity,send_buf,0,ne,0,ncth,0,nphi,p);
   BufferUtility::PackData(pspect->intensity_sq,send_buf,0,ne,0,ncth,0,nphi,p);
-  if (pspec->polarized) {
-    BufferUtility::PackData(pspect->stokesq,send_buf,0,ne,0,ncth,0,nphi,p);
-    BufferUtility::PackData(pspect->stokesq_sq,send_buf,0,ne,0,ncth,0,nphi,p);
-    BufferUtility::PackData(pspect->stokesu,send_buf,0,ne,0,ncth,0,nphi,p);
-    BufferUtility::PackData(pspect->stokesu_sq,send_buf,0,ne,0,ncth,0,nphi,p);
+  for (int m = 0; m < NumStokesStored(pspect->polarized); ++m) {
+    BufferUtility::PackData(pspect->stokes[m],send_buf,0,ne,0,ncth,0,nphi,p);
+    BufferUtility::PackData(pspect->stokes_sq[m],send_buf,0,ne,0,ncth,0,nphi,p);
   }
   MPI_Isend(send_buf,size,MPI_ATHENA_REAL,dest,tag++,MPI_COMM_WORLD,&send_rq);
   MPI_Wait(&send_rq, MPI_STATUS_IGNORE);
@@ -1485,22 +1662,25 @@ void MCOutput::ReceiveMonteCarloSpectrum(Spectrum *pspect, bool add) {
   int ne = pspect->range.ne;
   int ncth = pspect->range.ncth;
   int nphi = pspect->range.nphi;
-  int size = 2;
-  if (pspect->polarized)
-    size += 4;
+  int size = 2 + 2*NumStokesStored(pspect->polarized);
   size *= (ne*ncth*nphi);
 
   Real *recv_buf;
   recv_buf = new Real[size];
-  MPI_Request recv_rq;
   unsigned int tag = 100; // temporary
 
   ne--; ncth--; nphi--;
   int nsrun;
-  MPI_Irecv(&nsrun,size,MPI_INT,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&recv_rq);
-  MPI_Wait(&recv_rq, MPI_STATUS_IGNORE);
-  MPI_Irecv(recv_buf,size,MPI_ATHENA_REAL,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&recv_rq);
-  MPI_Wait(&recv_rq, MPI_STATUS_IGNORE);
+  MPI_Status st;
+  // Two corrections to what this used to do.  The count is 1, not size: nsrun is a single
+  // int, and posting a receive for size of them into it overruns the stack the moment any
+  // sender puts more than one on this tag.  And the source is taken from the first
+  // message rather than left as MPI_ANY_SOURCE on both, so the sample count and the
+  // spectrum that follows it come from the same rank; with ANY_SOURCE twice, one rank's
+  // count could be paired with another's spectrum.
+  MPI_Recv(&nsrun,1,MPI_INT,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&st);
+  MPI_Recv(recv_buf,size,MPI_ATHENA_REAL,st.MPI_SOURCE,tag++,MPI_COMM_WORLD,
+           MPI_STATUS_IGNORE);
   Spectrum *ptemp;
   if (add) {
     // Make temporary spectrum for copying, initalized empty
@@ -1514,11 +1694,9 @@ void MCOutput::ReceiveMonteCarloSpectrum(Spectrum *pspect, bool add) {
   int p=0;
   BufferUtility::UnpackData(recv_buf,ptemp->intensity,0,ne,0,ncth,0,nphi,p);
   BufferUtility::UnpackData(recv_buf,ptemp->intensity_sq,0,ne,0,ncth,0,nphi,p);
-  if (pspect->polarized) {
-    BufferUtility::UnpackData(recv_buf,ptemp->stokesq,0,ne,0,ncth,0,nphi,p);
-    BufferUtility::UnpackData(recv_buf,ptemp->stokesq_sq,0,ne,0,ncth,0,nphi,p);
-    BufferUtility::UnpackData(recv_buf,ptemp->stokesu,0,ne,0,ncth,0,nphi,p);
-    BufferUtility::UnpackData(recv_buf,ptemp->stokesu_sq,0,ne,0,ncth,0,nphi,p);
+  for (int m = 0; m < NumStokesStored(pspect->polarized); ++m) {
+    BufferUtility::UnpackData(recv_buf,ptemp->stokes[m],0,ne,0,ncth,0,nphi,p);
+    BufferUtility::UnpackData(recv_buf,ptemp->stokes_sq[m],0,ne,0,ncth,0,nphi,p);
   }
   if (add) {
     pspect->AddSpectrum(ptemp);
@@ -1544,14 +1722,9 @@ void MCOutput::OutputPhotonList(bool wtflag) {
   Real tlim = pmy_mc->pmy_mesh->tlim;
   if ( (time >= pphlist->last_time+pphlist->dt) || (time == tstart) || (time >= tlim)
        || wtflag ) {
-    // construct file name
-    std::string filename;
-    filename.assign(pphlist->base_name);
-    filename.append(".");
-    std::stringstream file_number;
-    file_number << std::setw(5) << std::setfill('0') << pphlist->output_number;
-    filename.append(file_number.str());
-    filename.append(".list");
+    // Filename() rather than a second copy of this logic: the spill path opens the file
+    // before this point and the two names have to agree.
+    std::string filename = pphlist->Filename();
     // compute integration time in cgs
     Real tint_out;
     if (pmy_mc->dynamic) {

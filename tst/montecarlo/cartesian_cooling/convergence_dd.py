@@ -170,7 +170,7 @@ def write_athinput(iseed,nphot,vel,frame,dens,tgas,emin,emax,length,periodic,
         outfile.write("scattering = none\n")
     outfile.write("emission   = freefree\n")
     outfile.write("absorption = freefree\n")
-    outfile.write("polarized = false\n")
+    outfile.write("polarized = none\n")
     outfile.write("comptonio = 0\n")
     if boosts:
         outfile.write("boosts     = true\n")

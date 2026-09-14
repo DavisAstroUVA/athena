@@ -26,6 +26,19 @@
 class MonteCarloBlock;
 class Photon;
 
+//----------------------------------------------------------------------------------------
+//! \brief the comoving orthonormal frame at a photon: the one definition
+//!
+//! Used in TransformToComoving/TransformToCoordinate to tranform photon to/from the
+//! scattering basis. Built by Gram-Schmidt from the fluid four-velocity against the
+//! coordinate metric. In GR the four-velocity comes from FluidFourVelocity, in
+//! flat spacetime it is vel carried onto coordinate components by the static tetrad. 
+//!
+//! econ and ecov are indexed [tetrad leg][coordinate component], for CoordinateToTetrad,
+//! TetradToCoordinate, PolarizationToTetrad and PolarizationToCoord.
+void ComovingFrame(MonteCarloBlock *pmcb, Photon *pphot, int ip,
+                   Real econ[4][4], Real ecov[4][4]);
+
 //! \brief the frames radiation moments can be reported in.
 //!
 //! MCFRAME_LAB and MCFRAME_COMOVING are orthonormal: in general relativity they are the
@@ -42,7 +55,7 @@ enum MCFrame {MCFRAME_LAB = 0, MCFRAME_COMOVING = 1, MCFRAME_COORD = 2, MCFRAME_
 //!
 //! Photon pushers pass UpdateMoments a coordinate path length, and the length in any other
 //! frame differs by that frame's energy over ep. n is a unit vector in the orthonormal frames;
-//  in MCFRAME_COORD it holds k^i/k^0 and is not normalised.
+//  in MCFRAME_COORD it holds k^i/k^0 and is not normalized.
 
 struct PhotonFrameState {
   Real e;     // photon energy in this frame
@@ -84,6 +97,12 @@ class PhotonFrames {
 
  private:
   void Fill(MCFrame f);
+
+  // Re-express a unit direction, given in the local orthonormal basis at the photon, in
+  // the orthonormal basis at the photon's cell center, the basis where the moments are
+  // accumulated. A no-op for a Cartesian topology, where the basis does not depend on
+  // position.
+  void ToCellCenterBasis(Real n[3]) const;
 
   MonteCarloBlock *pmcb_;
   Photon *pphot_;

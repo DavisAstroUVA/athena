@@ -36,7 +36,12 @@ public:
   // data
 
   Real dl; // current displacement
-  int checkmove; // check/terminate move
+  //! bound on the number of steps in a single free flight, accumulated in Photon::nmvp
+  //! across every Move call and every block the photon crosses between scatterings.  It
+  //! catches the flight that never ends -- a near-horizontal photon in an optically thin
+  //! domain with periodic sides -- while leaving a photon that simply scatters often
+  //! alone.  0 disables the cap.
+  int capmove;
 
   MonteCarlo *pmy_mc;
   MonteCarloBlock *pmy_mcb;
@@ -140,11 +145,31 @@ public:
   // functions
   void Move(Photon *pphot, int ips, int ipe);
   void UpdateOpacities(Photon *pphot, MonteCarloBlock *pmcb, int ip);
+#if MC_VERLET_DK
   void VerletStep(Photon *pphot, Real step, int ip);
+#endif
   void RK4Step(Photon *pphot, Real step, int ip);
   void SubStep(Real xcon[4], Real kcov[4], Real dl[8]);
-  void PropogatePolarization(Photon *nphot, Real step, int ip);
+  void AdvanceStep(Photon *pphot, Real step, int ip);
+  void ConnectionContraction(Photon *pphot, int ip, Real acon[4][4]);
+  void ApplyPolarizationRate(const Real acon[4][4], const std::complex<Real> nin[4][4],
+                             std::complex<Real> dndl[4][4]);
+
+  // A^i_k = Gamma^i_kl k^l carried from one step's corrector into the next step's
+  // predictor, and a flag saying whether the photon is still where it was computed.
+  Real acon[4][4];
+  bool acon_valid;
   Real StepSize(Photon *pphot, int ip);
+
+  // The metric pair at the point the last RK4 step ended
+  Real metric_x[4];
+  Real metric_gcov[4][4];
+  Real metric_gcon[4][4];
+  bool metric_valid;
+  //! g_{mu nu} and g^{mu nu} at x, from the cache when x is the cached point
+  void MetricPairAt(Real x[4], Real gcov[4][4], Real gcon[4][4]);
+  //! whether the coherency tensor is transported; constant for the run, read every step
+  bool polarized_;
 
 };
 

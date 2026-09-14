@@ -51,7 +51,7 @@ void PhotonEmitFreeFree(MonteCarloBlock *pmcb, Photon *pphot, Real lemin, Real l
   // Initialize weight
   pphot->wp[ip] *= exp(-x) * (lemax-lemin);
 
-  if (pmcb->pmy_mc->polarized) {
+  if (IsPolarized(pmcb->pmy_mc->polarized)) {
     // Initialize Stokes vector
     pphot->sip[ip] = 1.0;
     pphot->sup[ip] = 0.0;
@@ -103,7 +103,7 @@ void PhotonEmitBlackbody(MonteCarloBlock *pmcb, Photon *pphot, BoundaryFace face
   Real temp = pmcb->tgas(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
   pphot->ep[ip] = PlanckDist(temp,pran);
 
-  if (pmcb->pmy_mc->polarized) {
+  if (IsPolarized(pmcb->pmy_mc->polarized)) {
     // Initialize Stokes vector
     pphot->sip[ip] = 1.0;
     pphot->sup[ip] = 0.0;

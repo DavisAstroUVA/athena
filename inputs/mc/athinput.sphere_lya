@@ -55,7 +55,7 @@ gamma = 1.666666666666667 # gamma = C_p/C_v
 nphot     = 10000        # number of photon samples
 iseed     = 121501      # pseudorandom number seed
 scattering = resonance  # scattering method
-polarized = false       # polarization flag
+polarized = none       # polarization flag
 
 <problem>
 temp     = 1.e4    # isothermal temperature

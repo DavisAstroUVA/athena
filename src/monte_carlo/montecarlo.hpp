@@ -15,6 +15,7 @@
 #include <sstream>
 #include <complex>
 #include <random>
+#include <vector>
 // Athena++ classes headers
 #include "../athena.hpp"
 #include "../coordinates/coordinates.hpp"
@@ -25,6 +26,7 @@
 #include "mcoutput.hpp"
 #include "mccoord.hpp"
 #include "photon_frames.hpp"
+#include "polarization.hpp"
 #include "tetrad.hpp"
 
 // GSL library
@@ -36,6 +38,7 @@
 class Mesh;
 class MeshBlock;
 class MonteCarloBlock;
+class MCRankExchange;
 class ParameterInput;
 class Photon;
 class PhotonPusher;
@@ -173,6 +176,7 @@ enum BoundaryFace SetEmissionSurface(std::string input_face);
 enum AbsorptionOpacityFlag GetAbsorptionOpacityFlag(std::string input_string);
 enum AbsorptionMethodFlag GetAbsorptionMethodFlag(std::string input_string);
 enum ScatteringFlag GetScatteringFlag(std::string input_string);
+enum MCPolarization GetMCPolarizationFlag(std::string input_string);
 
 //----------------------------------------------------------------------------------------
 //! \struct MCBlockSize
@@ -240,7 +244,7 @@ public:
   int list_size_init; // maximum number of photons run per output on any process
   int max_phots_init; // maximum number of photon elements
   int nuser_var, nuser_mom;
-  int checkmove,checkscat;
+  int checkscat,capmove;
   int emission_method;
   int *emission_geometry;
   BoundaryFace *emission_face;
@@ -255,12 +259,12 @@ public:
   bool boosts;  // Compute lorentz transformations
   bool using_bfield; // set magnetic fields
   bool tetrads; // convert from coordinate frame
-  bool emission_array;  // Compute and save zone emissivities
+  bool emission_array;  // Compute and save cell emissivities
   bool *emission_eqwt; // Set initial weights equal
   bool *initialize_comoving; // Transform from comoving frame for emission
   enum AbsorptionMethodFlag *absorption_method; // absorption method for each emission type
 
-  bool polarized;// track photon polarization
+  MCPolarization polarized;// how much of the polarization state is tracked
   bool acceleration;  // use MRW acceleration
   bool computedmin;
   bool time_acc;  // use MRW acceleration with time limit
@@ -268,10 +272,21 @@ public:
   bool general_pusher_flag; // Use integration for photon movement
   bool verbose; // print out more information during run
 
-  //! canonical geometry/wavevector tag written to output headers; see SetGeometryTag
+  //! which metric the module integrates on; see SetCoordinateSystem
+  MCCoordSystem coord_system;
+  //! shape of (x1,x2,x3); derived from coord_system, cached because it is read per photon
+  MCTopology topology;
+  //! true when coord_system is a curved spacetime; derived from coord_system
+  bool curved_metric;
+
+  // canonical geometry/wavevector tag written to output headers; see SetGeometryTag
   std::string geometry_tag;
-  //! true when geometry_tag denotes a curved (or at least GR-integrated) spacetime, in
-  //! which case list output reports the conserved energy -k_t rather than k^t
+  // parameters of the metric, as "key=value,key=value"
+  std::string metric_params;
+  // frame tag for outputs
+  std::string frame_tag;
+  // true when geometry_tag denotes a curved (or at least GR-integrated) spacetime,
+  // in which case list output reports the conserved energy -k_t rather than k^t
   bool relativistic_output;
 
   // function pointers
@@ -293,6 +308,25 @@ public:
   // SWD: some of these functions could/should be private
   void RunMonteCarlo(Outputs *pouts, Mesh *pmesh, ParameterInput *pinput);
   bool CheckAndBroadCastPhotonsRemaining();
+  //! move photons between blocks on this rank; true when something landed here
+  bool ExchangeLocal();
+  //! flush receive buffers into their blocks; true when any block received something
+  bool DrainArrivals();
+  // send what was staged for other ranks, take delivery, and test for completion
+  bool FinishRound();
+  // transport every photon of this emission type to completion using photon counters
+  void TransportAsync(int etype);
+  //! use the counter-based termination test instead of a collective every round
+  bool async_term;
+  // ceiling on consecutive same-rank transport sweeps before taking the global step,
+  // so two blocks trading a photon cannot hold the other ranks at the barrier
+  int local_max_sweeps;
+  // Blocks taking part in the current transfer round. see CheckAndBroadCastPhotonsRemaining
+  // for what puts a block in each.
+  std::vector<int> send_list_, recv_list_;
+  // moves photons between ranks a rank at a time; null when <montecarlo>/rank_exchange is off,
+  // inactive on a single rank
+  MCRankExchange *pexch;
   void InitUserMonteCarloData(ParameterInput *pin);
   // Enroll User functions
   void EnrollUserMCBoundaryFunction(enum BoundaryFace dir, MCBValFunc_t my_bc);
@@ -311,7 +345,9 @@ public:
   void EnrollUserScatteringFunction(ScatFunc_t scatfunc);
   void Initialize(ParameterInput *pinput);
   void InitializeEmission(ParameterInput *pin);
+  void SetCoordinateSystem(ParameterInput *pin);
   void SetGeometryTag(ParameterInput *pin);
+  void SetMetricParams(ParameterInput *pin);
   void DistributeSamples(int etype);
   void NormalizeDomainOutputs(bool normalize);
 private:
@@ -369,6 +405,9 @@ public:
   bool mom_flag_com; // Compute moments in comoving frame
   bool mom_flag_coord; // Compute moments in the coordinate basis
   bool accumulate_com; // accumulate comoving moments directly rather than deriving them
+  // The lab moments have to exist and be accumulated whenever the comoving ones are
+  // derived from them, even if the lab moments are not themselves being output.
+  bool need_lab_moments;
   bool mom_flag_src; // Compute source terms for output
   bool mom_flag_usr; // Compute user defined monte carlo moments
   bool mom_flag_scat; // Compute scattering source terms
@@ -377,6 +416,9 @@ public:
 
   bool boosts;  // Compute lorentz transformations
   bool tetrads; // Compute tetrads
+  //! are boost_cmv/boost_lab allocated and filled?  They serve the moment deposition
+  //! and, outside GR, the legacy frame transforms; see the constructor for the condition.
+  bool cache_tetrads;
   bool coupled; // Whether time dependent code is coupled to hydro
   bool coherent_scattering; // photon does notchange energy after scattering
   bool acceleration;  // use MRW acceleration
@@ -388,9 +430,22 @@ public:
   enum AbsorptionOpacityFlag absorption_opac;
   enum ScatteringFlag scattering_meth;
 
+  //! mirrors of MonteCarlo::coord_system and friends, copied in so the hot paths do not
+  //! chase a pointer per photon
+  MCCoordSystem coord_system;
+  MCTopology topology;
+  bool curved_metric;
+
+  //! true when the comoving frequency shift is identically one everywhere, so that an
+  //! opacity depends on the cell alone and cannot change while a photon crosses it.
+  //! Requires a flat metric (so the lapse is one) and a fluid at rest (so there is no
+  //! Doppler term).  Set by ComputeTransformations, which is where the velocity is known.
+  //! GeneralPusher uses it to skip the per-step opacity refresh, which is then provably a
+  //! no-op; see the comment there.
+  bool shift_unity;
+
   // Associated with general pusher
   // SWD some of these should be eliminated others moved to MonteCarlo?
-  bool boyerlindquist_flag; // use Boyer-Lindquist coordinates
   bool orthotet_flag; // use orthonormal tetrad for TransferPhotons()
   bool varystep_flag; // use variable (true) or constant (false) step
 
@@ -415,7 +470,14 @@ public:
   AthenaArray<Real> rho;
   AthenaArray<Real> species;
   AthenaArray<Real> tgas;
+  // Free-free prefactor
+  AthenaArray<Real> ff_cell;
+  // Flat spacetime only: (gamma, gamma*beta^i) in the orthonormal frame, so consumers
+  // divide by vel(...,0) to get beta^i. Unallocated in GR.
   AthenaArray<Real> vel;
+  // General relativity only: the primitive (relative) three-velocity uu^i of the frame
+  // the comoving tetrad is built on.
+  AthenaArray<Real> uprim;
   AthenaArray<Real> bcc;
   AthenaArray<Real> boost_cmv;
   AthenaArray<Real> boost_lab;
@@ -453,8 +515,27 @@ public:
   //void ComputeEmissionSampleArray(BoundaryFace face);
   void SetEmissionCellWeight(Photon *pphot, int ips, int ipe);
   void SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face, int ips, int ipe);
+  // Index range the fluid-derived arrays are filled over: active cells plus ghosts.
+  // Photons legitimately occupy a ghost cell while they wait to be handed to the
+  // neighboring block, and the pusher reads rho, tgas, vel and the boost matrices at
+  // whatever cell the photon is in, so filling active cells alone leaves those reads
+  // returning zero.
+  void FillBounds(int &il, int &iu, int &jl, int &ju, int &kl, int &ku) const;
+
+  // Four-velocity of cell (i3,i2,i1)'s frame, rebuilt at the position x rather than read
+  // from the cell center, so that u.u = -1 holds where the vector is actually used.
+  // General relativity only.
+  // x is not const because MCCoord::Metric and InverseMetric take a mutable Real[4].
+  void FluidFourVelocity(Real x[4], int i3, int i2, int i1, Real ucon[4]) const;
+  // The same, given the metric pair at x by a caller that already has it (the general
+  // pusher carries the pair from step to step).  The first overload evaluates the pair
+  // and calls this one.
+  void FluidFourVelocity(const Real gcov[4][4], const Real gcon[4][4], int i3, int i2,
+                         int i1, Real ucon[4]) const;
+
   void GetDensity();
   void GetNumberDensity();
+  void ComputeFreeFreePrefactor();
   void GetScalars();
   void GetVelocity();
   void SetNormalObserver();
@@ -464,6 +545,11 @@ public:
   void TransformToComoving(Photon *pphot, int ips, int ipe);
   void TransformToCoordinate(Photon *pphot, int ips, int ipe);
   Real FrequencyShiftComoving(Photon *pphot, int ips);
+  // The same, given the metric pair at the photon; in general relativity this is the
+  // body and the first overload evaluates the pair, outside it the pair is not needed
+  // and the first overload is called.
+  Real FrequencyShiftComoving(Photon *pphot, int ip, const Real gcov[4][4],
+                              const Real gcon[4][4]);
   void UserWorkAfterTransfer(int etype);
 
 private:
@@ -481,7 +567,7 @@ private:
 //! three cannot drift apart the way the lab and comoving paths once did, and it shares the
 //! MomentSlot table with DeriveComovingMoments, which is its inverse.
 //!
-//! Defined here rather than in photon_frames.cpp because it runs once per zone crossing -- a few
+//! Defined here rather than in photon_frames.cpp because it runs once per cell crossing -- a few
 //! hundred thousand times in even a small run -- and measurably loses about a percent when
 //! it cannot inline into UpdateMoments across a translation unit boundary.
 

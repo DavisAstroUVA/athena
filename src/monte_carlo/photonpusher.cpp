@@ -25,7 +25,7 @@ PhotonPusher::PhotonPusher(MonteCarloBlock *pmcb) {
   pcoord = NULL;
   UserWorkInMove = pmcb->pmy_mc->UserWorkInMove;
   UserEscapeDistance = pmcb->pmy_mc->UserEscapeDistance;
-  checkmove = pmcb->pmy_mc->checkmove;
+  capmove = pmcb->pmy_mc->capmove;
 
   // MRW acceleration
   acceleration = pmcb->acceleration;
@@ -39,10 +39,16 @@ PhotonPusher::PhotonPusher(MonteCarloBlock *pmcb) {
     InitializeMRWDist();
     if (compton)
       ReadComptonGreensFunction();
-    if (time_acc) {
+    // The time tables back InterpPathTime, which MRWAcceleration calls unconditionally,
+    // so they are needed whenever acceleration is on and not only under time_acc.  Under
+    // the old guard an acceleration run with time_acc left at its default read mrwta,
+    // mrwtp and mrwtt before they were ever allocated, and hung rather than failing.  The
+    // destructor already frees these three under acceleration alone, which is what the
+    // intent was.
+    ReadTimeDistribution();
+    // mrwrt, mrwrp and mrwrr are read here but not used anywhere yet.
+    if (time_acc)
       ReadRadiusDistribution();
-      ReadTimeDistribution();
-    }
   }
 }
 
@@ -140,7 +146,7 @@ void PhotonPusher::MRWResonanceAcceleration(Photon *pphot, MCRandom *pran, Real 
   Real kb = 1.380649e-16;
   Real mass = 1.660538782e-24;
 
-  if (COORDINATE_SYSTEM == "spherical_polar") {
+  if (pmcb->topology == MCTOPO_SPHERICAL) {
 
     // ********* FREQUENCY REDISTRIBUTION *********
     // Sample outgoing frequency from Dijkstra et al 2006 solution
@@ -287,10 +293,17 @@ bool PhotonPusher::MRWAcceleration(Photon *pphot, MCRandom *pran, Real dist, Rea
   Real ct,r0;
   Real beta[3], beta2, gamma, gonembdk;
   if (boosts) {
-    // tranform relevant quanitites to comoving frame
-    beta[0] = pmcb->vel(1,pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
-    beta[1] = pmcb->vel(2,pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
-    beta[2] = pmcb->vel(3,pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
+    // tranform relevant quanitites to comoving frame.
+    // vel is allocated (ncells3, ncells2, ncells1, 4) and holds a four-velocity, so the
+    // three-velocity is vel(i3,i2,i1,m)/vel(i3,i2,i1,0) -- the same idiom
+    // GetDopplerFactor() and LorentzTransformFrequencyShift() use.  This used to read
+    // vel(m,i3,i2,i1), which indexes another cell's memory entirely and runs off the end
+    // of the array once i1 reaches 4, and it omitted the u^0 division as well.
+    const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+    const Real u0 = pmcb->vel(i3,i2,i1,0);
+    beta[0] = pmcb->vel(i3,i2,i1,1)/u0;
+    beta[1] = pmcb->vel(i3,i2,i1,2)/u0;
+    beta[2] = pmcb->vel(i3,i2,i1,3)/u0;
     beta2 = SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]);
     gamma = 1./sqrt(1.-beta2);
     Real bdk = (pphot->k1p[ip]*beta[0]+pphot->k2p[ip]*beta[1]+pphot->k3p[ip]*beta[2]);
@@ -319,7 +332,7 @@ bool PhotonPusher::MRWAcceleration(Photon *pphot, MCRandom *pran, Real dist, Rea
         accel_success = false;
       }
     } else {
-      // zone has zero velocity so use method for static MRW
+      // cell has zero velocity so use method for static MRW
       for(int i=0; i<3; ++i)
         beta[i] = 0.;
       ct = delta*SQR(dist)*chi;
@@ -409,11 +422,11 @@ bool PhotonPusher::MRWAcceleration(Photon *pphot, MCRandom *pran, Real dist, Rea
     Real mu = 2.*pran->uniform()-1.0;
     Real stheta = sqrt(1.0-mu*mu);
     Real phi = 2.*PI*pran->uniform();
-    if (COORDINATE_SYSTEM == "cartesian") {
+    if (pmy_mcb->topology == MCTOPO_CARTESIAN) {
       pphot->x1p[ip] += stheta*cos(phi) * r0 + beta[0] * ct;
       pphot->x2p[ip] += stheta*sin(phi) * r0 + beta[1] * ct;
       pphot->x3p[ip] += mu * r0 + beta[2] * ct;
-    } else if (COORDINATE_SYSTEM == "spherical_polar") {
+    } else if (pmy_mcb->topology == MCTOPO_SPHERICAL) {
       // convert to carteisan
       Real cth = cos(pphot->x2p[ip]);
       Real sth = sqrt(1. - SQR(cth));
@@ -436,7 +449,7 @@ bool PhotonPusher::MRWAcceleration(Photon *pphot, MCRandom *pran, Real dist, Rea
         pphot->x3p[ip] += 2.*PI;
     }
 
-    // Check if photon has left original zone and update
+    // Check if photon has left original cell and update
     bool newzone = UpdateZone(pphot,0); //SWDFIX
     if (newzone) {
       // Check if photon is absorbed or escape due to boundary condition
@@ -444,7 +457,7 @@ bool PhotonPusher::MRWAcceleration(Photon *pphot, MCRandom *pran, Real dist, Rea
         return false;
     }
     if (newzone || compton) {
-      // update opacity if zone or energy has changed
+      // update opacity if cell or energy has changed
       pphot->acp[ip] = pmcb->AbsorptionOpacity(pmcb,pphot,ip);
       pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb,pphot,ip);
     }
@@ -606,7 +619,7 @@ void PhotonPusher::NextFace(Real dx1, Real dx2, Real dx3, int &face, Real &dx) {
 //----------------------------------------------------------------------------------------
 //! \fn void PhotonPusher::MovePhotonToNextZone(Photon *pphot, MCCoord *pco,
 //!                           MonteCarloBlock *pmcb, int face, bool ascend[3], int ip))
-//! \brief updates photon zone when face is known
+//! \brief updates photon cell when face is known
 
 void PhotonPusher::MovePhotonToNextZone(Photon *pphot, MCCoord *pco, MonteCarloBlock *pmcb,
                                        int face, bool ascend[3], int ip) {
@@ -685,7 +698,7 @@ void PhotonPusher::MovePhotonToNextZone(Photon *pphot, MCCoord *pco, MonteCarloB
 
 //----------------------------------------------------------------------------------------
 //! \fn bool PhotonPusher::UpdateZone(photon *pphot, int ip)
-//! \brief check/updates photon zone after displacement
+//! \brief check/updates photon cell after displacement
 
 bool PhotonPusher::UpdateZone(Photon *pphot, int ip) {
 
@@ -760,7 +773,7 @@ bool PhotonPusher::UpdateZone(Photon *pphot, int ip) {
       }
     }
   }
-  // Returns true if zone changes, false otherwise
+  // Returns true if cell changes, false otherwise
   return update;
 
 }
@@ -1105,3 +1118,4 @@ Real PhotonPusher::InterpPathTime(Real tau, Real prob) {
          +b1*(a*mrwtt(ip+1,it)+a1*mrwtt(ip,it));
 
 }
+

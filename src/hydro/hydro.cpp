@@ -21,6 +21,7 @@
 #include "../eos/eos.hpp"
 #include "../field/field.hpp"
 #include "../mesh/mesh.hpp"
+#include "../monte_carlo/mcstatic.hpp"
 #include "../reconstruct/reconstruction.hpp"
 #include "hydro.hpp"
 #include "hydro_diffusion/hydro_diffusion.hpp"
@@ -31,18 +32,27 @@
 Hydro::Hydro(MeshBlock *pmb, ParameterInput *pin) :
     pmy_block(pmb), u(NHYDRO, pmb->ncells3, pmb->ncells2, pmb->ncells1),
     w(NHYDRO, pmb->ncells3, pmb->ncells2, pmb->ncells1),
-    u1(NHYDRO, pmb->ncells3, pmb->ncells2, pmb->ncells1),
+    // The second register and the fluxes exist only for the time integrator.  A Monte
+    // Carlo post-processing run never uses them (see monte_carlo/mcstatic.hpp), so they
+    // are left empty there.
+    u1(NHYDRO, pmb->ncells3, pmb->ncells2, pmb->ncells1,
+       (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+        AthenaArray<Real>::DataStatus::allocated)),
     w1(NHYDRO, pmb->ncells3, pmb->ncells2, pmb->ncells1),
     dvn(pmb->ncells1), dvt(pmb->ncells1),
     // C++11: nested brace-init-list in Hydro member initializer list = aggregate init. of
     // flux[3] array --> direct list init. of each array element --> direct init. via
     // constructor overload resolution of non-aggregate class type AthenaArray<Real>
-    flux{ {NHYDRO, pmb->ncells3, pmb->ncells2, pmb->ncells1+1},
+    flux{ {NHYDRO, pmb->ncells3, pmb->ncells2, pmb->ncells1+1,
+           (HydroIsStatic(pin) ? AthenaArray<Real>::DataStatus::empty :
+            AthenaArray<Real>::DataStatus::allocated)},
           {NHYDRO, pmb->ncells3, pmb->ncells2+1, pmb->ncells1,
-           (pmb->pmy_mesh->f2 ? AthenaArray<Real>::DataStatus::allocated :
+           ((pmb->pmy_mesh->f2 && !HydroIsStatic(pin)) ?
+            AthenaArray<Real>::DataStatus::allocated :
             AthenaArray<Real>::DataStatus::empty)},
           {NHYDRO, pmb->ncells3+1, pmb->ncells2, pmb->ncells1,
-           (pmb->pmy_mesh->f3 ? AthenaArray<Real>::DataStatus::allocated :
+           ((pmb->pmy_mesh->f3 && !HydroIsStatic(pin)) ?
+            AthenaArray<Real>::DataStatus::allocated :
             AthenaArray<Real>::DataStatus::empty)}
     },
     coarse_cons_(NHYDRO, pmb->ncc3, pmb->ncc2, pmb->ncc1,

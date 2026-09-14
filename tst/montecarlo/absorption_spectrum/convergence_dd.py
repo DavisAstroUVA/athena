@@ -70,7 +70,7 @@ def write_athinput(iseed,nphot,nen,emin,emax,abs_meth,file='athinput.mciso'):
     outfile.write("scattering = none\n")
     outfile.write("emission   = freefree\n")
     outfile.write("absorption = freefree\n")
-    outfile.write("polarized = false\n")
+    outfile.write("polarized = none\n")
     outfile.write("abs_method = "+abs_meth+"\n")
     outfile.write("\n<problem>\n")
     outfile.write("temp     = 1.0e5\n")

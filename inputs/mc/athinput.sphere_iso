@@ -48,7 +48,7 @@ gamma = 1.666666666666667 # gamma = C_p/C_v
 nphot     = 100000
 iseed     = 121500
 scattering = compton
-polarized = false
+polarized = none
 
 <problem>
 temp      = 3.e6    # isothermal temperature

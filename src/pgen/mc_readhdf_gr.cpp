@@ -3,7 +3,9 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file from_array.cpp//! \brief Problem generator for initializing with preexisting array from HDF5 input
+//! \file mc_readhdf_gr.cpp
+//! \brief Monte Carlo problem generator for an X-ray binary in Kerr-Schild coordinates,
+//! initialized from an athdf snapshot.
 
 // C headers
 
@@ -18,9 +20,10 @@
 #include "../globals.hpp"             // Globals
 #include "../hydro/hydro.hpp"         // Hydro
 #include "../eos/eos.hpp"                  // EquationOfState
-#include "../inputs/hdf5_reader.hpp"  // HDF5ReadRealArray()
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"     // ParameterInput
+#include "../monte_carlo/mcgrid.hpp"
+#include "../monte_carlo/mcsnapshot.hpp"
 #include "../monte_carlo/montecarlo.hpp"
 #include "../monte_carlo/photon.hpp"
 #include "../monte_carlo/mcutils.hpp"
@@ -38,12 +41,21 @@ namespace {
   AthenaArray<Real> fre_grid;
   AthenaArray<Real> temp_grid;
   AthenaArray<Real> rho_grid;
-  AthenaArray<Real> ross_tab;
   AthenaArray<Real> ross_gray_tab;
   AthenaArray<Real> plan_tab;
   AthenaArray<Real> emis_cum;
   AthenaArray<Real> emis_tot;
   AthenaArray<Real> opact;
+
+  // Free-free fallback bookkeeping.  Two distinct things get counted: rows of the table
+  // that are gray and are replaced wholesale at load, and cells whose (rho,T) falls off
+  // the grid at setup.  Both are reported rather than left silent, because they decide
+  // whether a run used the tabulated opacity or the analytic one.  Counting rather than
+  // warning per cell is deliberate: on a mesh of this size a per-cell printf is a flood
+  // that hides the very thing it is reporting.
+  long long nff_cells = 0, ntab_cells = 0;
+  long long noff_rho = 0, noff_temp = 0;
+  int ngray_rows = 0, ntable_rows = 0;
 
   //functions
   void InsideHorizon(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher,int ip);
@@ -55,20 +67,34 @@ namespace {
   Real FreeFreeOpacity(Real tgas, Real rho, Real energy);
   void GetNel(MonteCarloBlock *pmcb);
   void GetNelFloor(MonteCarloBlock *pmcb);
-  Real UserScatteringOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
+
+  //! \fn void CheckActiveCell(MonteCarloBlock *pmcb, int i3, int i2, int i1)
+  //! \brief debug-only guard on the assumption opact/emis_tot/emis_cum are built around
+  //
+  // Those three are dimensioned on active cells, so a photon sitting in a ghost cell would
+  // index past the end of its block's slice rather than into a harmless zero.  UpdateZone
+  // changes a photon's status the moment it leaves the active range and these are only
+  // reached while it is EVOLVING, so this cannot fire -- but the failure it guards against
+  // is a silent heap overwrite, which is worth a check that costs nothing when off.
+#ifdef DEBUG
+  void CheckActiveCell(MonteCarloBlock *pmcb, int i3, int i2, int i1) {
+    if (i1 < pmcb->is || i1 > pmcb->ie || i2 < pmcb->js || i2 > pmcb->je ||
+        i3 < pmcb->ks || i3 > pmcb->ke) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in opacity/emission table lookup" << std::endl
+          << "photon cell (" << i3 << "," << i2 << "," << i1 << ") is outside the active "
+          << "range on gid " << pmcb->pmy_block->gid << "." << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+#else
+  inline void CheckActiveCell(MonteCarloBlock *, int, int, int) {}
+#endif
+
+  void UserGetDensity(MonteCarloBlock *pmcb);
   void CartesianKerrSchild(Real x1, Real x2, Real x3, ParameterInput *pin,
     AthenaArray<Real> &g, AthenaArray<Real> &g_inv, AthenaArray<Real> &dg_dx1,
     AthenaArray<Real> &dg_dx2, AthenaArray<Real> &dg_dx3);
-}
-
-std::vector<float> x1coord;
-std::vector<float> x2coord;
-std::vector<float> x3coord;
-
-int getindex(std::vector<float> vec, float val){
-  std::vector<float>::iterator it = std::find(vec.begin(), vec.end(), val);
-  int index = std::distance(vec.begin(), it);
-  return index;
 }
 
 void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
@@ -103,7 +129,6 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   temp_grid.NewAthenaArray(ntem);
   rho_grid.NewAthenaArray(nrho);
   ross_gray_tab.NewAthenaArray(ntem,nrho);
-  ross_tab.NewAthenaArray(nfre,ntem,nrho);
   plan_tab.NewAthenaArray(nfre,ntem,nrho);
 
   for(int i=0; i<nfre; ++i){
@@ -146,8 +171,8 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     printf("Max/min/num densities in table: %g %g %d\n",
            rho_grid(0),rho_grid(nrho-1),nrho);
   }
-  // frequency integrated rosseland mean
-  // Read in but not used
+  // frequency integrated rosseland mean, read by GetNel to decide whether a cell is
+  // cold enough to treat as neutral
   Real buf;
   for(int j=0; j<ntem; ++j) {
     for(int i=0; i<nrho; ++i) {
@@ -163,34 +188,38 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     }
   }
 
-  // ross mean for each frequency group
+  // rosseland mean for each frequency group
+  // Read in but not used.  The values are still consumed rather than skipped, because
+  // that is what leaves the file positioned at the Planck means below.
   for(int k=0; k<nfre; ++k) {
     for(int j=0; j<ntem; ++j) {
       for(int i=0; i<nrho; ++i) {
-        fscanf(opac_file,"%lf",&(ross_tab(k,j,i)));
-        ross_tab(k,j,i) *= rho_grid(i);
+        fscanf(opac_file,"%lf",&buf);
       }
     }
   }
 
-  // planck mean for each frequency group
+  // planck mean for each frequency group.  Kept as an opacity per gram (cm^2/g) rather
+  // than pre-multiplied by the grid density: what gets interpolated is then kappa, which
+  // varies weakly, instead of chi = kappa*rho, which carries an extra power of rho.  The
+  // cell's own density is applied after the interpolation.
   for(int k=0; k<nfre; ++k) {
     for(int j=0; j<ntem; ++j) {
       for(int i=0; i<nrho; ++i) {
         fscanf(opac_file,"%lf",&(plan_tab(k,j,i)));
-        plan_tab(k,j,i) *= rho_grid(i);
       }
     }
   }
 
   bool user_ff = pin->GetOrAddBoolean("problem", "userff", false);
   if (user_ff) {
-    // Replaces plan_tab with free-free values (for testing purposes)
-    Real dummy;
+    // Replaces plan_tab with free-free values (for testing purposes).  FreeFreeOpacity
+    // returns chi in 1/cm, so divide out the grid density to store an opacity per gram.
     for(int k=0; k<nfre; ++k) {
       for(int j=0; j<ntem; ++j) {
         for(int i=0; i<nrho; ++i) {
-          plan_tab(k,j,i) = FreeFreeOpacity(temp_grid(j),rho_grid(i),fre_grid(k));
+          plan_tab(k,j,i) =
+              FreeFreeOpacity(temp_grid(j),rho_grid(i),fre_grid(k)) / rho_grid(i);
         }
       }
     }
@@ -205,15 +234,28 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
         min = (min > plan_tab(k,j,i)) ? plan_tab(k,j,i) : min;
         max = (max < plan_tab(k,j,i)) ? plan_tab(k,j,i) : max;
       }
-      // Identify table values using gray opacity and replace with free-free
-      if (max/min < 1.1) {
+      // Identify table values using gray opacity and replace with free-free.  A row
+      // holding a zero cannot be tested by this ratio, so leave it as the file gives it
+      // rather than relying on inf and NaN comparing false.
+      ++ntable_rows;
+      if ((min > 0.) && (max/min < 1.1)) {
+        ++ngray_rows;
         for(int k=0; k<nfre; ++k) {
-          plan_tab(k,j,i) = FreeFreeOpacity(temp_grid(j),rho_grid(i),fre_grid(k));
+          plan_tab(k,j,i) =
+              FreeFreeOpacity(temp_grid(j),rho_grid(i),fre_grid(k)) / rho_grid(i);
         }
       }
     }
   }
   fclose(opac_file);
+
+  // Say so up front: a table that is gray over much of the (rho,T) plane means the run is
+  // largely using the analytic free-free opacity, whatever the input file is called.
+  if (Globals::my_rank == 0) {
+    printf("Opacity table: %d of %d (T,rho) rows are gray and were replaced by "
+           "free-free (%.1f%%)\n", ngray_rows, ntable_rows,
+           100.*static_cast<Real>(ngray_rows)/static_cast<Real>(ntable_rows));
+  }
 
 
   EnrollUserEmissionFunction(TableEmission);
@@ -224,15 +266,15 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   int nx1 = pin->GetInteger("meshblock", "nx1");
   int nx2 = pin->GetInteger("meshblock", "nx2");
   int nx3 = pin->GetInteger("meshblock", "nx3");
-  int ncells1 = nx1 + 2*(NGHOST);
-  int ncells2 = 1, ncells3 = 1;
-  if (nx2 > 1) ncells2 = nx2 + 2*(NGHOST);
-  if (nx3 > 1) ncells3 = nx3 + 2*(NGHOST);
   int nblocal =  pmy_mesh->nblocal;
-  //printf("blocks: %d %d\n",Globals::my_rank,nblocal);
-  opact.NewAthenaArray(nblocal,ncells3,ncells2,ncells1,nfre);
-  emis_tot.NewAthenaArray(nblocal,ncells3,ncells2,ncells1);
-  emis_cum.NewAthenaArray(nblocal,ncells3,ncells2,ncells1,nfre);
+  // Active cells only.  The fill loops below run ks..ke and every read comes from a
+  // photon in an active cell, so a ghost layer here would be allocated, zero-filled by
+  // NewAthenaArray -- which touches every page -- and then never used.  With 8x4x8 blocks
+  // and NGHOST=2 that is 1152 cells carried for 256, and on a mesh of this size the
+  // difference is tens of gigabytes of resident memory.
+  opact.NewAthenaArray(nblocal,nx3,nx2,nx1,nfre);
+  emis_tot.NewAthenaArray(nblocal,nx3,nx2,nx1);
+  emis_cum.NewAthenaArray(nblocal,nx3,nx2,nx1,nfre);
 
 }
 
@@ -255,16 +297,13 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     }
   } else {
 
-    int ncells1 = nx1 + 2*(NGHOST);
-    int ncells2 = 1, ncells3 = 1;
-    if (nx2 > 1) ncells2 = nx2 + 2*(NGHOST);
-    if (nx3 > 1) ncells3 = nx3 + 2*(NGHOST);
     int lid = pmy_block->lid;
     // Compute opacity table corresponding to each cell and frequency
-    //opact.NewAthenaArray(ncells3,ncells2,ncells1,nfre);
     for(int k=ks; k<=ke; ++k) {
       for(int j=js; j<=je; ++j) {
         for(int i=is; i<=ie; ++i) {
+          // Tables are indexed from the first active cell, not from the ghost zone.
+          const int kt = k-ks, jt = j-js, it = i-is;
           bool on_grid = true;
           Real ld = log10(rho(k,j,i));
           //ld = (ld < lmind) ? lmind : ld;
@@ -277,13 +316,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
           int ii = std::floor(xi);
           if (ii < 0) {
             ii = 0;
-            printf("Warning: %g is less than the lowest density in grid: %g.",
-                   rho(k,j,i),rho_grid(0));
+            ++noff_rho;
             on_grid = false;
           } else if (ii > nrho-2) {
             ii = nrho-2;
-            printf("Warning: %g exceeds the largest density in grid: %g.",
-                   rho(k,j,i),rho_grid(nrho-1));
+            ++noff_rho;
             on_grid = false;
           }
           xi -= static_cast<Real>(ii);
@@ -299,31 +336,52 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
           while ((jj>0) && (temp_grid(jj) > temp)){
             jj--;
           }
-          if(jj > ntem-2) {
-            jj = ntem-2;
-            printf("Warning: %g exceeds largest temp in grid: %g.",
-                   temp,temp_grid(ntem-1));
+          // Test the interpolation weights, not the bracket index.  jj was clamped into
+          // [0, ntem-2] above and neither while loop can take it back out, so a test on
+          // jj alone can never fire; a cell off either end of the temperature grid shows
+          // up here instead, as a weight outside [0,1].  Extrapolating on it can drive
+          // plan_tab negative, which makes emis_cum non-monotonic and the bisection in
+          // SampleEmissivity meaningless.  Same for the density weight.
+          // Fractional position in log T, to match xi, which is already fractional in
+          // log rho.  The grid is log-spaced in both (the temperature axis unevenly so,
+          // which is why jj came from a search rather than a formula).
+          xj = std::log(temp/temp_grid(jj))
+               / std::log(temp_grid(jj+1)/temp_grid(jj));
+          if ((xj < 0.) || (xj > 1.)) {
+            ++noff_temp;
             on_grid = false;
           }
-          if(jj < 0) {
-            jj = 00;
-            printf("Warning: %g is less than smallest temp in grid: %g.",
-                   temp,temp_grid(0));
-            on_grid = false;
-          }
-          xj = (temp-temp_grid(jj))/(temp_grid(jj+1)-temp_grid(jj));
-          if (xj > 1.)
-            xj = 1.;
+          // xi can only leave [0,1] when ii was clamped, which already counted it.
+          if ((xi < 0.) || (xi > 1.)) on_grid = false;
           if (on_grid) {
+            ++ntab_cells;
+            const Real rhoc = rho(k,j,i);
             for(int l=0; l<nfre; ++l) {
-              opact(lid,k,j,i,l) = (1.-xi)*( (1.-xj)*plan_tab(l,jj,ii)
-                +xj*plan_tab(l,jj+1,ii) ) + xi*( (1.-xj)* plan_tab(l,jj,ii+1)
-                +xj*plan_tab(l,jj+1,ii+1) );
+              const Real k00 = plan_tab(l,jj  ,ii  ), k10 = plan_tab(l,jj+1,ii  );
+              const Real k01 = plan_tab(l,jj  ,ii+1), k11 = plan_tab(l,jj+1,ii+1);
+              Real kap;
+              // Log-log in (rho,T).  These opacities are power laws over most of the
+              // plane, so interpolating the logarithm is far closer to the truth than
+              // interpolating the value: reconstructing dropped points from the 64-group
+              // table gives a median error of 2.5% this way against 7.8% linearly in
+              // temperature, and 0.0% against 3.3% in density.  Any non-positive corner
+              // drops back to linear, where the logarithm is not defined.
+              if ((k00 > 0.) && (k10 > 0.) && (k01 > 0.) && (k11 > 0.)) {
+                kap = std::exp((1.-xi)*((1.-xj)*std::log(k00) + xj*std::log(k10))
+                                 + xi *((1.-xj)*std::log(k01) + xj*std::log(k11)));
+              } else {
+                kap = (1.-xi)*((1.-xj)*k00 + xj*k10) + xi*((1.-xj)*k01 + xj*k11);
+              }
+              // plan_tab is per gram; the extinction coefficient carries the cell's own
+              // density, so the strong rho dependence is exact rather than interpolated.
+              opact(lid,kt,jt,it,l) = kap * rhoc;
             }
           } else {
-              printf(" Using free-free opacity\n");
+              ++nff_cells;
+              // FreeFreeOpacity already returns chi in 1/cm for this cell's density, so
+              // this branch needs no further factor of rho.
               for(int l=0; l<nfre; ++l) {
-                opact(lid,k,j,i,l) = FreeFreeOpacity(temp,rho(k,j,i),fre_grid(l));
+                opact(lid,kt,jt,it,l) = FreeFreeOpacity(temp,rho(k,j,i),fre_grid(l));
               }
           }
         }
@@ -332,7 +390,7 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
     // Compute emissivity table for each cell and frequncy
     AthenaArray<Real> eta_nu_tab;
-    eta_nu_tab.NewAthenaArray(ncells3,ncells2,ncells1,nfre);
+    eta_nu_tab.NewAthenaArray(nx3,nx2,nx1,nfre);
     Real h_cgs = 6.62607015e-27;
     for(int l=0; l<nfre; ++l) {
       Real nu = fre_grid(l)/h_cgs;
@@ -340,7 +398,8 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
         for(int j=js; j<=je; ++j) {
           for(int i=is; i<=ie; ++i) {
             Real temp = tgas(k,j,i);
-            eta_nu_tab(k,j,i,l) = Planck(temp,nu) * opact(lid,k,j,i,l);
+            eta_nu_tab(k-ks,j-js,i-is,l) = Planck(temp,nu)
+                                          * opact(lid,k-ks,j-js,i-is,l);
           }
         }
       }
@@ -350,17 +409,26 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     for(int k=ks; k<=ke; ++k) {
       for(int j=js; j<=je; ++j) {
         for(int i=is; i<=ie; ++i) {
-          emis_cum(k,j,i,0) = 0.;
+          const int kt = k-ks, jt = j-js, it = i-is;
+          emis_cum(lid,kt,jt,it,0) = 0.;
           for(int l=1; l<nfre; ++l) {
             Real nup = fre_grid(l)/h_cgs;
             Real num = fre_grid(l-1)/h_cgs;
             Real dlnu = std::log(nup/num);
-            Real eta_ave = 0.5*(eta_nu_tab(k,j,i,l)+eta_nu_tab(k,j,i,l-1));
-            emis_cum(lid,k,j,i,l) = emis_cum(lid,k,j,i,l-1) + 4.*PI/h_cgs*eta_ave*dlnu;
+            Real eta_ave = 0.5*(eta_nu_tab(kt,jt,it,l)+eta_nu_tab(kt,jt,it,l-1));
+            emis_cum(lid,kt,jt,it,l) = emis_cum(lid,kt,jt,it,l-1)
+                                       + 4.*PI/h_cgs*eta_ave*dlnu;
           }
-          emis_tot(lid,k,j,i) = emis_cum(lid,k,j,i,nfre-1);
-          for(int l=1; l<nfre; ++l) {
-            emis_cum(lid,k,j,i,l) /= emis_tot(lid,k,j,i);
+          emis_tot(lid,kt,jt,it) = emis_cum(lid,kt,jt,it,nfre-1);
+          // A cell with no emission leaves the cumulative array at zero rather than
+          // dividing by it.  Cells are drawn uniformly in SetEmissionCellWeight and only
+          // then weighted by the emission array, so a non-emitting cell is still handed
+          // to SampleEmissivity; normalizing here would give it a table of NaNs, which
+          // the zero weight would not stop from reaching the opacities.
+          if (emis_tot(lid,kt,jt,it) > 0.) {
+            for(int l=1; l<nfre; ++l) {
+              emis_cum(lid,kt,jt,it,l) /= emis_tot(lid,kt,jt,it);
+            }
           }
         }
       }
@@ -371,69 +439,39 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 }
 
 
+//========================================================================================
+//! \fn void Mesh::UserWorkAfterLoop(ParameterInput *pin)
+//! \brief report how many cells used the tabulated opacity and how many fell back to
+//!        analytic free-free
+//
+// Accumulated per block during setup and summed here, which is a point every rank reaches
+// exactly once (main calls it unconditionally), so the reduction cannot mismatch.  The
+// gray-row fraction is reported separately at load; this is the complementary number --
+// how much of the actual domain landed off the grid, and on which axis.
+//========================================================================================
+
+void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
+
+  if (emission_type == "freefree") return;  // no table was ever read
+
+  long long tot[4] = {ntab_cells, nff_cells, noff_rho, noff_temp};
+#ifdef MPI_PARALLEL
+  MPI_Allreduce(MPI_IN_PLACE, tot, 4, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  if (Globals::my_rank == 0) {
+    const long long ncell = tot[0] + tot[1];
+    printf("Opacity source: %lld cells from the table, %lld off-grid using free-free "
+           "(%.2f%%)\n", tot[0], tot[1],
+           (ncell > 0) ? 100.*static_cast<Real>(tot[1])/static_cast<Real>(ncell) : 0.);
+    if (tot[1] > 0)
+      printf("                off-grid in density: %lld, in temperature: %lld\n",
+             tot[2], tot[3]);
+  }
+}
+
 void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   EnrollUserMetric(CartesianKerrSchild);
-
-  bool resampled = pin->GetOrAddBoolean("problem","resampled",false);
-  bool collective = pin->GetOrAddBoolean("problem","collective",false);
-
-  if (resampled) {
-    // Read in hdf5 file to initialize pgen
-    std::string input_filename = pin->GetString("problem", "input_filename");
-    int mesh_nx1 = pin->GetInteger("mesh", "nx1");
-    Real mesh_x1min = pin->GetReal("mesh", "x1min");
-    Real mesh_x1max = pin->GetReal("mesh", "x1max");
-    int mesh_nx2 = pin->GetInteger("mesh", "nx2");
-    Real mesh_x2min = pin->GetReal("mesh", "x2min");
-    Real mesh_x2max = pin->GetReal("mesh", "x2max");
-    int mesh_nx3 = pin->GetInteger("mesh", "nx3");
-    Real mesh_x3min = pin->GetReal("mesh", "x3min");
-    Real mesh_x3max = pin->GetReal("mesh", "x3max");
-    Real x1ratio = pin->GetReal("mesh", "x1rat");
-
-    //load data file
-    int start_file[3] = {0,0,0};
-    int count_file[3] = {mesh_nx3, mesh_nx2, mesh_nx1};
-    int start_mem[3] = {0,0,0};
-    int count_mem[3] = {mesh_nx3, mesh_nx2, mesh_nx1};
-
-    //load data to user mesh data for later use
-    AllocateRealUserMeshDataField(5);
-    ruser_mesh_data[0].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    ruser_mesh_data[1].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    ruser_mesh_data[2].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    ruser_mesh_data[3].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    ruser_mesh_data[4].NewAthenaArray(mesh_nx3, mesh_nx2, mesh_nx1);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/rho", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[0], collective);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/vel1", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[1], collective);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/vel2", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[2], collective);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/vel3", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[3], collective);
-    HDF5ReadRealArray(input_filename.c_str(), "prim/press", 3, start_file, count_file,
-                      3, start_mem, count_mem, ruser_mesh_data[4], collective);
-
-    //Real dx1 = (mesh_x1max - mesh_x1min)/mesh_nx1;
-    Real dx2 = (mesh_x2max - mesh_x2min)/mesh_nx2;
-    Real dx3 = (mesh_x3max - mesh_x3min)/mesh_nx3;
-
-    //prepare three vectors for index finding of x1 x2 x3 coordinates
-    //the vector are equivalent to pcoord->x1v, x2v, x3v
-    for(int i=0; i<mesh_nx1; i++){
-      Real x1coord_now = (pow(x1ratio, i)-1.0)/(pow(x1ratio, mesh_nx1)-1.0) *
-        (mesh_x1max - mesh_x1min) + mesh_x1min;
-      x1coord.push_back(x1coord_now);
-    }
-    for(int j=0; j<mesh_nx2; j++){
-      x2coord.push_back(mesh_x2min+j*dx2);
-    }
-    for(int k=0; k<mesh_nx3; k++){
-      x3coord.push_back(mesh_x3min+k*dx3);
-    }
-  } //end if (resampled)
 }
 
 //========================================================================================
@@ -443,207 +481,24 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 //! - pin: parameters
 //! Outputs: (none)
 //! Notes:
-//! - reads in array using a slightly modified verions of from_array.cpp
-//!   - NHYDRO
-//!   - total number of MeshBlocks
-//!   - MeshBlock/nx3
-//!   - MeshBlock/nx2
-//!   - MeshBlock/nx1
+//! - the primitives and the cell-centred field come from the athdf snapshot named by
+//!   <problem>/input_filename, or by <montecarlo>/grid_from_file when the grid was built
+//!   from that snapshot.  MCReadSnapshotBlock locates the variables by name, so the
+//!   layout does not have to be described here.
 
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
-  // Determine locations of initial values
-  std::string input_filename = pin->GetString("problem", "input_filename");
-  bool resampled = pin->GetOrAddBoolean("problem","resampled",false);
-  bool collective = pin->GetOrAddBoolean("problem","collective",false);
-  bool athenak_input = pin->GetOrAddBoolean("problem","athenak_input",false);
-
-  if (resampled) {
-    for (int k=ks; k<=ke; ++k) {
-      Real z_now = pcoord->x3f(k);
-      int index_znow = getindex(x3coord, z_now);
-      for (int j=js; j<=je; ++j) {
-        Real y_now = pcoord->x2f(j);
-        int index_ynow = getindex(x2coord, y_now);
-        for (int i=is; i<=ie; ++i) {
-          Real x_now = pcoord->x1f(i);
-          int index_xnow = getindex(x1coord, x_now);
-
-          phydro->w(IDN,k,j,i) = pmy_mesh->ruser_mesh_data[0](index_znow, index_ynow,
-                                                              index_xnow);
-          phydro->w(IVX,k,j,i) = pmy_mesh->ruser_mesh_data[1](index_znow, index_ynow,
-                                                              index_xnow);
-          phydro->w(IVY,k,j,i) = pmy_mesh->ruser_mesh_data[2](index_znow, index_ynow,
-                                                              index_xnow);
-          phydro->w(IVZ,k,j,i) = pmy_mesh->ruser_mesh_data[3](index_znow, index_ynow,
-                                                              index_xnow);
-          phydro->w(IPR,k,j,i) = pmy_mesh->ruser_mesh_data[4](index_znow, index_ynow,
-                                                              index_xnow);
-          Real gaml = std::sqrt(SQR(phydro->w(IVX,k,j,i)) + SQR(phydro->w(IVY,k,j,i))
-            + SQR(phydro->w(IVZ,k,j,i)) + 1.);
-          phydro->w(IVX,k,j,i) /= gaml;
-          phydro->w(IVY,k,j,i) /= gaml;
-          phydro->w(IVZ,k,j,i) /= gaml;
-          printf("v: %g %g %g\n",phydro->w(IVX,k,j,i),phydro->w(IVY,k,j,i),
-                 phydro->w(IVZ,k,j,i));
-        }// end i
-      }//end j
-    }// end k
-  } else {
-    std::string dataset_cons = pin->GetString("problem", "dataset_cons");
-    int index_dens = pin->GetInteger("problem", "index_dens");
-    int index_mom1 = pin->GetInteger("problem", "index_mom1");
-    int index_mom2 = pin->GetInteger("problem", "index_mom2");
-    int index_mom3 = pin->GetInteger("problem", "index_mom3");
-    int index_etot = pin->GetInteger("problem", "index_etot");
-    std::string dataset_b1 = pin->GetString("problem", "dataset_b1");
-    std::string dataset_b2 = pin->GetString("problem", "dataset_b2");
-    std::string dataset_b3 = pin->GetString("problem", "dataset_b3");
-  
-    // Set conserved array selections
-    int start_cons_file[5];
-    start_cons_file[1] = gid;
-    start_cons_file[2] = 0;
-    start_cons_file[3] = 0;
-    start_cons_file[4] = 0;
-    int start_cons_indices[5];
-    start_cons_indices[IDN] = index_dens;
-    start_cons_indices[IM1] = index_mom1;
-    start_cons_indices[IM2] = index_mom2;
-    start_cons_indices[IM3] = index_mom3;
-    start_cons_indices[IEN] = index_etot;
-    int count_cons_file[5];
-    count_cons_file[0] = 1;
-    count_cons_file[1] = 1;
-    count_cons_file[2] = block_size.nx3;
-    count_cons_file[3] = block_size.nx2;
-    count_cons_file[4] = block_size.nx1;
-    int start_cons_mem[4];
-    start_cons_mem[1] = ks;
-    start_cons_mem[2] = js;
-    start_cons_mem[3] = is;
-    int count_cons_mem[4];
-    count_cons_mem[0] = 1;
-    count_cons_mem[1] = block_size.nx3;
-    count_cons_mem[2] = block_size.nx2;
-    count_cons_mem[3] = block_size.nx1;
-
-    // Set conserved values from file SWD: setting prims for now
-    for (int n = 0; n < NHYDRO; ++n) {
-      start_cons_file[0] = start_cons_indices[n];
-      start_cons_mem[0] = n;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_cons.c_str(), 5, start_cons_file,
-                        count_cons_file, 4, start_cons_mem,
-                        count_cons_mem, phydro->w, collective);
-    }
-
-    // Set field array selections
-    int start_field_file[4];
-    start_field_file[0] = gid;
-    start_field_file[1] = 0;
-    start_field_file[2] = 0;
-    start_field_file[3] = 0;
-    int count_field_file[4];
-    count_field_file[0] = 1;
-    int start_field_mem[3];
-    start_field_mem[0] = ks;
-    start_field_mem[1] = js;
-    start_field_mem[2] = is;
-    int count_field_mem[3];
-
-    // Set magnetic field values from file
-    if (MAGNETIC_FIELDS_ENABLED) {
-      // Set B1
-      count_field_file[1] = block_size.nx3;
-      count_field_file[2] = block_size.nx2;
-      count_field_file[3] = block_size.nx1 + 1;
-      count_field_mem[0] = block_size.nx3;
-      count_field_mem[1] = block_size.nx2;
-      count_field_mem[2] = block_size.nx1 + 1;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_b1.c_str(), 4, start_field_file,
-                        count_field_file, 3, start_field_mem,
-                        count_field_mem, pfield->b.x1f, collective);
-
-      // Set B2
-      count_field_file[1] = block_size.nx3;
-      count_field_file[2] = block_size.nx2 + 1;
-      count_field_file[3] = block_size.nx1;
-      count_field_mem[0] = block_size.nx3;
-      count_field_mem[1] = block_size.nx2 + 1;
-      count_field_mem[2] = block_size.nx1;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_b2.c_str(), 4, start_field_file,
-                        count_field_file, 3, start_field_mem,
-                        count_field_mem, pfield->b.x2f, collective);
-
-      // Set B3
-      count_field_file[1] = block_size.nx3 + 1;
-      count_field_file[2] = block_size.nx2;
-      count_field_file[3] = block_size.nx1;
-      count_field_mem[0] = block_size.nx3 + 1;
-      count_field_mem[1] = block_size.nx2;
-      count_field_mem[2] = block_size.nx1;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_b3.c_str(), 4, start_field_file,
-                        count_field_file, 3, start_field_mem,
-                        count_field_mem, pfield->b.x3f, collective);
-    }
-
-    // Make no-op collective reads if using MPI and ranks have unequal numbers of blocks
-#ifdef MPI_PARALLEL
-    {
-      int num_blocks_this_rank = pmy_mesh->nblist[Globals::my_rank];
-      if (lid == num_blocks_this_rank - 1) {
-        int block_shortage_this_rank = 0;
-        for (int rank = 0; rank < Globals::nranks; ++rank) {
-          block_shortage_this_rank =
-            std::max(block_shortage_this_rank,
-                     pmy_mesh->nblist[rank] - num_blocks_this_rank);
-        }
-        for (int block = 0; block < block_shortage_this_rank; ++block) {
-          for (int n = 0; n < NHYDRO; ++n) {
-            start_cons_file[0] = start_cons_indices[n];
-            start_cons_mem[0] = n;
-            HDF5ReadRealArray(input_filename.c_str(), dataset_cons.c_str(), 5,
-                              start_cons_file, count_cons_file, 4,
-                              start_cons_mem, count_cons_mem,
-                              phydro->w, collective, true);
-          }
-	  if (MAGNETIC_FIELDS_ENABLED) {
-	    count_field_file[1] = block_size.nx3;
-	    count_field_file[2] = block_size.nx2;
-	    count_field_file[3] = block_size.nx1 + 1;
-	    count_field_mem[0] = block_size.nx3;
-	    count_field_mem[1] = block_size.nx2;
-	    count_field_mem[2] = block_size.nx1 + 1;
-	    HDF5ReadRealArray(input_filename.c_str(), dataset_b1.c_str(), 4,
-                              start_field_file, count_field_file, 3,
-                              start_field_mem, count_field_mem,
-                              pfield->b.x1f, collective, true);
-	    count_field_file[1] = block_size.nx3;
-	    count_field_file[2] = block_size.nx2 + 1;
-	    count_field_file[3] = block_size.nx1;
-	    count_field_mem[0] = block_size.nx3;
-	    count_field_mem[1] = block_size.nx2 + 1;
-	    count_field_mem[2] = block_size.nx1;
-	    HDF5ReadRealArray(input_filename.c_str(), dataset_b2.c_str(), 4,
-                              start_field_file, count_field_file, 3,
-                              start_field_mem, count_field_mem,
-                              pfield->b.x2f, collective, true);
-	    count_field_file[1] = block_size.nx3 + 1;
-	    count_field_file[2] = block_size.nx2;
-	    count_field_file[3] = block_size.nx1;
-	    count_field_mem[0] = block_size.nx3 + 1;
-	    count_field_mem[1] = block_size.nx2;
-	    count_field_mem[2] = block_size.nx1;
-	    HDF5ReadRealArray(input_filename.c_str(), dataset_b3.c_str(), 4,
-			      start_field_file, count_field_file, 3,
-			      start_field_mem, count_field_mem,
-			      pfield->b.x3f, collective, true);
-	  }	  
-        }
-      }
-    }
-#endif
-  } // end if (resampled) else
+  // All of the hyperslab bookkeeping now lives in MCReadSnapshotBlock, which locates the
+  // variables by name from the file itself.  That covers both an Athena++ dump (rho,
+  // press, vel1) and one converted from an AthenaK run (dens, eint, velx), so the
+  // <problem>/dataset_cons, index_* and athenak_input keys are no longer needed: the
+  // internal-energy-to-pressure conversion is driven by what the file actually holds.
+  // Mesh::nblist is private to everything but MeshBlock, so the collective-read padding
+  // count is gathered here and handed over.
+  int max_blocks_per_rank = 0;
+  for (int r = 0; r < Globals::nranks; ++r)
+    max_blocks_per_rank = std::max(max_blocks_per_rank, pmy_mesh->nblist[r]);
+  MCReadSnapshotBlock(this, pin, max_blocks_per_rank);
 
   // Set index bounds
   int il = is - NGHOST;
@@ -660,66 +515,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
     kl -= NGHOST;
     ku += NGHOST;
   }
-  // for testing
-  //if (gid == 61) {
-  //for (int k=ks; k<=ke; ++k) {
-  //  for (int j=js; j<=je; ++j) {
-  //    for (int i=is; i<=ie; ++i) {
-  //	printf("%d %d %d %d %g %g\n",gid,k,j,i,phydro->w(IEN,k,j,i),phydro->w(IDN,k,j,i));
-  //    }
-  //  }
-  //}
-  //}
-  /*Real rho_const = pin->GetOrAddReal("problem", "rho_const", 0.);
-    if (rho_const > 0.) {
-    for (int k=ks; k<=ke; ++k) {
-    for (int j=js; j<=je; ++j) {
-    for (int i=is; i<=ie; ++i) {
-    //if (phydro->w(IDN,k,j,i) > rho_const)
-    phydro->w(IDN,k,j,i) = rho_const;
-    }
-    }
-    }
-    }
-    Real temp_const = pin->GetOrAddReal("problem", "temp_const", 0.);
-    if (temp_const > 0.) {
-    for (int k=ks; k<=ke; ++k) {
-    for (int j=js; j<=je; ++j) {
-    for (int i=is; i<=ie; ++i) {
-    //if (phydro->w(IPR,k,j,i)/phydro->w(IDN,k,j,i) > temp_const)
-    phydro->w(IPR,k,j,i) = phydro->w(IDN,k,j,i) * temp_const;
-    }
-    }
-    }
-    }*/
-
-  if (athenak_input) {
-    // primitive variable is internal energy rather than pressure
-    Real gamma = peos->GetGamma();
-    for (int k=ks; k<=ke; ++k) {
-      for (int j=js; j<=je; ++j) {
-        for (int i=is; i<=ie; ++i) {
-          phydro->w(IPR,k,j,i) *= (gamma-1.);
-        }
-      }
-    }
-  }
 
   // Initialize conserved
   peos->PrimitiveToConserved(phydro->w, pfield->bcc, phydro->u, pcoord, il, iu, jl, ju,
                              kl, ku);
-
-  if (gid == 61) {
-    printf("pgen: %d %d %d %d %g %g\n",gid,5,37,5,phydro->w(IEN,5,37,5),phydro->w(IDN,5,37,5));
-    /*for (int k=ks; k<=ke; ++k) {
-      for (int j=js; j<=je; ++j) {
-	for (int i=is; i<=ie; ++i) {
-	  printf("pgen: %d %d %d %d %g %g\n",gid,k,j,i,phydro->w(IEN,k,j,i),phydro->w(IDN,k,j,i));
-	}
-      }
-      }*/
-  }
-  
 }
 
 //========================================================================================
@@ -782,7 +581,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
       pphot->k3p[ip] = cth;
     }
 
-    if (pmy_mc->polarized) {
+    if (IsPolarized(pmy_mc->polarized)) {
       // Initialize Stokes vector
       pphot->sip[ip] = 1.0;
       pphot->sup[ip] = 0.0;
@@ -838,12 +637,12 @@ void InsideHorizon(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher, 
   Real r = sqrt((SQR(rad)-SQR(abh)+sqrt(SQR(SQR(rad)-SQR(abh))+4.0*SQR(abh)*SQR(x3)))/2.);
 
   if (r < r_hor) {
-    pphot->statp[ip] = ABSORBED;
+    pphot->statp[ip] = REMOVED;
     //printf("Photon absorbed inside horizon at r=%g\n",r);
   }
-  Real keverg = 1.602176634e-9;
-  if (pphot->ep[ip] > 2.e3*keverg)
-    pphot->statp[ip] = REMOVED;
+  //Real keverg = 1.602176634e-9;
+  //if (pphot->ep[ip] > 2.e3*keverg)
+  //  pphot->statp[ip] = DESTROYED;
   return;
 }
 
@@ -868,8 +667,10 @@ Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
     k = nfre-2;
     xk = 1.;
   }
-  Real lid = pmcb->pmy_block->lid;
-  return (1.-xk) * opact(lid,i3,i2,i1,k) + xk * opact(lid,i3,i2,i1,k+1);
+  int lid = pmcb->pmy_block->lid;
+  CheckActiveCell(pmcb,i3,i2,i1);
+  const int t3 = i3-pmcb->ks, t2 = i2-pmcb->js, t1 = i1-pmcb->is;
+  return (1.-xk) * opact(lid,t3,t2,t1,k) + xk * opact(lid,t3,t2,t1,k+1);
 
 }
 
@@ -881,7 +682,9 @@ Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap) {
   Real dadnu = (ap-am)/(nup-num);
   Real lnu = std::log(num);
   Real sum = Planck(temp,num)*am*dlnu/h_cgs/2.;
-  for(int i=1; i<n-1; ++i) {
+  // Interior nodes run to n-1: the composite trapezoid rule over n intervals weights
+  // nodes 1..n-1 fully and the two endpoints by a half.
+  for(int i=1; i<n; ++i) {
     lnu += dlnu;
     Real nu = std::exp(lnu);
     Real alpha = dadnu*(nu-num)+am;
@@ -914,7 +717,8 @@ Real TableEmission(MonteCarloBlock *pmcb, int i3, int i2, int i1, int etype) {
   //}
   //return GetEmissionFreeFree(pmcb,i3,i2,i1);
   //int lid = pmcb->pmy_block->lid;
-  return emis_tot(lid,i3,i2,i1);
+  CheckActiveCell(pmcb,i3,i2,i1);
+  return emis_tot(lid,i3-pmcb->ks,i2-pmcb->js,i1-pmcb->is);
 }
 
 
@@ -926,19 +730,27 @@ Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   int i3 = pphot->i3p[ip];
   int lid = pmcb->pmy_block->lid;
 
-  Real *prob = &(emis_cum(lid,i3,i2,i1,0));
+  CheckActiveCell(pmcb,i3,i2,i1);
+  Real *prob = &(emis_cum(lid,i3-pmcb->ks,i2-pmcb->js,i1-pmcb->is,0));
+  // A non-emitting cell has an unnormalized (all-zero) cumulative array; it can still be
+  // drawn, since cells are picked uniformly and only then weighted.  There is no spectrum
+  // to sample, and the photon carries zero weight, so return the lowest tabulated energy
+  // rather than dividing by a zero bin width.
+  if (prob[nfre-1] <= 0.) return fre_grid(0);
   int i = mcbisect(dev,prob,nfre);
   Real a = (dev-prob[i])/(prob[i+1]-prob[i]);
   Real a1 = 1.-a;
   //printf("%d %g %g\n",i,a,a1);
   if ((a < 0.) || (a > 1.)) {
     printf("%d %d %d\n",i3,i2,i1);
-    for (int j=0; j< nfre+1; ++j)
+    for (int j=0; j< nfre; ++j)
       printf("%d %e\n",j,1-prob[j]);
     printf("%d %g %g %g %g\n",i,dev,fre_grid(i),a,a1);
   }
-  //Real nu = std::exp(a*std::log(fre_grid(i+1))+a1*std::log(fre_grid(i)));
-  Real nu = a*fre_grid(i+1)+a1*fre_grid(i);
+  // Log interpolation within the bin.  The frequency grid is log-spaced -- 0.0625 dex
+  // for the 64-group table -- so drawing linearly in energy inside a bin puts the sample
+  // systematically high; interpolating the logarithm places it where the grid says.
+  Real nu = std::exp(a*std::log(fre_grid(i+1)) + a1*std::log(fre_grid(i)));
   return nu;
 }
 
@@ -994,7 +806,11 @@ void GetNel(MonteCarloBlock *pmcb) {
         Real rho = pmcb->rho(k,j,i);
         Real nh = rho / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
-        //nion(k,j,i) = nh + 4. * nhe;
+        // species(1) is the ion density read by the free-free opacity and emission in
+        // opacity.cpp and emission.cpp.  Set it here as GetNelFloor and the default in
+        // MonteCarloBlock do, so this hook does not depend on the table functions fully
+        // displacing those paths.
+        pmcb->species(1,k,j,i) = nh + 4. * nhe;
         pmcb->species(0,k,j,i) = nh + 2. * nhe;
 
         Real tgas = pmcb->tgas(k,j,i);
@@ -1042,7 +858,7 @@ void GetNel(MonteCarloBlock *pmcb) {
   }
 }
 
-Real UserGetDensity(MonteCarloBlock *pmcb) {
+void UserGetDensity(MonteCarloBlock *pmcb) {
 
   Real l_cgs = pmcb->l_cgs;
   Real rho_cgs = pmcb->rho_cgs;
@@ -1062,8 +878,8 @@ Real UserGetDensity(MonteCarloBlock *pmcb) {
 	Real wdn_opacity = fmax(wdn-dfloor, dfloor_op);
 	
 	Real dx1 = pmcb->pmy_block->pcoord->dx1f(i);
-	Real dx2 = pmcb->pmy_block->pcoord->dx2f(k);
-	Real dx3 = pmcb->pmy_block->pcoord->dx3f(j);
+	Real dx2 = pmcb->pmy_block->pcoord->dx2f(j);
+	Real dx3 = pmcb->pmy_block->pcoord->dx3f(k);
 	Real delta_l = fmax(fmax(dx1, dx2), dx3);
 	Real dtrunc = fmax(0.0, sigma_cold)*tau_trunc / (kappa_s*delta_l);
 	dtrunc = fmin(dtrunc_max, fmax(dfloor, dtrunc)); // dfloor <= dtrunc <= dtrunc_max
@@ -1153,7 +969,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
   g(I12) = f * l_1 * l_2;
   g(I13) = f * l_1 * l_3;
   g(I22) = f * l_2 * l_2 + 1.0;
-  g(I23) = f * l_3 * l_3;
+  g(I23) = f * l_2 * l_3;
   g(I33) = f * l_3 * l_3 + 1.0;
 
   // Calculate contravariant components
@@ -1165,7 +981,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
   g_inv(I12) = -f * l1 * l2;
   g_inv(I13) = -f * l1 * l3;
   g_inv(I22) = -f * l2 * l2 + 1.0;
-  g_inv(I23) = -f * l3 * l3;
+  g_inv(I23) = -f * l2 * l3;
   g_inv(I33) = -f * l3 * l3 + 1.0;
 
   // Calculate covariant x-derivatives

@@ -264,7 +264,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
     x[IMC3] = pphot->x3p[ip] = phi;
 
     // Initialize Stokes vector as unpolarized
-    if (pphot->polarized) {
+    if (IsPolarized(pphot->polarized)) {
       pphot->sip[ip] = 1.0;
       pphot->sqp[ip] = 0.0;
       pphot->sup[ip] = 0.0;
@@ -380,7 +380,7 @@ void TransformPhotonAtDisk(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
 void TransformPhotonAtGridEdge(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
-  if (pphot->polarized) {
+  if (IsPolarized(pphot->polarized)) {
     // Construct the orthonormal tetrad at edge of simulation grid
     Real ucon[4];
     ucon[IMC0] = 1.;
@@ -541,7 +541,7 @@ void MidplaneCrossing(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppushe
     pphot->statp[ip] = DESTROYED;
     pphot->user[2][ip] = 0.;
     pphot->user[3][ip] = rh;
-    if (pphot->polarized) {
+    if (IsPolarized(pphot->polarized)) {
       pphot->sqp[ip] = 0.;
       pphot->sup[ip] = 0.;
     }
@@ -655,7 +655,7 @@ void MidplaneCrossing(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppushe
     // set plane crossing to zero
     pphot->user[4][ip] = 0.;
 
-    if (pphot->polarized) {
+    if (IsPolarized(pphot->polarized)) {
       // Initialize and transform Stokes vector
       Real stokes[4];
       int ipol = static_cast<int>(kcopy[IMC2]*20.);
