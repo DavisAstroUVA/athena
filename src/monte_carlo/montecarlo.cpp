@@ -8,6 +8,8 @@
 
 // C++ headers
 #include <algorithm>  // min, max
+#include <cmath>      // floor
+#include <limits>     // numeric_limits
 #include <cstdio>
 #include <iostream>
 #include <random>
@@ -847,7 +849,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   // Set emmisivity functions and flag for determining emission array
   if (emission_flag == EMISNONE) {
     GetEmission[0] = nullptr; // left unset
-    nsamptype[0] = nsamp = pin->GetInteger("montecarlo","nphot");
+    nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
     emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
@@ -855,7 +857,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
     emission_array = false; // do not allocate memory for array;
   } else if (emission_flag ==  EMISUSER) {
     GetEmission[0] = nullptr; // must be set in InitUserMonteCarloData
-    nsamptype[0] = nsamp = pin->GetInteger("montecarlo","nphot");
+    nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
     emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
@@ -865,7 +867,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
     emission_array = true; // allocate memory for array
   } else if (emission_flag ==  EMISFF) {
     GetEmission[0] = GetEmissionFreeFree;
-    nsamptype[0] = nsamp = pin->GetInteger("montecarlo","nphot");
+    nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
     emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
@@ -873,7 +875,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
     emission_array = true; // allocate memory for array
   } else if (emission_flag ==  EMISBB) {
     GetEmission[0] = GetEmissionBlackbody;
-    nsamptype[0] = nsamp = pin->GetInteger("montecarlo","nphot");
+    nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
     emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
@@ -906,8 +908,16 @@ void MonteCarlo::DistributeSamples(int etype) {
         << std::endl;
     ATHENA_ERROR(msg);
   }
-  // Set methods, numbers for this emission type
-  int ntot = nsamptype[etype];
+  // Set methods, numbers for this emission type. 64-bit throughout
+  const int64_t ntot = nsamptype[etype];
+  if (ntot < 0) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in DistributeSamples" << std::endl
+        << "photon count for emission type " << etype << " is " << ntot
+        << "; a count above 2^31-1 read through a 32-bit path wraps to a value like this"
+        << std::endl;
+    ATHENA_ERROR(msg);
+  }
   bool equal_weight = emission_eqwt[etype];
   
   // compute emission properties over all blocks on this process
@@ -935,32 +945,33 @@ void MonteCarlo::DistributeSamples(int etype) {
     // emmision weights are all equal 
 
     // First, each process sends its its own block totals to rank 0
-    Real emiss_proc[Globals::nranks];
+    std::vector<Real> emiss_proc(Globals::nranks, 0.0);
 #ifdef MPI_PARALLEL
-    MPI_Gather(&em_proc,1,MPI_ATHENA_REAL,emiss_proc,1,MPI_ATHENA_REAL,0,MPI_COMM_WORLD);
+    MPI_Gather(&em_proc,1,MPI_ATHENA_REAL,emiss_proc.data(),1,MPI_ATHENA_REAL,0,
+               MPI_COMM_WORLD);
 #else
     emiss_proc[0] = em_proc;
 #endif
-    int count[Globals::nranks];
+    std::vector<int64_t> count(Globals::nranks, 0);
     // Rank 0 compute the distribution of photons accross all processes and brodcasts
     if (Globals::my_rank == 0) {
-      Real prob[Globals::nranks];
-      for (int irank=0; irank<Globals::nranks; irank++) 
+      std::vector<Real> prob(Globals::nranks);
+      for (int irank=0; irank<Globals::nranks; irank++)
         prob[irank] = emiss_proc[irank]/em_tot;
-      my_blocks(0)->pran->SampleMultinomial(ntot,Globals::nranks,prob,count);
+      my_blocks(0)->pran->SampleMultinomial(ntot,Globals::nranks,prob.data(),count.data());
     }
-    int my_count;
+    int64_t my_count;
 #ifdef MPI_PARALLEL
-    MPI_Scatter(count,1,MPI_INT,&my_count,1,MPI_INT,0,MPI_COMM_WORLD);
+    MPI_Scatter(count.data(),1,MPI_INT64_T,&my_count,1,MPI_INT64_T,0,MPI_COMM_WORLD);
 #else
     my_count = count[0];
 #endif
     // Now distribute the photons across all blocks on this process
-    int count_b[nblocal];
-    Real prob_b[nblocal];
+    std::vector<int64_t> count_b(nblocal, 0);
+    std::vector<Real> prob_b(nblocal);
     for (int nb=0; nb<nblocal; nb++)
       prob_b[nb] = tot_block[nb]/em_proc;
-    my_blocks(0)->pran->SampleMultinomial(my_count,nblocal,prob_b,count_b);
+    my_blocks(0)->pran->SampleMultinomial(my_count,nblocal,prob_b.data(),count_b.data());
     Real ave_weight = em_tot/static_cast<Real>(ntot);
 
 
@@ -993,38 +1004,37 @@ void MonteCarlo::DistributeSamples(int etype) {
 #endif
     // Rank 0 compute the distribution of photons accross all processes and brodcasts
     // to all processes
-    int count[Globals::nranks];
+    std::vector<int64_t> count(Globals::nranks, 0);
     int nb_active_total = 0;
     if (Globals::my_rank == 0) {
-      Real prob[Globals::nranks];
+      std::vector<Real> prob(Globals::nranks);
       for (int irank=0; irank<Globals::nranks; irank++) {
         nb_active_total += active_proc[irank];
       }
       for (int irank=0; irank<Globals::nranks; irank++) {
         prob[irank] = static_cast<Real>(active_proc[irank])/static_cast<Real>(nb_active_total);
       }
-      my_blocks(0)->pran->SampleMultinomial(ntot,Globals::nranks,prob,count);
+      my_blocks(0)->pran->SampleMultinomial(ntot,Globals::nranks,prob.data(),count.data());
     }
-    int my_count;
+    int64_t my_count;
 #ifdef MPI_PARALLEL
-    MPI_Scatter(count,1,MPI_INT,&my_count,1,MPI_INT,0,MPI_COMM_WORLD);
+    MPI_Scatter(count.data(),1,MPI_INT64_T,&my_count,1,MPI_INT64_T,0,MPI_COMM_WORLD);
     MPI_Bcast(&nb_active_total, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #else
     my_count = count[0];
 #endif
     // Now distribute the photons across all active blocks on this process
-    int count_b[nblocal];
-    Real prob_b[nblocal];
+    std::vector<int64_t> count_b(nblocal, 0);
+    std::vector<Real> prob_b(nblocal);
     for (int nb=0; nb<nblocal; nb++)
       if (tot_block[nb] > 0.)
         prob_b[nb] = 1./static_cast<Real>(nb_active);
       else
         prob_b[nb] = 0.;
-    my_blocks(0)->pran->SampleMultinomial(my_count,nblocal,prob_b,count_b);
-    //printf("Rank %d: nb_active=%d, nb_active_total=%d\n", Globals::my_rank, nb_active, nb_active_total);  
+    my_blocks(0)->pran->SampleMultinomial(my_count,nblocal,prob_b.data(),count_b.data());
     // Acount for inactive blocks in weighting
-    int block_size = ncells / pmy_mesh->nbtotal;
-    int ncells_active = nb_active_total * block_size;
+    const int64_t block_size = ncells / pmy_mesh->nbtotal;
+    const int64_t ncells_active = static_cast<int64_t>(nb_active_total) * block_size;
     for (int nb=0; nb<nblocal; nb++) {
       my_blocks(nb)->nphremain = count_b[nb];
       my_blocks(nb)->nphrun = 0;
@@ -1164,9 +1174,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       nscat += pmcb->nscat;
       ntot += pmcb->nphrun;
     }
-    // Local count only -- this runs before the reduction, so it is bounded by the photons
-    // this rank ran and fits the int the output counters use.
-    pmcout->UpdateOutputCount(static_cast<int>(ntot));
+    // Local count only: this runs before the reduction, so it is what this rank ran.
+    pmcout->UpdateOutputCount(ntot);
 
   #ifdef MPI_PARALLEL
     MPI_Allreduce(MPI_IN_PLACE,&nesc,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
@@ -1295,8 +1304,9 @@ bool MonteCarlo::FinishRound() {
     DrainArrivals();
   }
 
-  // Check if photons have completed
-  int nremain=0,nprop=0;
+  // Check if photons have completed.  nremain is a sum of 64-bit per-block counts and
+  // can exceed an int on a rank that still has most of a large emission to do.
+  int64_t nremain=0,nprop=0;
   for(int nb=0; nb<nblocal; ++nb){
     MonteCarloBlock *pmcb = my_blocks(nb);
     nremain += pmcb->nphremain;
@@ -1304,8 +1314,8 @@ bool MonteCarlo::FinishRound() {
   }
 #ifdef MPI_PARALLEL
   // One reduction, blocking over all ranks
-  int counts[2] = {nprop, nremain};
-  MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  int64_t counts[2] = {nprop, nremain};
+  MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT64_T, MPI_MAX, MPI_COMM_WORLD);
   nprop = counts[0];
   nremain = counts[1];
 #endif
@@ -1541,6 +1551,59 @@ int MCRandom::binomial(unsigned int n, Real p) {
   std::binomial_distribution<int> binomial(n, p);
   return binomial(gen);
 #endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCRandom::SampleMultinomial(std::int64_t n, int m, const Real *prob,
+//!                                     std::int64_t *counts)
+//! \brief multinomial draw for a population that may not fit in an int
+//!
+//! Both random-number backends take a 32-bit population in their binomial, so the chain
+//! of binomials below cannot be used past 2^31-1.  Above that the expected count of each
+//! bin, n*p_i rounded down, is assigned outright and only the remainder -- fewer than m
+//! photons plus rounding slack -- is drawn with the int sampler.  The mean is exact and
+//! the variance is below the multinomial's by an amount that does not matter at these
+//! populations: the multinomial's own scatter in a bin is sqrt(n p_i), a part in
+//! sqrt(n p_i) of the count, and the photon noise downstream is the same size.  Below
+//! the threshold the int sampler is used unchanged, so every run that fit before draws
+//! exactly what it always did.
+
+void MCRandom::SampleMultinomial(std::int64_t n, int m, const Real *prob,
+                                 std::int64_t *counts) {
+  const std::int64_t int_max = std::numeric_limits<int>::max();
+  std::vector<Real> p(prob, prob + m);
+  std::vector<int> c(m, 0);
+  if (n <= int_max) {
+    SampleMultinomial(static_cast<int>(n), m, p.data(), c.data());
+    for (int i=0; i<m; ++i) counts[i] = c[i];
+    return;
+  }
+  std::int64_t assigned = 0;
+  for (int i=0; i<m; ++i) {
+    Real expect = static_cast<Real>(n) * prob[i];
+    counts[i] = (expect > 0.0) ? static_cast<std::int64_t>(std::floor(expect)) : 0;
+    assigned += counts[i];
+  }
+  // Rounding in the products can leave the floors summing past n; take the excess back
+  // from the fullest bins.
+  while (assigned > n) {
+    int imax = 0;
+    for (int i=1; i<m; ++i) if (counts[i] > counts[imax]) imax = i;
+    --counts[imax];
+    --assigned;
+  }
+  const std::int64_t remainder = n - assigned;
+  if (remainder > 0) {
+    if (remainder > int_max) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MCRandom::SampleMultinomial" << std::endl
+          << "remainder " << remainder << " after assigning expected counts; the"
+          << " probabilities do not sum to one" << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    SampleMultinomial(static_cast<int>(remainder), m, p.data(), c.data());
+    for (int i=0; i<m; ++i) counts[i] += c[i];
+  }
 }
 
 void MCRandom::SampleMultinomial(int n, int m, Real *prob, int *counts) {

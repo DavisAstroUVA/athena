@@ -6,246 +6,274 @@ Plot athena++ spectra as function of frequency, angle, photon energy, etc.
 
 # python standard modules
 import argparse
+import os
 import numpy as np
 import matplotlib.pyplot as plt
+from astropy import constants as const
 
 # Athena++ modules
 import athena_mc as athenamc
 
+# values accepted on the command line
+XUNITS = ['ev', 'kev', 'nu', 'lambda']
+YUNITS = ['nulnu', 'lnu', 'counts', 'polfrac', 'polangle', 'q', 'u', 'v']
+BB_YUNITS = ['nulnu', 'lnu', 'counts']
+SCALES = ['linear', 'log', 'symlog', 'logit']
 
-def imu_handler(imu):
-    """
-    Parse imu to deterimine which angles to plot
-    """
+# command-line options forwarded to athena_mc.make_plot for every curve
+AXIS_OPTS = ('xscale', 'xmin', 'xmax', 'yscale', 'ymin', 'ymax')
 
-    if imu is None:
-        return [0]
-    if imu == 'sum':
-        return [imu]
-    if imu == 'ave':
-        return [imu]
-    if len(imu) > 1:
-        # loop over all imu in the array
-        slist = imu.strip(('[]')).split(",")
-        ilist = [int(i) for i in slist]
-    else:
-        ilist = [imu]
-    return ilist
 
-def file_handler(infile):
+def mu_bin(s):
     """
-    Parse infile to deterimine file list
+    argparse type for mu bins: 'sum' or an integer bin index
     """
 
-    if len(infile) > 1:
-        # loop over all imu in the array
-        flist = infile.strip(('[]')).split(",")
-    else:
-        flist = [infile]
-    return flist
+    if s == 'sum':
+        return s
+    try:
+        return int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected 'sum' or a bin index, got {s!r}") from None
 
-def plot_one(spectrum, ax, xunit, yunit, imu, iphi, plterr, **kwargs):
+
+def phi_bin(s):
     """
-    Plot curves corresponding to single spectrum
+    argparse type for phi bins: 'sum', 'ave', or an integer bin index
     """
 
-    #Convert xaxis, if needed
-    if xunit != spectrum['units']:
-        athenamc.convert_xaxis(xunit,spectrum)
+    if s in ('sum', 'ave'):
+        return s
+    try:
+        return int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected 'sum', 'ave' or a bin index, got {s!r}") from None
 
-    # check for rebinning
-    rebinx = kwargs.pop('rebinx')
-    mulegend = kwargs.pop('mulegend')
 
-    # Popped unconditionally: whatever is left in kwargs is forwarded to ax.plot via
-    # make_plot, which rejects any keyword it does not recognise.  Naming the file is what
-    # asks for it to be written, so there is no separate flag to get out of step with it.
-    txtfile = kwargs.pop('txtfile', None)
-
-    # plot spectrum as function mu and phi
-    mulist = imu_handler(imu)
-    philist = imu_handler(iphi)
-    if txtfile is not None:
-        nmu = len(mulist)
-        nphi =len(philist)
-        nout = 2*nphi*nmu+1
-        nx = spectrum['nx']
-        print(nx,nout)
-        out_arr = np.zeros((nx,nout))
-        counter = 0
-
-    for iphv in philist:
-        for imuv in mulist:
-
-            result = athenamc.plot_frequency(spectrum, imuv, iphv,
-                                         plterr=plterr, xunit=xunit, yunit=yunit, rebinx=rebinx)
-            # skip if no data
-            if result is None:
-                print("  skipping yunit={0!r} at imu={1}, iphi={2}".format(
-                    yunit, imuv, iphv))
-                continue
-            x, y, yerr, xlabel, ylabel = result
-            athenamc.make_plot(x, y, yerr=yerr, xlabel=xlabel, ylabel=ylabel, ax=ax, **kwargs)
-
-            if txtfile is not None:
-                if counter == 0:
-                    out_arr[:,0] = x
-                out_arr[:,2*counter+1] = y
-                out_arr[:,2*counter+2] = yerr
-                counter += 1
-
-    if mulegend:
-        nmu = len(mulist)
-
-        ax.legend([f"μ={(mu+0.5)/nmu:.2f}" for mu in mulist])
-
-    if txtfile is not None:
-        np.savetxt(txtfile, out_arr)
-
-def plot_blackbody(spectrum, ax, xunit, yunit, bbtemp, bbnorm, imu = None, iphi = None):
+def check_bins(spectrum, imu, iphi, filename):
     """
-    Plot blackbody for comparison
+    Exit with a clear message if a requested mu or phi bin is not in the spectrum
     """
+
+    for option, bins, nbins in (('--imu', imu, spectrum['nmu']),
+                                ('--iphi', iphi, spectrum['nphi'])):
+        bad = [b for b in bins if isinstance(b, int) and not 0 <= b < nbins]
+        if bad:
+            raise SystemExit(f"{filename}: {option} bin(s) {bad} out of range; "
+                             f"file has {nbins} bin(s), indices 0-{nbins-1}")
+
+
+def plot_one(spectrum, ax, xunit, yunit, imu, iphi, *, plterr=False, rebinx=None,
+             mulegend=False, label=None, txtfile=None, axis_opts=None):
+    """
+    Plot curves corresponding to a single spectrum, one per requested (imu, iphi) pair.
+    axis_opts (axis scales and limits) are forwarded to athena_mc.make_plot.
+    """
+
+    if axis_opts is None:
+        axis_opts = {}
 
     # Convert xaxis, if needed
     if xunit != spectrum['units']:
         athenamc.convert_xaxis(xunit, spectrum)
 
+    # bin midpoints for legend entries
+    mumid = 0.5*(spectrum['mufaces'][1:] + spectrum['mufaces'][:-1])
+    phimid = 0.5*(spectrum['phifaces'][1:] + spectrum['phifaces'][:-1])
+
+    # name the angles in the legend whenever curves would otherwise share a label
+    show_mu = mulegend or len(imu) > 1
+    show_phi = len(iphi) > 1
+
+    # columns and header names for txtfile, collected as curves are plotted so that
+    # skipped curves, rebinning, and missing errors do not leave gaps
+    columns = []
+    names = []
+
+    for iphv in iphi:
+        for imuv in imu:
+
+            result = athenamc.plot_frequency(spectrum, imuv, iphv, plterr=plterr, xunit=xunit,
+                                             yunit=yunit, rebinx=rebinx)
+            # skip if no data
+            if result is None:
+                print(f"  skipping yunit={yunit!r} at imu={imuv}, iphi={iphv}")
+                continue
+            x, y, yerr, xlabel, ylabel = result
+
+            # legend entry: file label plus angles, as needed
+            parts = [] if label is None else [label]
+            if show_mu:
+                parts.append(f"μ={mumid[imuv]:.2f}" if isinstance(imuv, int) else f"μ {imuv}")
+            if show_phi:
+                parts.append(f"φ={phimid[iphv]:.2f}" if isinstance(iphv, int) else f"φ {iphv}")
+            athenamc.make_plot(x, y, yerr=yerr, xlabel=xlabel, ylabel=ylabel, ax=ax,
+                               label=", ".join(parts) or None, **axis_opts)
+
+            if txtfile is not None:
+                if not columns:
+                    columns.append(x)
+                    names.append('x')
+                tag = f"imu={imuv},iphi={iphv}"
+                columns.append(y)
+                names.append(f"y({tag})")
+                # error columns only when errors were plotted
+                if yerr is not None:
+                    columns.append(yerr)
+                    names.append(f"yerr({tag})")
+
+    if columns:
+        np.savetxt(txtfile, np.column_stack(columns), header=" ".join(names))
+        print(f"  wrote {txtfile}")
+
+
+def plot_blackbody(ax, xfaces, xunit, yunit, bbtemp, bbnorm, *, imu=None, iphi=None):
+    """
+    Plot blackbody for comparison on x-axis bin faces xfaces, given in xunit
+    """
+
     # Compute frequency and x
-    xfaces = spectrum['xfaces']
     x = 0.5*(xfaces[1:] + xfaces[:-1])
-    nu = athenamc.get_frequency(spectrum['units'], xfaces)
+    nu = athenamc.get_frequency(xunit, xfaces)
+
+    # physical constants (cgs), from astropy
+    c_cgs = const.c.cgs.value
+    kb_cgs = const.k_B.cgs.value
+    h_cgs = const.h.cgs.value
+ 
 
     # Plot blackbody spectrum
-    c = 2.99792458e10
-    kb = 1.380649e-16
-    h = 6.62607015e-27
-    ybb = bbnorm*2*h/c**2*nu**3/(np.exp(h*nu/(kb*bbtemp)) - 1.0)
-    if iphi == 'sum':
+    ybb = (bbnorm*2*h_cgs/c_cgs**2*nu**3
+           / (np.exp(h_cgs*nu/(kb_cgs*bbtemp)) - 1.0))
+    if iphi is not None and 'sum' in iphi:
         ybb *= 2 * np.pi
-    if imu == 'sum':
-        ybb *= 0.5 # imu = sum return flux
+    if imu is not None and 'sum' in imu:
+        ybb *= 0.5  # imu = sum return flux
     if yunit == 'nulnu':
-        ax.plot(x, ybb*nu, linestyle='-')
+        y = ybb*nu
     elif yunit == 'lnu':
-        ax.plot(x, ybb, linestyle='-')
+        y = ybb
     elif yunit == 'counts':
-        ax.plot(x, ybb/(h*nu), linestyle='-')
+        y = ybb/(h_cgs*nu)
+    else:
+        raise ValueError(f"blackbody not available for yunit={yunit!r}")
+    ax.plot(x, y, linestyle='-', label=f"blackbody, T={bbtemp:.3g} K")
 
-# Main function
-def main(**kwargs):
+
+def main(args):
     """
-    Wrapper for running the plot_spectrum() function in athena_mc.py. Plotting parameters
-    are specified at command line using argparse and pass via kwargs.
+    Read each input spectrum with athena_mc.py and plot them on a shared axis, using the
+    options returned by parse_args().
     """
-    # Get blackbody parameters
-    bbtemp = kwargs.pop('bbtemp')
-    bbnorm = kwargs.pop('bbnorm')
-    if bbtemp is not None:
-        bbtemp = float(bbtemp)
-        if bbnorm is None:
-            bbnorm = 1.
-        else:
-            bbnorm = float(bbnorm)
 
-    # filenames for io
-    infile = kwargs.pop('infile')
-    files = file_handler(infile)
-    outfile = kwargs.pop('outfile')
-    if outfile is None:
-        outfile = files[0].replace('.spec', '.png')
+    axis_opts = {key: getattr(args, key) for key in AXIS_OPTS}
 
-    # Set plot parameters
-    plterr = kwargs.pop("ploterr")
-    xunit = kwargs.pop("xunit")
-    yunit = kwargs.pop("yunit")
-    imu = kwargs.pop("imu")
-    iphi = kwargs.pop("iphi")
+    fig, ax = plt.subplots()
 
-    # Set axis to be reused
-    fig = plt.figure()
-    ax = fig.add_subplot(1,1,1)
-
-    # plot spectra from all infiles
-    for file in files:
+    # plot spectra from all infiles, keeping each x grid for the blackbody
+    allfaces = []
+    for i, file in enumerate(args.infile):
         # read spectrum as dict from infile
         spectrum = athenamc.read_spectrum(file)
-        print("lumin: ("+file+")",athenamc.get_luminosity(spectrum))
+        check_bins(spectrum, args.imu, args.iphi, file)
+        print(f"lumin: ({file}) {athenamc.get_luminosity(spectrum)}")
 
         # plot curves corresponding to this spectrum
-        plot_one(spectrum, ax, xunit, yunit, imu, iphi, plterr, **kwargs)
+        label = args.labels[i] if args.labels is not None else None
+        txtfile = os.path.splitext(file)[0] + '.txt' if args.txtfile else None
+        plot_one(spectrum, ax, args.xunit, args.yunit, args.imu, args.iphi,
+                 plterr=args.ploterr, rebinx=args.rebinx, mulegend=args.mulegend,
+                 label=label, txtfile=txtfile, axis_opts=axis_opts)
+        allfaces.append(spectrum['xfaces'])
 
-        if bbtemp is not None:
-            plot_blackbody(spectrum, ax, xunit, yunit, bbtemp, bbnorm, imu, iphi)
+    # one blackbody spanning the x range of all spectra
+    if args.bbtemp is not None:
+        xfaces = np.unique(np.concatenate(allfaces))
+        plot_blackbody(ax, xfaces, args.xunit, args.yunit, args.bbtemp, args.bbnorm,
+                       imu=args.imu, iphi=args.iphi)
+
+    # add legend only if some curve was labeled
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend()
 
     # save plot to outfile
-    plt.savefig(outfile)
-    plt.close()
+    fig.savefig(args.outfile)
+    plt.close(fig)
 
-# Execute main function
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('infile',
-        help = 'input photon spectrum filename(s)')
-    parser.add_argument('--imu',
-        default = 'sum',
-        help = 'index of angle bin to plot')
-    parser.add_argument('--iphi',
-        default = 'ave',
-        help = 'controls phi bin for plot')
-    parser.add_argument('--xscale',
-        default = 'log',
-        help = 'x-axis scale')
-    parser.add_argument('--xmin',
-        default = None,
-        type = float,
-        help = 'x-axis mimimum')
-    parser.add_argument('--xmax',
-        default = None,
-        type = float,
-        help = 'x-axis maximum')
-    parser.add_argument('--yscale',
-        default = 'log',
-        help = 'y-axis scale')
-    parser.add_argument('--ymin',
-        default = None,
-        type = float,
-        help='y-axis mimimum')
-    parser.add_argument('--ymax',
-        default = None,
-        type = float,
-        help = 'y-axis maximum')
-    parser.add_argument('--rebinx',
-        default = None,
-        type = int,
-        help = 'amount to rebin x axis by')
-    parser.add_argument('--xunit',
-        default = 'kev',
-        help = 'variable to be used for x axis: ev, kev, nu, lambda')
-    parser.add_argument('--yunit',
-        default = 'nulnu',
-        help = 'variable to be used for y axis: nulnu, lnu, counts')
-    parser.add_argument('-ploterr',
-        action = 'store_true',
-        help = 'plot intensity with error bar')
+
+def parse_args(argv=None):
+    """
+    Parse and check command-line options; exits with a usage message on bad input
+    """
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('infile', nargs='+',
+                        help='input photon spectrum filename(s)')
+    parser.add_argument('--imu', nargs='+', type=mu_bin, default=['sum'],
+                        help='index of angle bin(s) to plot, or sum')
+    parser.add_argument('--iphi', nargs='+', type=phi_bin, default=['sum'],
+                        help='phi bin(s) to plot, or sum/ave')
+    parser.add_argument('--xscale', default='log', choices=SCALES,
+                        help='x-axis scale')
+    parser.add_argument('--xmin', type=float,
+                        help='x-axis minimum')
+    parser.add_argument('--xmax', type=float,
+                        help='x-axis maximum')
+    parser.add_argument('--yscale', default='log', choices=SCALES,
+                        help='y-axis scale')
+    parser.add_argument('--ymin', type=float,
+                        help='y-axis minimum')
+    parser.add_argument('--ymax', type=float,
+                        help='y-axis maximum')
+    parser.add_argument('--rebinx', type=int,
+                        help='amount to rebin x axis by')
+    parser.add_argument('--xunit', default='kev', choices=XUNITS,
+                        help='variable to be used for x axis')
+    parser.add_argument('--yunit', default='nulnu', choices=YUNITS,
+                        help='variable to be used for y axis')
+    parser.add_argument('--ploterr', action='store_true',
+                        help='plot intensity with error bar')
     parser.add_argument('--outfile',
-        default = None,
-        help = 'output filename for spectrum')
-    parser.add_argument('--bbtemp',
-        default = None,
-        help = 'blackbody temperature')
-    parser.add_argument('--bbnorm',
-        default = None,
-        help = 'blackbody normalization')
-    parser.add_argument('-mulegend',
-        action = 'store_true',
-        help = 'add a legend for mu values')
-    parser.add_argument('--txtfile',
-        nargs = '?',
-        const = 'out.txt',
-        default = None,
-        help = 'write the plotted curves to this text file; give the flag with no name '
-               'to use out.txt, omit it entirely to write nothing')
+                        help='output filename for spectrum '
+                             '(default: first input with .png extension)')
+    parser.add_argument('--bbtemp', type=float,
+                        help='blackbody temperature (K)')
+    parser.add_argument('--bbnorm', default=1.0, type=float,
+                        help='blackbody normalization')
+    parser.add_argument('--mulegend', action='store_true',
+                        help='add mu values to the legend')
+    parser.add_argument('--labels', nargs='+',
+                        help='legend label for each input file')
+    parser.add_argument('--txtfile', action='store_true',
+                        help='write the plotted curves for each input file to a .txt file '
+                             'named after it (.spec replaced by .txt); error columns are '
+                             'included only with --ploterr')
 
-    args = parser.parse_args()
-    main(**vars(args))
+    args = parser.parse_args(argv)
+
+    # checks that involve more than one option
+    if args.labels is not None and len(args.labels) != len(args.infile):
+        parser.error(f"number of labels ({len(args.labels)}) does not match "
+                     f"number of input files ({len(args.infile)})")
+    if args.bbtemp is not None and args.yunit not in BB_YUNITS:
+        parser.error(f"--bbtemp only works with --yunit {', '.join(BB_YUNITS)}")
+
+    # never write an output over an input spectrum
+    if args.outfile is None:
+        args.outfile = os.path.splitext(args.infile[0])[0] + '.png'
+    inputs = {os.path.realpath(f) for f in args.infile}
+    if os.path.realpath(args.outfile) in inputs:
+        parser.error(f"--outfile {args.outfile} would overwrite an input file")
+    if args.txtfile:
+        clash = [f for f in args.infile
+                 if os.path.realpath(os.path.splitext(f)[0] + '.txt') in inputs]
+        if clash:
+            parser.error(f"--txtfile would overwrite input file(s) {clash}")
+
+    return args
+
+
+if __name__ == '__main__':
+    main(parse_args())

@@ -46,6 +46,8 @@
 
 // C++ headers
 #include <algorithm>  // transform
+#include <cerrno>     // errno, ERANGE
+#include <cstdint>    // std::int64_t
 #include <cmath>      // std::fmod()
 #include <cstdlib>    // atoi(), atof(), nullptr, std::size_t
 #include <fstream>    // ifstream
@@ -447,6 +449,60 @@ int ParameterInput::GetInteger(std::string block, std::string name) {
 
   // Convert string to integer and return value
   return atoi(val.c_str());
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn std::int64_t ParameterInput::GetInteger64(std::string block, std::string name)
+//! \brief returns the 64-bit integer value of the string stored in block/name
+//!
+//! Needed for monte carlo runs where photon counts can exceed what an int holds.
+
+std::int64_t ParameterInput::GetInteger64(std::string block, std::string name) {
+  InputBlock* pb;
+  InputLine* pl;
+  std::stringstream msg;
+
+  Lock();
+
+  pb = GetPtrToBlock(block);
+  if (pb == nullptr) {
+    msg << "### FATAL ERROR in function [ParameterInput::GetInteger64]" << std::endl
+        << "Block name '" << block << "' not found when trying to set value "
+        << "for parameter '" << name << "'";
+    ATHENA_ERROR(msg);
+  }
+
+  pl = pb->GetPtrToLine(name);
+  if (pl == nullptr) {
+    msg << "### FATAL ERROR in function [ParameterInput::GetInteger64]" << std::endl
+        << "Parameter name '" << name << "' not found in block '" << block << "'";
+    ATHENA_ERROR(msg);
+  }
+
+  std::string val=pl->param_value;
+  Unlock();
+
+  errno = 0;
+  char *end = nullptr;
+  long long v = std::strtoll(val.c_str(), &end, 10);
+  bool ok = (end != val.c_str() && *end == '\0' && errno != ERANGE);
+  if (!ok) {
+    // 1e10 and the like: integral, and small enough that a double holds it exactly
+    errno = 0;
+    double d = std::strtod(val.c_str(), &end);
+    if (end != val.c_str() && *end == '\0' && errno != ERANGE
+        && std::floor(d) == d && std::fabs(d) < 9.0e15) {
+      v = static_cast<long long>(d);
+      ok = true;
+    }
+  }
+  if (!ok) {
+    msg << "### FATAL ERROR in function [ParameterInput::GetInteger64]" << std::endl
+        << "Parameter '" << name << "' in block '" << block << "' = '" << val
+        << "' is not an integer that fits in 64 bits" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  return static_cast<std::int64_t>(v);
 }
 
 //----------------------------------------------------------------------------------------

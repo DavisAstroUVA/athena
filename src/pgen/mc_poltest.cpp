@@ -179,7 +179,7 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
   // The search above requires the starting point to lie in this block and errors if it
   // does not, so mc_poltest is inherently single-block; claiming all of nphot here is
   // therefore unambiguous.
-  nphremain = pin->GetInteger("montecarlo", "nphot");
+  nphremain = pin->GetInteger64("montecarlo", "nphot");
 
 }
 
