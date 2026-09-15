@@ -1,7 +1,21 @@
 # Load balancing Monte Carlo transport on the Athena++ mesh: assessment and plan
 
-Status: **assessment written 2026-09-13, revised the same day so that one mechanism
-serves static and dynamic runs; nothing implemented.**  The first target is the static
+Status: **L0 implemented 2026-09-14 on `load_balance` (L0a safety fixes, L0b cost
+accounting into `MeshBlock::cost_`, L0c report under `<montecarlo> lb_report`, L0d
+measured); L1 onward not started.**  L0d on `edd_survey.full.00600`, 16 ranks, 200k
+photons, polarized Compton, free-free: transport 5740 s summed over ranks, busiest rank
+1.29 times the fair share, costliest block 0.116 times the fair share (29 blocks per
+rank), 1.35 us per pusher step, 29 ms per photon at 198 scatterings each.  So at 16
+ranks balancing can recover up to 29 percent and the granularity ceiling is far away;
+at 64 ranks (7 blocks per rank) the ceiling rises to about 0.46 and the imbalance will
+be larger, which is the production case to measure in L6.  Also seen: 2.8 percent of
+photons retired by `capmove = 50000` in that deck (`nrem`), which is energy lost from
+the outputs and worth a look independent of this plan.  Gate results after L0: KS
+shell list byte-identical, poltest, kerr_frames and the 16-rank disk atmosphere pass;
+block timers sum to the run's CPU time within 0.3 percent on one rank.
+
+Assessment written 2026-09-13, revised the same day so that one mechanism serves
+static and dynamic runs.  The first target is the static
 (post-processing) Monte Carlo run on a mesh whose block tree does not change: uniform,
 static mesh refinement, or a tree replayed from an athdf snapshot.  Dynamic (coupled)
 runs use the same mechanism with a smaller payload (section 3.6); adaptive refinement

@@ -272,6 +272,8 @@ public:
   bool raytrace_flag; // Will trace photons rather than scatter
   bool general_pusher_flag; // Use integration for photon movement
   bool verbose; // print out more information during run
+  //! print the per-rank and per-block transport cost after each emission type
+  bool lb_report;
 
   //! which metric the module integrates on; see SetCoordinateSystem
   MCCoordSystem coord_system;
@@ -316,6 +318,13 @@ public:
   bool FinishRound();
   // transport every photon of this emission type to completion using photon counters
   void TransportAsync(int etype);
+  //! one block's transport sweep, with timing for load balancing
+  void TransportBlock(int nb, int etype);
+  //! gather every block's window cost and counters and print the balance on rank 0
+  void ReportLoadBalance(int etype);
+  //! clock in the units MeshBlock::StartTimeMeasurement uses, so the costs add
+  static double LoadBalanceClock();
+  static double LoadBalanceSeconds(double clock_units);
   //! use the counter-based termination test instead of a collective every round
   bool async_term;
   // ceiling on consecutive same-rank transport sweeps before taking the global step,
@@ -392,6 +401,8 @@ public:
 
   int64_t nphrun; // Photons initialized thus far
   int64_t nphremain; // total number of photons to integrate
+  double lb_time; // transport cost for this block
+  int64_t lb_nstep;
   int64_t nabs, nesc, ndes, nscat, nrem; // counters
   int loop_max_size;
   int nx1,nx2,nx3;

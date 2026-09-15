@@ -41,6 +41,7 @@
 #include "../gravity/mg_gravity.hpp"
 #include "../hydro/hydro.hpp"
 #include "../hydro/hydro_diffusion/hydro_diffusion.hpp"
+#include "../monte_carlo/mcstatic.hpp"
 #include "../multigrid/multigrid.hpp"
 #include "../orbital_advection/orbital_advection.hpp"
 #include "../outputs/io_wrapper.hpp"
@@ -343,6 +344,8 @@ Mesh::Mesh(ParameterInput *pin, int mesh_test) :
   current_level = root_level;
 
   tree.CreateRootGrid();
+
+  mc_static = HydroIsStatic(pin);
 
   // Load balancing flag and parameters
 #ifdef MPI_PARALLEL
@@ -783,6 +786,8 @@ Mesh::Mesh(ParameterInput *pin, IOWrapper& resfile, int mesh_test) :
     MeshGenerator_[X3DIR] = DefaultMeshGeneratorX3;
   }
 
+  mc_static = HydroIsStatic(pin);
+
   // Load balancing flag and parameters
 #ifdef MPI_PARALLEL
   if (pin->GetOrAddString("loadbalancing", "balancer", "default") == "automatic")
@@ -1178,11 +1183,10 @@ void Mesh::OutputMeshStructure(int ndim) {
 //!        this assumes that phydro->NewBlockTimeStep is already called
 
 void Mesh::NewTimeStep() {
-  if (MONTE_CARLO_ENABLED) {
-    bool dynamic = my_blocks(0)->pmy_mcb->pmy_mc->dynamic; // SWD: ugly, fix
-    if (!dynamic)
-      return;
-  }
+  // A static Monte Carlo run keeps the time step it was given.  Decided from the flag,
+  // not from my_blocks(0)->pmy_mcb: after a redistribution the first local block can be
+  // new and not yet attached to a MonteCarloBlock, and this runs from Initialize(2).
+  if (mc_static) return;
   if (Globals::my_rank >= nrankmx) {
     dt = HUGE_NUMBER;
     dt_hyperbolic = HUGE_NUMBER;

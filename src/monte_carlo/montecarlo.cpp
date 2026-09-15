@@ -11,6 +11,7 @@
 #include <cmath>      // floor
 #include <limits>     // numeric_limits
 #include <cstdio>
+#include <ctime>       // clock(), CLOCKS_PER_SEC
 #include <iostream>
 #include <random>
 #include <stdexcept>  // runtime_error
@@ -21,6 +22,9 @@
 
 #ifdef MPI_PARALLEL
 #include <sched.h>  // sched_yield, for the idle wait in TransportAsync
+#ifdef OPENMP_PARALLEL
+#include <omp.h>
+#endif
 #endif
 
 // Athena++ headers
@@ -80,6 +84,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   acceleration = pin->GetOrAddBoolean("montecarlo","acceleration",false);
   time_acc = pin->GetOrAddBoolean("montecarlo","time_acc",false);
   verbose = pin->GetOrAddBoolean("montecarlo", "verbose", true);
+  lb_report = pin->GetOrAddBoolean("montecarlo", "lb_report", false);
   raytrace_flag = pin->GetOrAddBoolean("montecarlo", "raytrace", false);
   if (raytrace_flag)
     general_pusher_flag = true;
@@ -1119,6 +1124,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     for (int nb=0; nb<nblocal; nb++) {
       MonteCarloBlock *pmcb = my_blocks(nb);
       pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = 0;
+      pmcb->lb_time = 0.0;
+      pmcb->lb_nstep = 0;
     }
     // Distribute samples to all blocks based on emission properties
     // Sets nphremain and parameters for determining initial photon weights
@@ -1147,12 +1154,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
         int sweeps = 0;
         bool local_progress = true;
         while (local_progress) {
-          for(int nb=0; nb<nblocal; ++nb){
-            if (raytrace_flag)
-              my_blocks(nb)->RayTracePhotonsOnBlock(etype);
-            else
-              my_blocks(nb)->TransferPhotonsOnBlock(etype);
-          }
+          for(int nb=0; nb<nblocal; ++nb)
+            TransportBlock(nb, etype);
           local_progress = ExchangeLocal() && local_loop
                            && (++sweeps < local_max_sweeps);
         }
@@ -1199,11 +1202,128 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
           std::cout << std::endl;
     }
 
+    if (lb_report) ReportLoadBalance(etype);
+
     for(int nb=0; nb<nblocal; ++nb) {
       my_blocks(nb)->UserWorkAfterTransfer(etype);
     }
   } // end loop over ntype
 
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn double MonteCarlo::LoadBalanceClock()
+//! \brief the clock MeshBlock::StartTimeMeasurement reads, so transport and hydro costs
+//!        can be added in a dynamic run: omp_get_wtime with OpenMP, clock() otherwise
+
+double MonteCarlo::LoadBalanceClock() {
+#ifdef OPENMP_PARALLEL
+  return omp_get_wtime();
+#else
+  return static_cast<double>(clock());
+#endif
+}
+
+double MonteCarlo::LoadBalanceSeconds(double clock_units) {
+#ifdef OPENMP_PARALLEL
+  return clock_units;
+#else
+  return clock_units/static_cast<double>(CLOCKS_PER_SEC);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::TransportBlock(int nb, int etype)
+//! \brief one block's sweep, timed into the block's window cost and its MeshBlock cost
+
+void MonteCarlo::TransportBlock(int nb, int etype) {
+  MonteCarloBlock *pmcb = my_blocks(nb);
+  const double t0 = LoadBalanceClock();
+  if (raytrace_flag)
+    pmcb->RayTracePhotonsOnBlock(etype);
+  else
+    pmcb->TransferPhotonsOnBlock(etype);
+  const double dt = LoadBalanceClock() - t0;
+  pmcb->lb_time += dt;
+  pmcb->pmy_block->cost_ += dt;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::ReportLoadBalance(int etype)
+//! \brief print how the transport cost of this emission type was spread over ranks and
+//!        blocks: the imbalance a balancer could remove, and the granularity ceiling it
+//!        cannot
+//!
+//! The per-block costs are gathered into a gid-indexed list the same way the mesh
+//! gathers its own cost list (blocks of a rank are contiguous in gid, so every rank's
+//! contribution sits at its nslist offset).  Two ratios matter: the busiest rank over the
+//! mean, which is what balancing can fix, and the costliest single block over a rank's
+//! fair share, which it cannot -- a block is never split, so no partition beats that.
+
+void MonteCarlo::ReportLoadBalance(int etype) {
+  const int nbtot = pmy_mesh->nbtotal;
+  const int nr = Globals::nranks;
+  std::vector<double> cost(nbtot, 0.0);
+  std::vector<int64_t> nstep(nbtot, 0), nscat_b(nbtot, 0), nemit(nbtot, 0);
+  for (int nb=0; nb<nblocal; ++nb) {
+    MonteCarloBlock *pmcb = my_blocks(nb);
+    const int gid = pmcb->pmy_block->gid;
+    cost[gid] = LoadBalanceSeconds(pmcb->lb_time);
+    nstep[gid] = pmcb->lb_nstep;
+    nscat_b[gid] = pmcb->nscat;
+    nemit[gid] = pmcb->nphrun;
+  }
+#ifdef MPI_PARALLEL
+  int *nblist = pmy_mesh->nblist, *nslist = pmy_mesh->nslist;
+  MPI_Allgatherv(MPI_IN_PLACE, nblist[Globals::my_rank], MPI_DOUBLE, cost.data(),
+                 nblist, nslist, MPI_DOUBLE, MPI_COMM_WORLD);
+  MPI_Allgatherv(MPI_IN_PLACE, nblist[Globals::my_rank], MPI_INT64_T, nstep.data(),
+                 nblist, nslist, MPI_INT64_T, MPI_COMM_WORLD);
+  MPI_Allgatherv(MPI_IN_PLACE, nblist[Globals::my_rank], MPI_INT64_T, nscat_b.data(),
+                 nblist, nslist, MPI_INT64_T, MPI_COMM_WORLD);
+  MPI_Allgatherv(MPI_IN_PLACE, nblist[Globals::my_rank], MPI_INT64_T, nemit.data(),
+                 nblist, nslist, MPI_INT64_T, MPI_COMM_WORLD);
+#endif
+  if (Globals::my_rank != 0) return;
+
+  double total = 0.0, rank_max = 0.0;
+  int rank_arg = 0;
+  int64_t steps = 0, scats = 0, emits = 0;
+  for (int r=0; r<nr; ++r) {
+    double rc = 0.0;
+    const int ns = pmy_mesh->nslist[r], ne = ns + pmy_mesh->nblist[r];
+    for (int n=ns; n<ne; ++n) rc += cost[n];
+    total += rc;
+    if (rc > rank_max) { rank_max = rc; rank_arg = r; }
+  }
+  for (int n=0; n<nbtot; ++n) { steps += nstep[n]; scats += nscat_b[n]; emits += nemit[n]; }
+  const double fair = total/nr;
+  std::vector<int> order(nbtot);
+  for (int n=0; n<nbtot; ++n) order[n] = n;
+  std::partial_sort(order.begin(), order.begin() + std::min(5, nbtot), order.end(),
+                    [&cost](int a, int b) { return cost[a] > cost[b]; });
+  const int top = order[0];
+  // main.cpp leaves cout in 17-digit scientific notation; three figures read better here
+  const std::ios::fmtflags flags = std::cout.flags();
+  const std::streamsize prec = std::cout.precision();
+  std::cout.unsetf(std::ios::floatfield);
+  std::cout.precision(3);
+  std::cout << "Monte Carlo load balance, type " << etype << ": transport time "
+            << total << " s over " << nr << " rank(s); busiest rank " << rank_arg
+            << " = " << rank_max << " s = " << (fair > 0 ? rank_max/fair : 0.0)
+            << " x fair share" << std::endl
+            << "  costliest block gid " << top << " = " << cost[top] << " s = "
+            << (fair > 0 ? cost[top]/fair : 0.0) << " x fair share (the ceiling no"
+            << " partition beats); top " << std::min(5, nbtot) << " by gid:cost";
+  for (int i=0; i<std::min(5, nbtot); ++i)
+    std::cout << " " << order[i] << ":" << cost[order[i]];
+  std::cout << std::endl
+            << "  steps " << steps << ", scatterings " << scats << ", emitted " << emits;
+  if (steps > 0) std::cout << ", " << 1.0e6*total/static_cast<double>(steps) << " us/step";
+  if (emits > 0) std::cout << ", " << 1.0e6*total/static_cast<double>(emits) << " us/photon";
+  std::cout << std::endl;
+  std::cout.flags(flags);
+  std::cout.precision(prec);
 }
 
 //----------------------------------------------------------------------------------------
@@ -1405,12 +1525,8 @@ void MonteCarlo::TransportAsync(int etype) {
       int sweeps = 0;
       bool local_progress = true;
       while (local_progress) {
-        for (int nb = 0; nb < nblocal; ++nb) {
-          if (raytrace_flag)
-            my_blocks(nb)->RayTracePhotonsOnBlock(etype);
-          else
-            my_blocks(nb)->TransferPhotonsOnBlock(etype);
-        }
+        for (int nb = 0; nb < nblocal; ++nb)
+          TransportBlock(nb, etype);
         local_progress = ExchangeLocal() && (++sweeps < local_max_sweeps);
       }
       pexch->SendStaged();

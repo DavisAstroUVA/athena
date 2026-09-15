@@ -72,6 +72,7 @@ class MeshBlock {
   friend class Hydro;
   friend class TaskList;
   friend class TimeIntegratorTaskList;
+  friend class MonteCarlo;  // adds its measured transport time to cost_
 #ifdef HDF5OUTPUT
   friend class ATHDF5Output;
 #endif
@@ -246,6 +247,7 @@ class Mesh {
   bool amr_updated;
   EosTable *peos_table;
   int nrankmx; // maximum non-monte-carlo rank
+  bool mc_static; // true if static monte carlo (no hydro evol)
 
   AthenaArray<MeshBlock*> my_blocks;
 

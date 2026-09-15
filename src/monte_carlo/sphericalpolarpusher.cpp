@@ -421,6 +421,7 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
     // first step there.  Any other status is already terminal, REMOVED included, so this
     // cannot fire twice.
     pphot->nmvp[ip] = nmv0 + iter;
+    pmy_mcb->lb_nstep += iter;
     if (capmove > 0 && pphot->nmvp[ip] >= capmove &&
         (pphot->statp[ip] == EVOLVING || pphot->statp[ip] == BUFFERED))
       pphot->statp[ip] = REMOVED;

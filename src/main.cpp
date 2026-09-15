@@ -570,7 +570,11 @@ int main(int argc, char *argv[]) {
     mbcnt += pmesh->nbtotal;
     pmesh->step_since_lb++;
 
-    pmesh->LoadBalancingAndAdaptiveMeshRefinement(pinput);
+    // A static Monte Carlo run balances from inside RunMonteCarlo, on the transport
+    // cost, at points where no photon is in flight; the per-cycle hydro balancer would
+    // redistribute on hydro cost the Monte Carlo blocks never see.
+    if (!(MONTE_CARLO_ENABLED && pmesh->mc_static))
+      pmesh->LoadBalancingAndAdaptiveMeshRefinement(pinput);
 
     pmesh->NewTimeStep();
 
