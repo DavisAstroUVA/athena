@@ -109,6 +109,10 @@ class MCRankExchange {
   int64_t NumSent() const { return nsent_; }
   int64_t NumRecv() const { return nrecv_; }
 
+  //! zero the cumulative counters.  Only at a point where every rank agrees nothing is
+  //! in flight, since the asynchronous termination test compares their global sums.
+  void ResetCounters() { nsent_ = 0; nrecv_ = 0; }
+
   //! true when the mesh actually spans more than one rank and there is anything to do
   bool Active() const { return active_; }
 

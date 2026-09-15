@@ -99,6 +99,11 @@ public:
   void AcceptPhotons(int bufid, const int *ib, const Real *rb,
                      const std::complex<Real> *cb, int npar);
 
+  //! pack/unpack every resident photon's property columns (the integer ones, then the
+  //! real ones)
+  void PackAll(std::vector<int> &ib, std::vector<Real> &rb) const;
+  void UnpackAll(const int *ib, const Real *rb, int n);
+
   //! per-photon property counts, so the exchange can size its buffers without reaching
   //! into ParticleBuffer, which it is not a friend of
   static int PropertyCountInt();

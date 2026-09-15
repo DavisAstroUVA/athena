@@ -11,6 +11,7 @@
 #include <cmath>      // floor
 #include <limits>     // numeric_limits
 #include <cstdio>
+#include <fstream>
 #include <ctime>       // clock(), CLOCKS_PER_SEC
 #include <iostream>
 #include <random>
@@ -167,6 +168,45 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   // Photons crossing a rank boundary move a rank at a time rather than a block-neighbor
   // at a time.  Off by setting <montecarlo>/rank_exchange = false, which restores the
   // per-block protocol; the two give identical results, the difference is message count.
+  // The mesh calls back into the module when it redistributes blocks; see the hooks in
+  // amr_loadbalance.cpp and PackDeparting / RebuildAfterRedistribution below.
+  pmy_mesh->pmc = this;
+  lb_epoch = 0;
+  per_block_cap_ = 10000;
+  photon_budget_ = 1000000;
+#ifdef MPI_PARALLEL
+  MPI_Comm_dup(MPI_COMM_WORLD, &lb_comm_);
+#endif
+  {
+    const std::string mode = pin->GetOrAddString("montecarlo", "lb_test_repack", "none");
+    if (mode == "none") {
+      lb_test_repack = LBTEST_NONE;
+    } else if (mode == "local") {
+      lb_test_repack = LBTEST_LOCAL;
+    } else if (mode == "mesh") {
+      lb_test_repack = LBTEST_MESH;
+    } else {
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "<montecarlo>/lb_test_repack = " << mode << "; use none, local or mesh"
+          << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    lb_cost_file = pin->GetOrAddString("loadbalancing", "cost_file", "");
+    lb_costs_loaded = false;
+    lb_min_gain = pin->GetOrAddReal("montecarlo", "lb_min_gain", 0.05);
+    const std::string cmode = pin->GetOrAddString("montecarlo", "lb_test_costs", "measured");
+    if (cmode == "measured") {
+      lb_test_costs = LBCOST_MEASURED;
+    } else if (cmode == "alternate") {
+      lb_test_costs = LBCOST_ALTERNATE;
+    } else {
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "<montecarlo>/lb_test_costs = " << cmode << "; use measured or alternate"
+          << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+
   local_max_sweeps = pin->GetOrAddInteger("montecarlo", "local_max_sweeps", 1000);
   async_term = pin->GetOrAddBoolean("montecarlo", "async_term", true);
   pexch = nullptr;
@@ -187,6 +227,9 @@ MonteCarlo::~MonteCarlo() {
 
   delete pmcout;
   delete pexch;
+#ifdef MPI_PARALLEL
+  MPI_Comm_free(&lb_comm_);
+#endif
   for (int i=0; i<nblocal; i++)
     delete my_blocks(i);
 }
@@ -564,9 +607,9 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
   const int per_block_cap = pin->GetOrAddInteger("montecarlo","loop_max_size",10000);
   const int photon_budget =
       pin->GetOrAddInteger("montecarlo","max_resident_photons",1000000);
-  int loop_max = per_block_cap;
-  if (photon_budget > 0 && nblocal > 0)
-    loop_max = std::min(per_block_cap, std::max(1, photon_budget/nblocal));
+  per_block_cap_ = per_block_cap;
+  photon_budget_ = photon_budget;
+  const int loop_max = ComputeLoopMax();
 
   // Report only when the budget actually binds; otherwise this is noise.  The range is
   // taken across ranks because an unbalanced mesh gives them different block counts and so
@@ -590,20 +633,7 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
   for (int i=0; i<nblocal; i++) {
     MonteCarloBlock *pmcb = my_blocks(i);
     // Initialize variables over all blocks
-    pmcb->GetDensity();
-    pmcb->GetTemperature();
-    pmcb->GetNumberDensity();
-    pmcb->ComputeFreeFreePrefactor();
-    if (boosts) {
-      pmcb->GetVelocity();
-      pmcb->ComputeTransformations();
-    } else if (GENERAL_RELATIVITY) {
-      // no fluid velocity, but the GR tetrad still needs a frame to be built on
-      pmcb->SetNormalObserver();
-      pmcb->ComputeTransformations();
-    }
-    if (NSCALARS > 0) pmcb->GetScalars();
-    if (using_bfield) pmcb->GetBField();
+    SetupBlockFromFluid(pmcb);
 
     // initialize counters to zero
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
@@ -613,6 +643,8 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
     pmcb->MonteCarloProblemGenerator(pin);
   }
 
+  // Costs from an earlier run on this mesh, so the first transport is already balanced
+  if (!dynamic && !lb_cost_file.empty()) lb_costs_loaded = ReadCostFile();
 }
 
 //----------------------------------------------------------------------------------------
@@ -1080,29 +1112,24 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     tmax *= time_cgs;
   }
 
+  // Transfer test knobs (see the LbTestMode declaration): rebuild every block in place
+  // with no mesh call, or run the mesh's redistribution with unchanged costs.
+  if (lb_test_repack == LBTEST_LOCAL) {
+    RepackAllLocal(pinput);
+  } else if (lb_test_repack == LBTEST_MESH) {
+    pmy_mesh->RedistributeAndRefineMeshBlocks(pinput, pmy_mesh->nbtotal);
+  }
+
+  // A static run balances here, between transports, on what the previous one measured.
+  if (!dynamic) BalanceStatic(pinput);
+
   // Update MC blocks if needed
   for (int nb=0; nb<nblocal; nb++) {
     MonteCarloBlock *pmcb = my_blocks(nb);
-    if (dynamic) { // dynamic MC
-      // (Re)Initialize/update variables over all blocks
-      pmcb->GetDensity();
-      pmcb->GetTemperature();
-      pmcb->GetNumberDensity();
-      pmcb->ComputeFreeFreePrefactor();
-      if (boosts) {
-        pmcb->GetVelocity();
-        pmcb->ComputeTransformations();
-      } else if (GENERAL_RELATIVITY) {
-        // no fluid velocity, but the GR tetrad still needs a frame to be built on
-        pmcb->SetNormalObserver();
-        pmcb->ComputeTransformations();
-      }
-      if (NSCALARS > 0) pmcb->GetScalars(); //scalars
-      if (using_bfield) pmcb->GetBField();
-    } else { // static MC
-      // Clear Boundary buffers for photons
-      pmcb->pphot->ClearBoundary();
-    }
+    // dynamic MC: (re)initialize the fluid-derived arrays for this cycle
+    if (dynamic) SetupBlockFromFluid(pmcb);
+    // Reset the photon boundary state for this transport, in both modes.
+    pmcb->pphot->ClearBoundary();
     // reset counters
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb-> nrem = 0;
   }
@@ -1203,12 +1230,487 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     }
 
     if (lb_report) ReportLoadBalance(etype);
+    if (!dynamic && !lb_cost_file.empty()) WriteCostFile();
 
     for(int nb=0; nb<nblocal; ++nb) {
       my_blocks(nb)->UserWorkAfterTransfer(etype);
     }
   } // end loop over ntype
 
+  // A dynamic run is balanced by the mesh after this returns (main.cpp), on the hydro
+  // time plus what TransportBlock added.  The forced-cost test writes its costs now so
+  // that call sees them.  Otherwise apply the same prediction guard as the static
+  // entry point: when the partition the mesh would choose is no better, hold its
+  // cycle counter one short of the interval, so that its check waits another cycle.
+  if (dynamic && (pmy_mesh->lb_automatic_ || pmy_mesh->lb_manual_)) {
+    if (lb_test_costs != LBCOST_MEASURED) {
+      AssignTestCosts();
+      if (pmy_mesh->lb_manual_) pmy_mesh->lb_flag_ = true;
+    } else if (pmy_mesh->step_since_lb + 1 >= pmy_mesh->lb_interval_
+               && !RedistributionWorthwhile()) {
+      pmy_mesh->step_since_lb = pmy_mesh->lb_interval_ - 2;
+    }
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::BalanceStatic(ParameterInput *pin)
+//! \brief the static run's balance point
+//!
+//! Between two transports nothing is in flight and every block's cost for the last
+//! transport sits in its MeshBlock (TransportBlock), so this simply hands control to the
+//! mesh's load balancer after measuring costs.
+
+void MonteCarlo::BalanceStatic(ParameterInput *pin) {
+  Mesh *pm = pmy_mesh;
+  if (!(pm->lb_automatic_ || pm->lb_manual_)) return;
+  if (pm->ncycle == 0) {
+    // Nothing measured yet.  With costs read from a file, balance on those now, before
+    // the first transport; the mesh counts cycles since its last balance, so tell it the
+    // interval has passed.
+    if (!lb_costs_loaded) return;
+    pm->step_since_lb = pm->lb_interval_;
+    lb_costs_loaded = false;
+  }
+  if (lb_test_costs != LBCOST_MEASURED) AssignTestCosts();
+  if (!RedistributionWorthwhile()) return;
+
+  // manual costs are taken up only when the flag says they changed
+  if (pm->lb_manual_) pm->lb_flag_ = true;
+  pm->LoadBalancingAndAdaptiveMeshRefinement(pin);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::RedistributionWorthwhile() const
+//! \brief predict before committing
+//!
+//! The mesh's check asks only whether the current layout is imbalanced; its greedy
+//! contiguous partition of the same costs can be worse than what it replaces when there
+//! are few blocks per rank, and a partition identical to the current one still rebuilds
+//! every block.  So run the partitioner on a copy and approve only if the busiest rank
+//! improves by lb_min_gain.
+
+bool MonteCarlo::RedistributionWorthwhile() const {
+  Mesh *pm = pmy_mesh;
+  const int nr = Globals::nranks;
+  std::vector<double> cost;
+  GatherBalancerCosts(cost);
+  double cur_max = 0.0;
+  for (int r=0; r<nr; ++r) {
+    double rc = 0.0;
+    for (int n=pm->nslist[r]; n<pm->nslist[r] + pm->nblist[r]; ++n) rc += cost[n];
+    cur_max = std::max(cur_max, rc);
+  }
+  std::vector<double> ccopy(cost);
+  std::vector<int> rank_new(pm->nbtotal), ns_new(nr), nb_new(nr);
+  pm->CalculateLoadBalance(ccopy.data(), rank_new.data(), ns_new.data(), nb_new.data(),
+                           pm->nbtotal);
+  double new_max = 0.0;
+  for (int r=0; r<nr; ++r) {
+    double rc = 0.0;
+    for (int n=ns_new[r]; n<ns_new[r] + nb_new[r]; ++n) rc += cost[n];
+    new_max = std::max(new_max, rc);
+  }
+  if (new_max <= (1.0 - lb_min_gain)*cur_max) return true;
+  if (Globals::my_rank == 0 && verbose) {
+    const std::ios::fmtflags flags = std::cout.flags();
+    const std::streamsize prec = std::cout.precision();
+    std::cout.unsetf(std::ios::floatfield);
+    std::cout.precision(3);
+    std::cout << "Monte Carlo load balance: layout kept; the partition the balancer"
+              << " would choose has busiest rank " << LoadBalanceSeconds(new_max)
+              << " s against " << LoadBalanceSeconds(cur_max) << " s now ("
+              << (cur_max > 0 ? new_max/cur_max : 1.0) << ", threshold "
+              << 1.0 - lb_min_gain << ")" << std::endl;
+    std::cout.flags(flags);
+    std::cout.precision(prec);
+  }
+  return false;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::GatherBalancerCosts(std::vector<double> &cost) const
+//! \brief Every block's cost as Mesh::UpdateCostList is about to compute it 
+//!
+//! The aged list plus the MeshBlock's accumulated time under automatic, the MeshBlock's
+//! value under manual.  Gathered the way the mesh gathers its cost list.
+
+void MonteCarlo::GatherBalancerCosts(std::vector<double> &cost) const {
+  Mesh *pm = pmy_mesh;
+  cost.assign(pm->nbtotal, 0.0);
+  const double w = pm->lb_automatic_
+      ? static_cast<double>(pm->lb_interval_ - 1)/static_cast<double>(pm->lb_interval_)
+      : 0.0;
+  for (int nb=0; nb<nblocal; ++nb) {
+    MeshBlock *pmb = my_blocks(nb)->pmy_block;
+    cost[pmb->gid] = pm->lb_automatic_ ? pm->costlist[pmb->gid]*w + pmb->cost_
+                                       : pmb->cost_;
+  }
+#ifdef MPI_PARALLEL
+  MPI_Allgatherv(MPI_IN_PLACE, pm->nblist[Globals::my_rank], MPI_DOUBLE, cost.data(),
+                 pm->nblist, pm->nslist, MPI_DOUBLE, MPI_COMM_WORLD);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::WriteCostFile() const
+//! \brief Gather every block's MeshBlock cost and write to cost_file
+
+void MonteCarlo::WriteCostFile() const {
+  Mesh *pm = pmy_mesh;
+  std::vector<double> cost(pm->nbtotal, 0.0);
+  for (int nb=0; nb<nblocal; ++nb) {
+    MeshBlock *pmb = my_blocks(nb)->pmy_block;
+    cost[pmb->gid] = pmb->cost_;
+  }
+#ifdef MPI_PARALLEL
+  MPI_Allgatherv(MPI_IN_PLACE, pm->nblist[Globals::my_rank], MPI_DOUBLE, cost.data(),
+                 pm->nblist, pm->nslist, MPI_DOUBLE, MPI_COMM_WORLD);
+#endif
+  if (Globals::my_rank != 0) return;
+  std::ofstream f(lb_cost_file.c_str());
+  if (!f) {
+    std::cout << "### Warning in MonteCarlo::WriteCostFile: could not open "
+              << lb_cost_file << std::endl;
+    return;
+  }
+  f.precision(17);
+  f << pm->nbtotal << std::endl;
+  for (int n=0; n<pm->nbtotal; ++n) f << n << " " << cost[n] << std::endl;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::ReadCostFile()
+//! \brief load cost_file into the local MeshBlocks' costs, return true if used
+//!
+//! Every rank reads the whole file; it is one line per block.  A missing file is not an
+//! error and a file for another block count is refused.
+
+bool MonteCarlo::ReadCostFile() {
+  Mesh *pm = pmy_mesh;
+  std::ifstream f(lb_cost_file.c_str());
+  if (!f) {
+    if (Globals::my_rank == 0 && verbose)
+      std::cout << "Monte Carlo: no cost file " << lb_cost_file
+                << " yet; the first transport runs on the initial layout" << std::endl;
+    return false;
+  }
+  int nb_file = -1;
+  f >> nb_file;
+  if (nb_file != pm->nbtotal) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo::ReadCostFile" << std::endl
+        << lb_cost_file << " describes " << nb_file << " blocks; this mesh has "
+        << pm->nbtotal << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  std::vector<double> cost(pm->nbtotal, 0.0);
+  for (int n=0; n<pm->nbtotal; ++n) {
+    int gid;
+    double c;
+    if (!(f >> gid >> c) || gid < 0 || gid >= pm->nbtotal) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo::ReadCostFile" << std::endl
+          << lb_cost_file << " is malformed at line " << n + 2 << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    cost[gid] = c;
+  }
+  for (int nb=0; nb<nblocal; ++nb) {
+    MeshBlock *pmb = my_blocks(nb)->pmy_block;
+    pmb->cost_ = cost[pmb->gid];
+  }
+  if (Globals::my_rank == 0 && verbose)
+    std::cout << "Monte Carlo: block costs read from " << lb_cost_file << std::endl;
+  return true;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::AssignTestCosts()
+//! \brief synthetic block costs for the forced-move test; see LbCostMode
+
+void MonteCarlo::AssignTestCosts() {
+  const int half = pmy_mesh->nbtotal/2;
+  const bool first_half_heavy = (lb_epoch % 2 == 0);
+  for (int nb=0; nb<nblocal; ++nb) {
+    MeshBlock *pmb = my_blocks(nb)->pmy_block;
+    const bool first_half = (pmb->gid < half);
+    pmb->cost_ = (first_half == first_half_heavy) ? 3.0 : 1.0;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::SetupBlockFromFluid(MonteCarloBlock *pmcb)
+//! \brief the block's fluid-derived arrays from its MeshBlock's primitives
+
+void MonteCarlo::SetupBlockFromFluid(MonteCarloBlock *pmcb) {
+  pmcb->GetDensity();
+  pmcb->GetTemperature();
+  pmcb->GetNumberDensity();
+  pmcb->ComputeFreeFreePrefactor();
+  if (boosts) {
+    pmcb->GetVelocity();
+    pmcb->ComputeTransformations();
+  } else if (GENERAL_RELATIVITY) {
+    // no fluid velocity, but the GR tetrad still needs a frame to be built on
+    pmcb->SetNormalObserver();
+    pmcb->ComputeTransformations();
+  }
+  if (NSCALARS > 0) pmcb->GetScalars();
+  if (using_bfield) pmcb->GetBField();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int MonteCarlo::ComputeLoopMax() const
+//! \brief per-block resident photon cap: loop_max_size, cut so that nblocal blocks stay
+//!        within max_resident_photons.  Recomputed whenever nblocal changes.
+
+int MonteCarlo::ComputeLoopMax() const {
+  int loop_max = per_block_cap_;
+  if (photon_budget_ > 0 && nblocal > 0)
+    loop_max = std::min(per_block_cap_, std::max(1, photon_budget_/nblocal));
+  return loop_max;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::PackDeparting(...)
+//! \brief first redistribution hook: record the new layout and pack what leaves
+//!
+//! Called by Mesh::RedistributeAndRefineMeshBlocks after it has computed the new rank of
+//! every block (so nslist and nblist already describe the new layout) and before it
+//! deletes the MeshBlocks that leave this rank.  ranklist is still the old one here, and
+//! that is what the second hook needs to know where each arrival comes from, so it is
+//! read now.  Blocks that stay are kept as they are; the mesh reuses their MeshBlock
+//! objects too.  Departing payloads are sent on the module's own communicator, so
+//! nothing here can be confused with the mesh's own transfer.
+
+void MonteCarlo::PackDeparting(const int *newrank, const int *newtoold,
+                               const int *oldtonew, int ntot_new) {
+  Mesh *pm = pmy_mesh;
+  std::stringstream msg;
+  if (ntot_new != pm->nbtotal) {
+    msg << "### FATAL ERROR in MonteCarlo::PackDeparting" << std::endl
+        << "the block tree changed (" << pm->nbtotal << " -> " << ntot_new << " blocks);"
+        << " the Monte Carlo module follows redistribution, not refinement" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  const int me = Globals::my_rank;
+  const int nbs = pm->nslist[me];
+  const int nnew = pm->nblist[me];
+  const bool repack_all = (lb_test_repack == LBTEST_MESH);
+
+  lb_kept_.assign(nnew, nullptr);
+  lb_src_.assign(nnew, -1);
+  lb_local_.clear();
+  if (repack_all) lb_local_.resize(nnew);
+  lb_departed_.clear();
+  lb_send_.clear();
+  lb_send_.reserve(nblocal);   // no reallocation while sends point into it
+#ifdef MPI_PARALLEL
+  lb_req_.clear();
+#endif
+
+  // where each of this rank's new blocks comes from
+  for (int n=0; n<nnew; ++n) {
+    const int on = newtoold[nbs + n];
+    if (pm->ranklist[on] != me) lb_src_[n] = pm->ranklist[on];
+  }
+
+  // what each of this rank's current blocks does
+  for (int nb=0; nb<nblocal; ++nb) {
+    MonteCarloBlock *pmcb = my_blocks(nb);
+    const int on = pmcb->pmy_block->gid;
+    const int nn = oldtonew[on];
+    const int dest = newrank[nn];
+    const int lid_new = nn - pm->nslist[dest];
+    if (dest == me && !repack_all) {
+      lb_kept_[lid_new] = pmcb;
+      continue;
+    }
+    lb_departed_.push_back(pmcb);
+    if (dest == me) {   // test mode: travels through memory
+      BlockPayload &p = lb_local_[lid_new];
+      pmcb->PackForTransfer(p.ib, p.rb, p.sb);
+      continue;
+    }
+#ifdef MPI_PARALLEL
+    if (3*lid_new + 2 > 32767) {
+      msg << "### FATAL ERROR in MonteCarlo::PackDeparting" << std::endl
+          << "destination lid " << lid_new << " does not fit the MPI tag range" << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    lb_send_.emplace_back();
+    BlockPayload &p = lb_send_.back();
+    pmcb->PackForTransfer(p.ib, p.rb, p.sb);
+    MPI_Request r;
+    MPI_Isend(p.ib.data(), static_cast<int>(p.ib.size()), MPI_INT, dest, 3*lid_new,
+              lb_comm_, &r);
+    lb_req_.push_back(r);
+    MPI_Isend(p.rb.data(), static_cast<int>(p.rb.size()), MPI_ATHENA_REAL, dest,
+              3*lid_new + 1, lb_comm_, &r);
+    lb_req_.push_back(r);
+    MPI_Isend(p.sb.data(), static_cast<int>(p.sb.size()), MPI_CHAR, dest, 3*lid_new + 2,
+              lb_comm_, &r);
+    lb_req_.push_back(r);
+#endif
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn MonteCarloBlock *MonteCarlo::RebuildArrival(...)
+//! \brief a block that has just landed on this rank: construct it on its MeshBlock,
+//!        derive its fluid arrays, run the problem generator, then restore its payload
+
+MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
+                                            const BlockPayload &payload) {
+  MonteCarloBlock *pmcb = new MonteCarloBlock(pmb, nullptr, this, pin);
+  SetupBlockFromFluid(pmcb);
+  pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
+  pmcb->loop_max_size = ComputeLoopMax();
+  // The problem generator runs before the payload is unpacked, exactly as at startup:
+  // it supplies per-block state that is neither fluid-derived nor carried (photon
+  // budgets of emission = none decks, image geometry, per-block tables), and whatever
+  // it sets that the payload also carries is then overwritten by the block's real
+  // state.  The contract for a generator is therefore that this hook is repeatable for
+  // a block and touches no state shared across blocks or indexed by lid; one that does
+  // must rebuild it in UserWorkAfterRebalance or refuse balancing, as the readers with
+  // per-lid opacity tables do.
+  pmcb->MonteCarloProblemGenerator(pin);
+  pmcb->UnpackFromTransfer(payload.ib, payload.rb, payload.sb);
+  return pmcb;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::RebuildAfterRedistribution(ParameterInput *pin)
+//! \brief second redistribution hook: rebuild the block list on the mesh's new one
+//!
+//! Called after Initialize(2), so every new MeshBlock has its conserved variables, its
+//! ghost zones and its primitives.  Kept blocks are reattached in their new lid order;
+//! arrivals are built and unpacked; departed blocks are deleted (their MeshBlocks are
+//! already gone, and nothing here touches them); every block is relinked to its new
+//! neighbors and the rank exchange rebuilt.
+
+void MonteCarlo::RebuildAfterRedistribution(ParameterInput *pin) {
+  Mesh *pm = pmy_mesh;
+  const int nnew = pm->nblocal;
+  std::stringstream msg;
+  if (static_cast<int>(lb_kept_.size()) != nnew) {
+    msg << "### FATAL ERROR in MonteCarlo::RebuildAfterRedistribution" << std::endl
+        << "called without PackDeparting, or the layout changed in between" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+
+  AthenaArray<MonteCarloBlock*> newlist;
+  newlist.NewAthenaArray(nnew);
+  int64_t narrive = 0;
+  for (int lid=0; lid<nnew; ++lid) {
+    MeshBlock *pmb = pm->my_blocks(lid);
+    if (lb_kept_[lid] != nullptr) {
+      pmb->pmy_mcb = lb_kept_[lid];
+      newlist(lid) = lb_kept_[lid];
+      continue;
+    }
+    BlockPayload recv;
+    const BlockPayload *pp = nullptr;
+    if (lb_src_[lid] < 0) {
+      pp = &lb_local_.at(lid);
+    } else {
+#ifdef MPI_PARALLEL
+      const int src = lb_src_[lid];
+      MPI_Status st;
+      int n;
+      MPI_Probe(src, 3*lid, lb_comm_, &st);
+      MPI_Get_count(&st, MPI_INT, &n);
+      recv.ib.resize(n);
+      MPI_Recv(recv.ib.data(), n, MPI_INT, src, 3*lid, lb_comm_, MPI_STATUS_IGNORE);
+      MPI_Probe(src, 3*lid + 1, lb_comm_, &st);
+      MPI_Get_count(&st, MPI_ATHENA_REAL, &n);
+      recv.rb.resize(n);
+      MPI_Recv(recv.rb.data(), n, MPI_ATHENA_REAL, src, 3*lid + 1, lb_comm_,
+               MPI_STATUS_IGNORE);
+      MPI_Probe(src, 3*lid + 2, lb_comm_, &st);
+      MPI_Get_count(&st, MPI_CHAR, &n);
+      recv.sb.resize(n);
+      MPI_Recv(recv.sb.data(), n, MPI_CHAR, src, 3*lid + 2, lb_comm_, MPI_STATUS_IGNORE);
+#endif
+      pp = &recv;
+    }
+    newlist(lid) = RebuildArrival(pmb, pin, *pp);
+    ++narrive;
+  }
+
+  for (std::size_t i=0; i<lb_departed_.size(); ++i) delete lb_departed_[i];
+  lb_departed_.clear();
+#ifdef MPI_PARALLEL
+  if (!lb_req_.empty())
+    MPI_Waitall(static_cast<int>(lb_req_.size()), lb_req_.data(), MPI_STATUSES_IGNORE);
+  lb_req_.clear();
+#endif
+  lb_send_.clear();
+  lb_local_.clear();
+  lb_kept_.clear();
+  lb_src_.clear();
+
+  my_blocks.ExchangeAthenaArray(newlist);
+  nblocal = nnew;
+  for (int nb=0; nb<nblocal; ++nb) my_blocks(nb)->loop_max_size = ComputeLoopMax();
+  RelinkAll();
+  UserWorkAfterRebalance(pin);
+  ++lb_epoch;
+
+#ifdef MPI_PARALLEL
+  MPI_Allreduce(MPI_IN_PLACE, &narrive, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  if (Globals::my_rank == 0 && verbose) {
+    std::cout << "Monte Carlo blocks rebuilt after redistribution " << lb_epoch << ": "
+              << narrive << " block(s) arrived on a new rank" << std::endl;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::RepackAllLocal(ParameterInput *pin)
+//! \brief test mode: pack, destroy and rebuild every block in place, no mesh call
+
+void MonteCarlo::RepackAllLocal(ParameterInput *pin) {
+  for (int nb=0; nb<nblocal; ++nb) {
+    MonteCarloBlock *old = my_blocks(nb);
+    MeshBlock *pmb = old->pmy_block;
+    BlockPayload p;
+    old->PackForTransfer(p.ib, p.rb, p.sb);
+    my_blocks(nb) = RebuildArrival(pmb, pin, p);
+    delete old;
+  }
+  RelinkAll();
+  UserWorkAfterRebalance(pin);
+  ++lb_epoch;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarlo::RelinkAll()
+//! \brief refresh every block's neighbor links, boundary state and the peer list, which
+//!        all depend on which rank and lid each neighbor now has
+
+void MonteCarlo::RelinkAll() {
+  Mesh *pm = pmy_mesh;
+  for (int nb=0; nb<nblocal; ++nb) {
+    MonteCarloBlock *pmcb = my_blocks(nb);
+    MeshBlock *pmb = pmcb->pmy_block;
+    Photon *pp = pmcb->pphot;
+    pp->ClearNeighbors();
+    const int nrbx1 = pm->mesh_size.nx1/pmb->block_size.nx1;
+    const int nrbx2 = pm->mesh_size.nx2/pmb->block_size.nx2;
+    const int nrbx3 = pm->mesh_size.nx3/pmb->block_size.nx3;
+    pp->LinkNeighbors(pm->tree, nrbx1, nrbx2, nrbx3, pm->root_level);
+    pp->SetOffRankNeighborFlag();
+    pp->ClearBoundary();
+  }
+  if (pexch != nullptr) {
+    pexch->BuildPeerList();
+    pexch->Reset();
+    pexch->ResetCounters();
+  }
+  send_list_.clear();
+  recv_list_.clear();
 }
 
 //----------------------------------------------------------------------------------------
@@ -1666,6 +2168,41 @@ int MCRandom::binomial(unsigned int n, Real p) {
 #else
   std::binomial_distribution<int> binomial(n, p);
   return binomial(gen);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn std::string MCRandom::SaveState() const
+//! \brief the generator's state as bytes, so a moved block continues its own stream
+
+std::string MCRandom::SaveState() const {
+#if GSL
+  return std::string(static_cast<const char*>(gsl_rng_state(dev)), gsl_rng_size(dev));
+#else
+  std::ostringstream os;
+  os << gen;
+  return os.str();
+#endif
+}
+
+void MCRandom::RestoreState(const std::string &state) {
+  std::stringstream msg;
+#if GSL
+  if (state.size() != gsl_rng_size(dev)) {
+    msg << "### FATAL ERROR in MCRandom::RestoreState" << std::endl
+        << "state of " << state.size() << " bytes for a generator of "
+        << gsl_rng_size(dev) << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  std::memcpy(gsl_rng_state(dev), state.data(), state.size());
+#else
+  std::istringstream is(state);
+  is >> gen;
+  if (!is) {
+    msg << "### FATAL ERROR in MCRandom::RestoreState" << std::endl
+        << "could not parse a saved generator state" << std::endl;
+    ATHENA_ERROR(msg);
+  }
 #endif
 }
 

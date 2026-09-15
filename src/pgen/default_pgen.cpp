@@ -157,6 +157,16 @@ void __attribute__((weak)) MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip
 }
 
 //========================================================================================
+//! \fn void MonteCarlo::UserWorkAfterRebalance(ParameterInput *pin)
+//! \brief Called after the Monte Carlo blocks have followed a mesh redistribution, so a
+//! problem generator can rebuild anything it keeps per local block or sized to nblocal
+//========================================================================================
+
+void __attribute__((weak)) MonteCarlo::UserWorkAfterRebalance(ParameterInput *pin) {
+  return;
+}
+
+//========================================================================================
 //! \fn void MonteCarloBlock::UserWorkAfterTransfer(int etype)
 //! \brief Do work after each stage of photon transfer (multiple emission types)
 //========================================================================================

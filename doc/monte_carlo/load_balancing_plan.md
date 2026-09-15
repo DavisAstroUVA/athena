@@ -1,8 +1,47 @@
 # Load balancing Monte Carlo transport on the Athena++ mesh: assessment and plan
 
-Status: **L0 implemented 2026-09-14 on `load_balance` (L0a safety fixes, L0b cost
-accounting into `MeshBlock::cost_`, L0c report under `<montecarlo> lb_report`, L0d
-measured); L1 onward not started.**  L0d on `edd_survey.full.00600`, 16 ranks, 200k
+Status: **L0, L1 and L2 implemented 2026-09-14/15 on `load_balance`; L3 onward not
+started.**  L2d was run on a dynamic variant of the thin spherical-polar deck
+(`dynamic = true`, `tmax` large, six hydro cycles, four ranks) rather than the
+hot-Jupiter deck, which does not finish a cycle in useful time at any photon count:
+forced moves of 17 to 21 blocks every cycle through the mesh's own per-cycle call with
+counts conserved and spectra within noise; `balancer = automatic` (hydro time plus
+transport time) 1.23 -> 1.09 after one move and then held.  The prediction guard is
+shared with dynamic runs: when the mesh would choose a partition that is no better, the
+module holds the mesh's cycle counter one short of the interval so the check waits a
+cycle, which removed the rebuild-to-an-identical-layout the mesh otherwise did every
+cycle.  Two pre-existing dynamic-mode defects were found and fixed in passing:
+`ResetMoments` zeroed only the lab array, which is unallocated when just user moments
+are enrolled (a segfault at the top of every dynamic cycle), and left the other frames
+accumulating across cycles; and `Photon::ClearBoundary` was called for static runs only,
+so a dynamic run with more than one block per rank hung at its first same-rank hand-off.  L2 as built: `MonteCarlo::BalanceStatic`
+at the top of `RunMonteCarlo` hands control to the mesh's balancer under
+`<loadbalancing> balancer = automatic|manual`, `tolerance`, `interval` (set
+`interval = 1` to consider every output interval); a prediction guard runs the mesh's
+partitioner on a copy first and redistributes only if the busiest rank improves by
+`<montecarlo> lb_min_gain` (default 0.05), because the greedy contiguous partition can
+be worse than the current layout at few blocks per rank (the thin deck at 16 ranks,
+two blocks per rank, oscillated 1.26 -> 1.59 -> 1.43 -> 1.59 without it and holds at
+1.28 with it; a better partitioner is the lever there, section L5); forced moves for
+tests via `<montecarlo> lb_test_costs = alternate` with `balancer = manual`;
+`<loadbalancing> cost_file` written after every transport and read at startup, in
+which case the first transport is already balanced.  Measured on the thin deck: 4
+ranks 1.21 -> 1.08 after moving 3 blocks, then held; forced moves of 17 to 29 blocks
+per interval at 4 and 16 ranks with counts conserved and spectra within Poisson noise
+of the plain runs (max |chi| 3.5, 0.14 percent of bins above 3); cost-file run starts
+at 1.08.  Note that under `automatic` the mesh accumulates `MeshBlock::cost_` from one
+redistribution to the next rather than per interval (upstream semantics), so between
+redistributions the costs are "since the last move"; harmless for the ratios.  L1
+as built: `MonteCarloBlock::PackForTransfer`/`UnpackFromTransfer` with `Photon::PackAll`
+and `MCRandom::SaveState`; `Mesh::pmc` and the two hooks in
+`RedistributeAndRefineMeshBlocks` calling `PackDeparting` and
+`RebuildAfterRedistribution`; `RelinkAll`; `UserWorkAfterRebalance`; the table-mode
+guard in `mc_readhdf_gr`.  Test knob `<montecarlo> lb_test_repack = local|mesh`: on
+the Kerr-Schild shell (one rank, two intervals) and the thin spherical-polar deck (four
+ranks) both modes give photon lists and spectra **byte-identical** to the plain run,
+so pack, unpack, relink, RNG carry and both hooks are exact; the mesh mode also showed
+the inversion at `Initialize(2)` to be idempotent on already round-tripped primitives.
+The cross-rank payload path is first exercised by L2b's forced moves.  L0d on `edd_survey.full.00600`, 16 ranks, 200k
 photons, polarized Compton, free-free: transport 5740 s summed over ranks, busiest rank
 1.29 times the fair share, costliest block 0.116 times the fair share (29 blocks per
 rank), 1.35 us per pusher step, 29 ms per photon at 198 scatterings each.  So at 16

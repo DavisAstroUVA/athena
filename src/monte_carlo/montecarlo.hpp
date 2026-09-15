@@ -16,6 +16,9 @@
 #include <complex>
 #include <random>
 #include <vector>
+#ifdef MPI_PARALLEL
+#include <mpi.h>
+#endif
 // Athena++ classes headers
 #include "../athena.hpp"
 #include "../coordinates/coordinates.hpp"
@@ -202,6 +205,9 @@ public:
   void SampleMultinomial(int n, int m, Real *prob, int *counts);
   //! 64-bit version
   void SampleMultinomial(std::int64_t n, int m, const Real *prob, std::int64_t *counts);
+  //! the generator's state as bytes, and back, so a block's stream survives a move
+  std::string SaveState() const;
+  void RestoreState(const std::string &state);
 
 private:
 
@@ -322,6 +328,82 @@ public:
   void TransportBlock(int nb, int etype);
   //! gather every block's window cost and counters and print the balance on rank 0
   void ReportLoadBalance(int etype);
+
+  //! the fluid-derived arrays of one block, from its MeshBlock's primitives: density,
+  //! temperature, number density, free-free prefactor, frame, scalars, field.
+  void SetupBlockFromFluid(MonteCarloBlock *pmcb);
+  //! per-block cap on resident photons for the current nblocal (see Initialize)
+  int ComputeLoopMax() const;
+
+  // mesh's RedistributeAndRefineMeshBlocks calls the two hooks:
+  // PackDeparting before it deletes the old MeshBlocks, with its new-rank and old/new gid
+  // maps, and RebuildAfterRedistribution after Initialize(2) has refilled the new ones.
+  void PackDeparting(const int *newrank, const int *newtoold, const int *oldtonew,
+                     int ntot_new);
+  void RebuildAfterRedistribution(ParameterInput *pin);
+  //! problem-generator hook, run last: rebuild anything indexed by lid or sized to nblocal
+  void UserWorkAfterRebalance(ParameterInput *pin);
+  //! how many redistributions the module has followed
+  int lb_epoch;
+
+  //! One block's movable state. ib: photon integer properties, counters, the emission
+  //! cursor and counts; rb: photon real properties, moments, source terms, emission,
+  //! weights; sb: the random generator's state.
+  struct BlockPayload {
+    std::vector<int> ib;
+    std::vector<Real> rb;
+    std::vector<char> sb;
+  };
+  //! <montecarlo> lb_test_repack: none; local -- at the top of every RunMonteCarlo pack,
+  //! destroy and rebuild every block in place, no mesh call, which must be bitwise
+  //! neutral; mesh -- run the mesh's redistribution with unchanged costs and treat every
+  //! block as departing and arriving, which exercises the hooks end to end.
+  enum LbTestMode {LBTEST_NONE = 0, LBTEST_LOCAL = 1, LBTEST_MESH = 2};
+  LbTestMode lb_test_repack;
+  //! <montecarlo> lb_test_costs: measured (the default) or alternate -- synthetic block
+  //! costs of 3 and 1 on the two halves of the gid range, swapped every balance, so that
+  //! a known set of blocks changes rank each time.  Needs <loadbalancing> balancer =
+  //! manual, whose cost path reads MeshBlock::cost_ as given.
+  enum LbCostMode {LBCOST_MEASURED = 0, LBCOST_ALTERNATE = 1};
+  LbCostMode lb_test_costs;
+  //! the static run's balance point: between transports, on the previous transport's
+  //! measured cost, through the mesh's own balancer and hooks
+  void BalanceStatic(ParameterInput *pin);
+  void AssignTestCosts();
+  //! <loadbalancing> cost_file: per-block transport costs written after every transport
+  //! and read back at startup, so a run on the same mesh starts balanced
+  std::string lb_cost_file;
+  bool lb_costs_loaded;
+  //! <montecarlo> lb_min_gain: a redistribution is taken only if the busiest rank of the
+  //! partition the mesh would choose is at least this fraction below the current one.
+  //! The mesh tests whether the current layout is imbalanced, not whether its greedy
+  //! contiguous partition improves on it, and with few blocks per rank it can be worse.
+  Real lb_min_gain;
+  //! gather the costs the balancer will see (aged as it ages them) into a gid-indexed list
+  void GatherBalancerCosts(std::vector<double> &cost) const;
+  //! would the partition the mesh chooses from those costs beat the current layout by
+  //! lb_min_gain?  Prints the verdict on rank 0 when it is no.
+  bool RedistributionWorthwhile() const;
+  void WriteCostFile() const;
+  bool ReadCostFile();
+
+ private:
+  MonteCarloBlock *RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
+                                  const BlockPayload &payload);
+  void RepackAllLocal(ParameterInput *pin);
+  void RelinkAll();
+  std::vector<MonteCarloBlock*> lb_kept_;      //!> by new lid; null where a block arrives
+  std::vector<int> lb_src_;                    //!> by new lid; source rank, -1 if kept
+  std::vector<MonteCarloBlock*> lb_departed_;  //!> old blocks to delete after the rebuild
+  std::vector<BlockPayload> lb_send_;          //!> payloads in flight to other ranks
+  std::vector<BlockPayload> lb_local_;         //!> by new lid; test-mode payloads kept here
+#ifdef MPI_PARALLEL
+  std::vector<MPI_Request> lb_req_;
+  MPI_Comm lb_comm_;                           //!> block transfers, apart from the mesh's
+#endif
+  int per_block_cap_, photon_budget_;          //!> inputs to ComputeLoopMax
+
+ public:
   //! clock in the units MeshBlock::StartTimeMeasurement uses, so the costs add
   static double LoadBalanceClock();
   static double LoadBalanceSeconds(double clock_units);
@@ -403,6 +485,13 @@ public:
   int64_t nphremain; // total number of photons to integrate
   double lb_time; // transport cost for this block
   int64_t lb_nstep;
+  //! everything of this block that has to move with it and cannot be rebuilt from the
+  //! fluid: resident photons, the accumulated moments and source terms, the emission
+  //! array and cursor, counters, weights, the random generator
+  void PackForTransfer(std::vector<int> &ib, std::vector<Real> &rb,
+                       std::vector<char> &sb) const;
+  void UnpackFromTransfer(const std::vector<int> &ib, const std::vector<Real> &rb,
+                          const std::vector<char> &sb);
   int64_t nabs, nesc, ndes, nscat, nrem; // counters
   int loop_max_size;
   int nx1,nx2,nx3;

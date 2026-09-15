@@ -346,6 +346,7 @@ Mesh::Mesh(ParameterInput *pin, int mesh_test) :
   tree.CreateRootGrid();
 
   mc_static = HydroIsStatic(pin);
+  pmc = nullptr;
 
   // Load balancing flag and parameters
 #ifdef MPI_PARALLEL
@@ -787,6 +788,7 @@ Mesh::Mesh(ParameterInput *pin, IOWrapper& resfile, int mesh_test) :
   }
 
   mc_static = HydroIsStatic(pin);
+  pmc = nullptr;
 
   // Load balancing flag and parameters
 #ifdef MPI_PARALLEL

@@ -209,6 +209,42 @@ bool Photon::IsNanTransport(int ip) const {
 }
 
 //--------------------------------------------------------------------------------------
+//! \fn void Photon::PackAll(std::vector<int> &ib, std::vector<Real> &rb) const
+//! \brief append every resident photon to the two streams, in ParticleBuffer's order
+
+void Photon::PackAll(std::vector<int> &ib, std::vector<Real> &rb) const {
+  if (ncplx > 0) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in Photon::PackAll" << std::endl
+        << "complex photon properties are not packed" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  ib.reserve(ib.size() + static_cast<std::size_t>(npar)*nint);
+  rb.reserve(rb.size() + static_cast<std::size_t>(npar)*(nreal + naux));
+  for (int k=0; k<npar; ++k) {
+    for (int j=0; j<nint; ++j) ib.push_back(intprop[j][k]);
+    for (int j=0; j<nreal; ++j) rb.push_back(rp[j][k]);
+    for (int j=0; j<naux; ++j) rb.push_back(aux[j][k]);
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Photon::UnpackAll(const int *ib, const Real *rb, int n)
+//! \brief append n photons read from the two streams PackAll writes
+
+void Photon::UnpackAll(const int *ib, const Real *rb, int n) {
+  if (n <= 0) return;
+  const int k0 = npar;
+  Resize(k0 + n);
+  for (int k=k0; k<npar; ++k) {
+    for (int j=0; j<nint; ++j) intprop[j][k] = *ib++;
+    for (int j=0; j<nreal; ++j) rp[j][k] = *rb++;
+    for (int j=0; j<naux; ++j) aux[j][k] = *rb++;
+  }
+  EnsureScratch();
+}
+
+//--------------------------------------------------------------------------------------
 //! \fn void Photon::AllocatePhotons(int nphot)
 //! \brief Allocates photons
 
