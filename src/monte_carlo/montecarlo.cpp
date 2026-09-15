@@ -1536,7 +1536,7 @@ Real MCRandom::chisquare(Real nu) {
 
 int MCRandom::binomial(unsigned int n, Real p) {
 #if GSL
-  return static_<Real>(gsl_ran_binomial(dev, p, n));
+  return static_cast<Real>(gsl_ran_binomial(dev, p, n));
 #else
   std::binomial_distribution<int> binomial(n, p);
   return binomial(gen);

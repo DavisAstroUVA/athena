@@ -10,6 +10,7 @@
 
 // Athena++ headers
 #include "mcbvals.hpp"
+#include "photon.hpp"
 
 //----------------------------------------------------------------------------------------
 //! MCBoundaryValues class constructor, built from ParameterInput and MonteCarloBlock

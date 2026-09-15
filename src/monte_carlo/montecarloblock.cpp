@@ -686,7 +686,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       pphot->nmvp[ip] = 0;
       if (pphot->nscp[ip] % pmy_mc->checkscat == 0) {
         pphot->PrintPhoton("check scat",ip);
-        printf("nu/nu0 - 1 = %g\n", pphot->ep[ip]/(MCConstants::nu_lya * MCConstants::h_cgs) - 1.);
+        printf("dnu/nu0 = %g, c*dnu/nu0 = %g\n", pphot->ep[ip]/(MCConstants::nu_lya * MCConstants::h_cgs) - 1., (pphot->ep[ip]/(MCConstants::nu_lya * MCConstants::h_cgs) - 1.) * MCConstants::c_cgs);
         // Check for possible infinite loop due to NaN in photon
         if (pphot->IsNanPhoton(ip)) {
           pphot->statp[ip] = DESTROYED;
