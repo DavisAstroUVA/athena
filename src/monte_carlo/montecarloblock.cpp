@@ -7,7 +7,11 @@
 //! \brief implementation of functions in class MonteCarloBlock
 
 // C++ headers
+#include <algorithm>  // min
+#include <cstdint>    // int64_t
 #include <cstring>   // strcmp
+#include <limits>     // numeric_limits
+#include <vector>
 #include <iostream>
 #include <stdexcept>  // runtime_error
 
@@ -496,10 +500,10 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
   Real const to_eulr = -1.0;
   int nbuf = 0;
 
-  printf("remain: %d \n",nphremain);
+  printf("remain: %lld \n",static_cast<long long>(nphremain));
   // Emit photons to replace those that left meshblock or were terminated
   // Limit ntodo to number of remaining photons on block
-  int ntodo = (loop_max_size > nphremain) ? nphremain : loop_max_size;
+  int ntodo = static_cast<int>(std::min<int64_t>(nphremain, loop_max_size));
 
   // if photons remain to transfer, make space for new photons
   if (ntodo > 0) {
@@ -580,13 +584,12 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
   // Set absorption method for this photon type
   enum AbsorptionMethodFlag absorption_meth = pmy_mc->absorption_method[etype];
 
-  //int nbuf = 0;
   int nold = pphot->nphot;
-  int ntot = nold + nphremain;
+  const int64_t navail = static_cast<int64_t>(nold) + nphremain;
 
   // Emit photons to replace those that left meshblock or were terminated
   // limit ntot < loop_max_size unless nold is larger than loop_max_size
-  ntot = (loop_max_size > ntot) ? ntot : loop_max_size;
+  int ntot = (navail > loop_max_size) ? loop_max_size : static_cast<int>(navail);
   ntot = (nold > ntot) ? nold : ntot;
   int nnew = ntot - nold;
 
@@ -1634,8 +1637,8 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
 void MonteCarloBlock::ComputeEmissionSampleArray() {
 
   int ncells = nx1 * nx2 * nx3;
-  Real prob[ncells];
-  int count[ncells];
+  std::vector<Real> prob(ncells);
+  std::vector<int64_t> count(ncells, 0);
 
   // contruct probability array
   Real total_emission = 0.;
@@ -1653,14 +1656,22 @@ void MonteCarloBlock::ComputeEmissionSampleArray() {
     prob[i] /= total_emission;
   }
   // sample multinomial distribution
-  pran->SampleMultinomial(nphremain,ncells,prob,count);
-  // set counts in emit_count_ array
-  int sum = 0;
+  pran->SampleMultinomial(nphremain,ncells,prob.data(),count.data());
+  // set counts in emit_count_ array, which holds ints per cell
+  int64_t sum = 0;
   for (int k=ks; k<=ke; ++k) {
     for (int j=js; j<=je; ++j) {
       for (int i=is; i<=ie; ++i) {
         int n = (k-ks)*nx2*nx1 + (j-js)*nx1 + i-is;
-        emit_count_(k,j,i) = count[n];
+        if (count[n] > std::numeric_limits<int>::max()) {
+          std::stringstream msg;
+          msg << "### FATAL ERROR in function [MonteCarloBlock::ComputeEmissionSampleArray]"
+              << std::endl << "cell (" << k << "," << j << "," << i << ") of block "
+              << pmy_block->gid << " is to emit " << count[n]
+              << " photons, more than the per-cell counter holds" << std::endl;
+          ATHENA_ERROR(msg);
+        }
+        emit_count_(k,j,i) = static_cast<int>(count[n]);
         sum += count[n];
       }
     }

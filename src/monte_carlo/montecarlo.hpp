@@ -200,6 +200,8 @@ public:
   Real chisquare(Real nu);
   int binomial(unsigned int n, Real p);
   void SampleMultinomial(int n, int m, Real *prob, int *counts);
+  //! 64-bit version
+  void SampleMultinomial(std::int64_t n, int m, const Real *prob, std::int64_t *counts);
 
 private:
 

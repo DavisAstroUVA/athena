@@ -226,7 +226,7 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
   if (r0  >= pcoord->x1f(is) && r0  < pcoord->x1f(ie+1) &&
       th0 >= pcoord->x2f(js) && th0 < pcoord->x2f(je+1) &&
       ph0 >= pcoord->x3f(ks) && ph0 < pcoord->x3f(ke+1)) {
-    nphremain = pin->GetInteger("montecarlo", "nphot");
+    nphremain = pin->GetInteger64("montecarlo", "nphot");
   }
   return;
 }
