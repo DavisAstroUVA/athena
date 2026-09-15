@@ -328,6 +328,8 @@ public:
   void TransportBlock(int nb, int etype);
   //! gather every block's window cost and counters and print the balance on rank 0
   void ReportLoadBalance(int etype);
+  //! this rank's own sweep time prior to move
+  double lb_rank_time;
 
   //! the fluid-derived arrays of one block, from its MeshBlock's primitives: density,
   //! temperature, number density, free-free prefactor, frame, scalars, field.
@@ -369,6 +371,11 @@ public:
   //! the static run's balance point: between transports, on the previous transport's
   //! measured cost, through the mesh's own balancer and hooks
   void BalanceStatic(ParameterInput *pin);
+  //! test costs if requested, the prediction guard, then the mesh's balancer with its
+  //! cycle counter satisfied. Returnsrue if blocks were redistributed.
+  bool BalanceNow(ParameterInput *pin);
+  //! Mid-transport balancing in the synchronous round loop
+  int lb_check_interval, lb_max_per_transport, lb_min_window;
   void AssignTestCosts();
   //! <loadbalancing> cost_file: per-block transport costs written after every transport
   //! and read back at startup, so a run on the same mesh starts balanced

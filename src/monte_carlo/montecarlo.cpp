@@ -172,6 +172,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   // amr_loadbalance.cpp and PackDeparting / RebuildAfterRedistribution below.
   pmy_mesh->pmc = this;
   lb_epoch = 0;
+  lb_rank_time = 0.0;
   per_block_cap_ = 10000;
   photon_budget_ = 1000000;
 #ifdef MPI_PARALLEL
@@ -194,6 +195,9 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     lb_cost_file = pin->GetOrAddString("loadbalancing", "cost_file", "");
     lb_costs_loaded = false;
     lb_min_gain = pin->GetOrAddReal("montecarlo", "lb_min_gain", 0.05);
+    lb_check_interval = pin->GetOrAddInteger("montecarlo", "lb_check_interval", 0);
+    lb_max_per_transport = pin->GetOrAddInteger("montecarlo", "lb_max_per_transport", 4);
+    lb_min_window = pin->GetOrAddInteger("montecarlo", "lb_min_window", lb_check_interval);
     const std::string cmode = pin->GetOrAddString("montecarlo", "lb_test_costs", "measured");
     if (cmode == "measured") {
       lb_test_costs = LBCOST_MEASURED;
@@ -1154,6 +1158,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       pmcb->lb_time = 0.0;
       pmcb->lb_nstep = 0;
     }
+    lb_rank_time = 0.0;
     // Distribute samples to all blocks based on emission properties
     // Sets nphremain and parameters for determining initial photon weights
     DistributeSamples(etype);
@@ -1166,6 +1171,10 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     if (pexch != nullptr && pexch->Active()) pexch->CheckLayoutUnchanged();
 
     // Run Monte Carlo until all photons have escaped/been absorbed
+    const bool mid_transport_lb = !dynamic && lb_check_interval > 0
+        && (pmy_mesh->lb_automatic_ || pmy_mesh->lb_manual_)
+        && (Globals::nranks == 1 || (pexch != nullptr && pexch->Active()));
+    int rounds_since_check = 0, rounds_since_lb = 0, nlb_transport = 0;
     if (async_term && pexch != nullptr && pexch->Active()) {
       TransportAsync(etype);
     } else {
@@ -1187,6 +1196,22 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                            && (++sweeps < local_max_sweeps);
         }
         photons_remain = FinishRound();
+
+        // Mid-transport balance point.  FinishRound has just completed every transfer
+        // and flushed every receive buffer behind the same collective on every rank, so
+        // each photon sits in exactly one block and the round counters agree everywhere.
+        // Only with the rank exchange: the per-block protocol leaves receives posted
+        // across rounds that rebuilding the blocks would orphan.
+        ++rounds_since_check;
+        ++rounds_since_lb;
+        if (photons_remain && mid_transport_lb && rounds_since_check >= lb_check_interval
+            && rounds_since_lb >= lb_min_window && nlb_transport < lb_max_per_transport) {
+          rounds_since_check = 0;
+          if (BalanceNow(pinput)) {
+            ++nlb_transport;
+            rounds_since_lb = 0;
+          }
+        }
       }
     }
 
@@ -1265,19 +1290,30 @@ void MonteCarlo::BalanceStatic(ParameterInput *pin) {
   Mesh *pm = pmy_mesh;
   if (!(pm->lb_automatic_ || pm->lb_manual_)) return;
   if (pm->ncycle == 0) {
-    // Nothing measured yet.  With costs read from a file, balance on those now, before
-    // the first transport; the mesh counts cycles since its last balance, so tell it the
-    // interval has passed.
+    // Nothing measured yet, unless costs were read from a file: then balance on those
+    // now, before the first transport.
     if (!lb_costs_loaded) return;
-    pm->step_since_lb = pm->lb_interval_;
     lb_costs_loaded = false;
   }
-  if (lb_test_costs != LBCOST_MEASURED) AssignTestCosts();
-  if (!RedistributionWorthwhile()) return;
+  BalanceNow(pin);
+}
 
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::BalanceNow(ParameterInput *pin)
+//! \brief test costs if requested, predict, and if worthwhile let the mesh redistribute
+
+bool MonteCarlo::BalanceNow(ParameterInput *pin) {
+  Mesh *pm = pmy_mesh;
+  if (lb_test_costs != LBCOST_MEASURED) AssignTestCosts();
+  if (!RedistributionWorthwhile()) return false;
+  // The mesh counts cycles since its last balance; inside a transport, or right after
+  // reading a cost file, tell it the interval has passed.
+  pm->step_since_lb = pm->lb_interval_;
   // manual costs are taken up only when the flag says they changed
   if (pm->lb_manual_) pm->lb_flag_ = true;
+  const int epoch = lb_epoch;
   pm->LoadBalancingAndAdaptiveMeshRefinement(pin);
+  return lb_epoch != epoch;
 }
 
 //----------------------------------------------------------------------------------------
@@ -1747,6 +1783,7 @@ void MonteCarlo::TransportBlock(int nb, int etype) {
     pmcb->TransferPhotonsOnBlock(etype);
   const double dt = LoadBalanceClock() - t0;
   pmcb->lb_time += dt;
+  lb_rank_time += dt;
   pmcb->pmy_block->cost_ += dt;
 }
 
@@ -1786,17 +1823,20 @@ void MonteCarlo::ReportLoadBalance(int etype) {
   MPI_Allgatherv(MPI_IN_PLACE, nblist[Globals::my_rank], MPI_INT64_T, nemit.data(),
                  nblist, nslist, MPI_INT64_T, MPI_COMM_WORLD);
 #endif
+  // time each rank used before move
+  std::vector<double> rank_time(nr, LoadBalanceSeconds(lb_rank_time));
+#ifdef MPI_PARALLEL
+  MPI_Allgather(MPI_IN_PLACE, 1, MPI_DOUBLE, rank_time.data(), 1, MPI_DOUBLE,
+                MPI_COMM_WORLD);
+#endif
   if (Globals::my_rank != 0) return;
 
   double total = 0.0, rank_max = 0.0;
   int rank_arg = 0;
   int64_t steps = 0, scats = 0, emits = 0;
   for (int r=0; r<nr; ++r) {
-    double rc = 0.0;
-    const int ns = pmy_mesh->nslist[r], ne = ns + pmy_mesh->nblist[r];
-    for (int n=ns; n<ne; ++n) rc += cost[n];
-    total += rc;
-    if (rc > rank_max) { rank_max = rc; rank_arg = r; }
+    total += rank_time[r];
+    if (rank_time[r] > rank_max) { rank_max = rank_time[r]; rank_arg = r; }
   }
   for (int n=0; n<nbtot; ++n) { steps += nstep[n]; scats += nscat_b[n]; emits += nemit[n]; }
   const double fair = total/nr;

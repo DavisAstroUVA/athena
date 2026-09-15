@@ -1,7 +1,23 @@
 # Load balancing Monte Carlo transport on the Athena++ mesh: assessment and plan
 
-Status: **L0, L1 and L2 implemented 2026-09-14/15 on `load_balance`; L3 onward not
-started.**  L2d was run on a dynamic variant of the thin spherical-polar deck
+Status: **L0 to L3 implemented 2026-09-14/15 on `load_balance`; L4 onward not
+started.**  L3 as built: a balance point after `FinishRound` in the synchronous loop,
+every `<montecarlo> lb_check_interval` rounds (0 disables), at most
+`lb_max_per_transport` redistributions per transport and at least `lb_min_window`
+rounds after one; the same prediction guard and mesh call as between intervals
+(`BalanceNow`), rank exchange required.  Verified with photons resident: thin deck at 4
+ranks, forced moves every third round and every round (17 to 21 blocks each time),
+spectra equal to the plain run to 1e-11 and 1e-7 because each block's RNG stream moves
+with it; snake atmosphere on `gr_user` at 4 ranks with user moments, six forced
+redistributions of 9 to 11 blocks inside one transport, counts conserved, spectra within
+noise; automatic mode on the same deck, whose real imbalance is 1.62, redistributed six
+times inside the transport, ended with the busiest rank at 1.46 times the fair share,
+and finished in 46.7 s wall against 54.0 s plain, a 13 percent gain on a transport of
+only about 25 rounds.  The report's
+per-rank totals are now the time each rank actually spent, since a moved block carries
+its window time with it.  At 16 ranks the 3-to-1 test pattern gives the greedy
+partitioner no better cut at two blocks per rank, so the forced runs there move nothing
+and the guard says so.  L2d was run on a dynamic variant of the thin spherical-polar deck
 (`dynamic = true`, `tmax` large, six hydro cycles, four ranks) rather than the
 hot-Jupiter deck, which does not finish a cycle in useful time at any photon count:
 forced moves of 17 to 21 blocks every cycle through the mesh's own per-cycle call with
