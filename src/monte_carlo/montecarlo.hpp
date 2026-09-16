@@ -323,7 +323,7 @@ public:
   // send what was staged for other ranks, take delivery, and test for completion
   bool FinishRound();
   // transport every photon of this emission type to completion using photon counters
-  void TransportAsync(int etype);
+  void TransportAsync(int etype, ParameterInput *pin);
   //! one block's transport sweep, with timing for load balancing
   void TransportBlock(int nb, int etype);
   //! gather every block's window cost and counters and print the balance on rank 0
@@ -376,6 +376,8 @@ public:
   bool BalanceNow(ParameterInput *pin);
   //! Mid-transport balancing in the synchronous round loop
   int lb_check_interval, lb_max_per_transport, lb_min_window;
+  //! check for load balance fraction for asynchronous
+  Real lb_check_fraction;
   void AssignTestCosts();
   //! <loadbalancing> cost_file: per-block transport costs written after every transport
   //! and read back at startup, so a run on the same mesh starts balanced
@@ -386,10 +388,14 @@ public:
   //! The mesh tests whether the current layout is imbalanced, not whether its greedy
   //! contiguous partition improves on it, and with few blocks per rank it can be worse.
   Real lb_min_gain;
-  //! gather the costs the balancer will see (aged as it ages them) into a gid-indexed list
+  //! this rank's blocks' costs as the balancer will see them (aged as it ages them),
+  //! written into a gid-indexed list that a gather then completes
+  void FillLocalBalancerCosts(std::vector<double> &cost) const;
+  //! the same, gathered (blocking collective)
   void GatherBalancerCosts(std::vector<double> &cost) const;
-  //! would the partition the mesh chooses from those costs beat the current layout by
-  //! lb_min_gain?  Prints the verdict on rank 0 when it is no.
+  //! would the new partition improve on current layout
+  bool WorthwhileFromCosts(const std::vector<double> &cost) const;
+  //! gather and judge, in one blocking step
   bool RedistributionWorthwhile() const;
   void WriteCostFile() const;
   bool ReadCostFile();

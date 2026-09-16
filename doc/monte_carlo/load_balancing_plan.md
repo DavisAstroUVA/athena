@@ -1,7 +1,23 @@
 # Load balancing Monte Carlo transport on the Athena++ mesh: assessment and plan
 
-Status: **L0 to L3 implemented 2026-09-14/15 on `load_balance`; L4 onward not
-started.**  L3 as built: a balance point after `FinishRound` in the synchronous loop,
+Status: **L0 to L4 implemented 2026-09-14/15 on `load_balance`; L5 onward not
+started.**  L4 as built, in `TransportAsync`: the reduction carries a draining flag and
+the photons finished so far; each time `<montecarlo> lb_check_fraction` (default 0.1)
+of the transport's photons have finished since the last check, a nonblocking gather of
+the block costs is posted on the next completed reduction (a blocking collective there
+would deadlock against a rank waiting in `CompleteSends`); when it lands every rank
+judges the same list, and if a better partition exists enters draining, transporting
+nothing but still taking delivery and completing sends; once a completed reduction
+shows every rank draining and the sent and received totals equal and unchanged from the
+one before, all ranks make the same blocking balance call, and the termination history
+restarts.  A reduction-count cadence was tried first and rejected: reductions complete
+far more often than a synchronous round, giving 1123 checks in one snake transport.
+Verified: thin deck at 4 ranks, forced and automatic, one redistribution each with
+spectra equal to the plain run to 1e-12; 16 ranks, four checks, layout kept; snake
+atmosphere on `gr_user` at 4 ranks, forced, two redistributions of 9 and 11 blocks with
+photons resident, counts conserved, spectra within noise; automatic on the same deck,
+one redistribution of 6 blocks, busiest rank 1.62 -> 1.04 times the fair share, wall
+53.5 s -> 48.2 s.  No hang or false termination in any run.  L3 as built: a balance point after `FinishRound` in the synchronous loop,
 every `<montecarlo> lb_check_interval` rounds (0 disables), at most
 `lb_max_per_transport` redistributions per transport and at least `lb_min_window`
 rounds after one; the same prediction guard and mesh call as between intervals

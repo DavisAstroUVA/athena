@@ -198,6 +198,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     lb_check_interval = pin->GetOrAddInteger("montecarlo", "lb_check_interval", 0);
     lb_max_per_transport = pin->GetOrAddInteger("montecarlo", "lb_max_per_transport", 4);
     lb_min_window = pin->GetOrAddInteger("montecarlo", "lb_min_window", lb_check_interval);
+    lb_check_fraction = pin->GetOrAddReal("montecarlo", "lb_check_fraction", 0.1);
     const std::string cmode = pin->GetOrAddString("montecarlo", "lb_test_costs", "measured");
     if (cmode == "measured") {
       lb_test_costs = LBCOST_MEASURED;
@@ -1176,7 +1177,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
         && (Globals::nranks == 1 || (pexch != nullptr && pexch->Active()));
     int rounds_since_check = 0, rounds_since_lb = 0, nlb_transport = 0;
     if (async_term && pexch != nullptr && pexch->Active()) {
-      TransportAsync(etype);
+      TransportAsync(etype, pinput);
     } else {
       bool photons_remain = true; // True if photons on any process
       while(photons_remain) {
@@ -1327,10 +1328,14 @@ bool MonteCarlo::BalanceNow(ParameterInput *pin) {
 //! improves by lb_min_gain.
 
 bool MonteCarlo::RedistributionWorthwhile() const {
-  Mesh *pm = pmy_mesh;
-  const int nr = Globals::nranks;
   std::vector<double> cost;
   GatherBalancerCosts(cost);
+  return WorthwhileFromCosts(cost);
+}
+
+bool MonteCarlo::WorthwhileFromCosts(const std::vector<double> &cost) const {
+  Mesh *pm = pmy_mesh;
+  const int nr = Globals::nranks;
   double cur_max = 0.0;
   for (int r=0; r<nr; ++r) {
     double rc = 0.0;
@@ -1371,7 +1376,7 @@ bool MonteCarlo::RedistributionWorthwhile() const {
 //! The aged list plus the MeshBlock's accumulated time under automatic, the MeshBlock's
 //! value under manual.  Gathered the way the mesh gathers its cost list.
 
-void MonteCarlo::GatherBalancerCosts(std::vector<double> &cost) const {
+void MonteCarlo::FillLocalBalancerCosts(std::vector<double> &cost) const {
   Mesh *pm = pmy_mesh;
   cost.assign(pm->nbtotal, 0.0);
   const double w = pm->lb_automatic_
@@ -1382,7 +1387,12 @@ void MonteCarlo::GatherBalancerCosts(std::vector<double> &cost) const {
     cost[pmb->gid] = pm->lb_automatic_ ? pm->costlist[pmb->gid]*w + pmb->cost_
                                        : pmb->cost_;
   }
+}
+
+void MonteCarlo::GatherBalancerCosts(std::vector<double> &cost) const {
+  FillLocalBalancerCosts(cost);
 #ifdef MPI_PARALLEL
+  Mesh *pm = pmy_mesh;
   MPI_Allgatherv(MPI_IN_PLACE, pm->nblist[Globals::my_rank], MPI_DOUBLE, cost.data(),
                  pm->nblist, pm->nslist, MPI_DOUBLE, MPI_COMM_WORLD);
 #endif
@@ -2013,13 +2023,35 @@ bool MonteCarlo::FinishRound() {
 //! report no photons anywhere and the identical pair of totals, then nothing was sent
 //! anywhere between them and nothing was in flight.
 
-void MonteCarlo::TransportAsync(int etype) {
+void MonteCarlo::TransportAsync(int etype, ParameterInput *pin) {
 #ifdef MPI_PARALLEL
-  int64_t sbuf[3] = {0, 0, 0}, rbuf[3] = {0, 0, 0};
+  // The fourth entry carries the draining flag for the mid-transport balance below, the
+  // fifth the photons finished so far, which is that balance's clock.
+  int64_t sbuf[5] = {0, 0, 0, 0, 0}, rbuf[5] = {0, 0, 0, 0, 0};
   int64_t prev_sent = -1, prev_recv = -1;
   int quiet_streak = 0;
   bool pending = false;
   MPI_Request treq = MPI_REQUEST_NULL;
+
+  // Without rounds, the sequence of completed reductions is assesses the work done. If
+  // lb_check_fraction of the transport's photons have finished since the last check, a
+  // nonblocking gather of the block costs is started on the next completion.  Each rank
+  // judges the same list with the same predicate and, if a better partition exists, enters
+  // draining. Once a completed reduction shows every rank draining and the sent and
+  // received totals equal and unchanged, and with all photos in blocks, all ranks make the
+  // same blocking balance call.
+  Mesh *pm = pmy_mesh;
+  const bool lb_active = !dynamic && lb_check_interval > 0
+                         && (pm->lb_automatic_ || pm->lb_manual_);
+  const int64_t check_photons = std::max<int64_t>(1,
+      static_cast<int64_t>(lb_check_fraction*static_cast<Real>(nsamptype[etype])));
+  int64_t finished_at_check = 0, finished_at_lb = 0;
+  int nlb = 0;
+  bool draining = false, gather_pending = false;
+  int drain_streak = 0;
+  int64_t drain_prev_sent = -1, drain_prev_recv = -1;
+  MPI_Request greq = MPI_REQUEST_NULL;
+  std::vector<double> gcost;
   // Passes spent with neither work nor an arrival, and how many to spin through before
   // handing the core back.  Small enough that a rank stays responsive to a peer, large
   // enough that a busy rank alternating between work and short waits never yields.
@@ -2057,7 +2089,7 @@ void MonteCarlo::TransportAsync(int etype) {
       if (pmcb->pphot->nphot > 0 || pmcb->nphremain > 0) { have_work = true; break; }
     }
 
-    if (have_work) {
+    if (have_work && !draining) {
       pexch->Reset();
       // local_max_sweeps bounds a same-rank ping-pong here.  Its other job in the
       // synchronous loop -- keeping two blocks trading a photon from holding every other
@@ -2088,8 +2120,10 @@ void MonteCarlo::TransportAsync(int etype) {
     // block is neither in flight nor visible in nphot, and would otherwise vanish from
     // both sides of the test at once.  A rank that neither had work nor took delivery has
     // none of the three and does not need to look.
+    // Counted whenever draining, too: a draining rank holds photons it is not moving,
+    // and leaving them out would let the termination test see an empty mesh.
     int64_t act = 0;
-    if (have_work || landed) {
+    if (have_work || landed || draining) {
       for (int nb = 0; nb < nblocal; ++nb) {
         MonteCarloBlock *pmcb = my_blocks(nb);
         act += pmcb->pphot->nphot;
@@ -2102,7 +2136,15 @@ void MonteCarlo::TransportAsync(int etype) {
       sbuf[0] = act;
       sbuf[1] = pexch->NumSent();
       sbuf[2] = pexch->NumRecv();
-      MPI_Iallreduce(sbuf, rbuf, 3, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD, &treq);
+      sbuf[3] = draining ? 1 : 0;
+      sbuf[4] = 0;
+      if (lb_active) {
+        for (int nb = 0; nb < nblocal; ++nb) {
+          MonteCarloBlock *pmcb = my_blocks(nb);
+          sbuf[4] += pmcb->nesc + pmcb->nabs + pmcb->ndes + pmcb->nrem;
+        }
+      }
+      MPI_Iallreduce(sbuf, rbuf, 5, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD, &treq);
       pending = true;
     } else {
       int done = 0;
@@ -2118,9 +2160,56 @@ void MonteCarlo::TransportAsync(int etype) {
         prev_sent = rbuf[1];
         prev_recv = rbuf[2];
         if (quiet_streak >= 2) break;
+
+        if (lb_active && draining) {
+          // Every rank draining, and the wire empty for two consecutive reductions
+          const bool wire_quiet = (rbuf[3] == Globals::nranks && rbuf[1] == rbuf[2]);
+          if (wire_quiet && rbuf[1] == drain_prev_sent && rbuf[2] == drain_prev_recv) {
+            ++drain_streak;
+          } else {
+            drain_streak = wire_quiet ? 1 : 0;
+          }
+          drain_prev_sent = rbuf[1];
+          drain_prev_recv = rbuf[2];
+          if (drain_streak >= 2) {
+            if (BalanceNow(pin)) ++nlb;
+            // The exchange counters were zeroed by the relink if blocks moved; either
+            // way start the termination history afresh so no stale pair can match.
+            draining = false;
+            drain_streak = 0;
+            finished_at_lb = rbuf[4];
+            finished_at_check = rbuf[4];
+            prev_sent = prev_recv = -1;
+            quiet_streak = 0;
+          }
+        } else if (lb_active && !gather_pending && nlb < lb_max_per_transport
+                   && rbuf[4] - finished_at_lb >= check_photons
+                   && rbuf[4] - finished_at_check >= check_photons) {
+          finished_at_check = rbuf[4];
+          if (lb_test_costs != LBCOST_MEASURED) AssignTestCosts();
+          FillLocalBalancerCosts(gcost);
+          MPI_Iallgatherv(MPI_IN_PLACE, pm->nblist[Globals::my_rank], MPI_DOUBLE,
+                          gcost.data(), pm->nblist, pm->nslist, MPI_DOUBLE,
+                          MPI_COMM_WORLD, &greq);
+          gather_pending = true;
+        }
+      }
+    }
+
+    if (gather_pending) {
+      int done = 0;
+      MPI_Test(&greq, &done, MPI_STATUS_IGNORE);
+      if (done) {
+        gather_pending = false;
+        if (WorthwhileFromCosts(gcost)) {
+          draining = true;
+          drain_streak = 0;
+          drain_prev_sent = drain_prev_recv = -1;
+        }
       }
     }
   }
+  if (gather_pending) MPI_Wait(&greq, MPI_STATUS_IGNORE);
 
   if (pending) MPI_Wait(&treq, MPI_STATUS_IGNORE);
   // Termination means every photon this rank sent has been taken, so nothing is left to
