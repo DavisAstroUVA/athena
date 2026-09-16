@@ -1,7 +1,63 @@
 # Load balancing Monte Carlo transport on the Athena++ mesh: assessment and plan
 
-Status: **L0 to L4 implemented 2026-09-14/15 on `load_balance`; L5 onward not
-started.**  L4 as built, in `TransportAsync`: the reduction carries a draining flag and
+Status: **L0 to L6 done 2026-09-14/16 on `load_balance`.**  L6, the XRB snapshot at 16
+ranks (200k photons, polarized Compton, free-free, asynchronous transport), turned up
+something the small decks could not: the transport wall was 553 to 564 s while the
+busiest rank's sweeps were only 446 s, and a per-call split of the exchange time showed
+85 to 288 s per rank inside `CompleteSends`.  That call waited at the top of every pass
+for *all* of the previous pass's sends to be taken, and since a peer takes them only
+between its own sweeps, every rank ran in loose lockstep with its slowest peer -- an
+imbalance larger than the sweep imbalance this project set out to fix, and one no
+partition could remove.  `MCRankExchange` now gives each posted message set its own
+buffers (`SendStaged` swaps the staging vectors into an in-flight entry) and retires
+them lazily (`RetireSends`, non-blocking); `CompleteSends` remains for termination and
+for the quiescent point before a rebuild.  That alone took the plain run to 453 s wall
+with the same sweep times, leaving the wall within 7 s of the busiest rank's sweeps,
+which is the state in which balancing sweeps buys wall time.
+
+Measured after it, same deck and rank count:
+
+| | busiest rank / fair share | transport wall |
+|---|---|---|
+| plain | 1.28 | 453 s |
+| balanced (`automatic`, mid-transport checks) | 1.17 | 472 s |
+
+So the balancer does what it claims -- 1.28 to 1.17, two redistributions moving 71 and
+110 of 464 blocks -- and still loses on wall time here, because each redistribution
+costs 6.5 to 13 s of rebuild on a 460 MB-per-rank mesh and the transport is only ~470 s
+long.  At 200k photons the redistributions are 4 percent of the run; at the production
+1e8 photons the same transport is hundreds of times longer while the rebuild cost is
+unchanged, so the gain should carry.  Memory is the other cost: 4.2 GB per rank peak
+against 2.4 GB plain, from payloads in flight during a 110-block move.
+
+Also fixed while here: the hand-off functions (`SendToNeighbors`,
+`ReceiveFromNeighbors`, `AcceptPhotons`) now charge their time to the block, folded into
+its cost with its sweeps, so the balancer sees photon exchange as well as pusher work;
+and `RebuildAfterRedistribution` frees departed blocks before constructing arrivals, to
+keep the peak nearer one copy.  The report gained the transport wall, the per-rank idle
+and exchange times, and the per-call exchange split.
+
+Regression after these changes: Kerr-Schild list byte-identical; thin deck 4 ranks
+plain against balanced agree to 4e-13; snake atmosphere 4 ranks 1.68 -> 1.19 with
+spectra within noise.
+
+L5 detail follows.  L5 as built: (i) `OptimalContiguousPartition`
+(`mcpartition.cpp`), the exact minimum of the largest range sum over contiguous
+partitions by bisection on the capacity with a linear sweep, used by the mesh through
+`MonteCarlo::Partition` whenever the module is present (`<montecarlo> lb_partition =
+optimal|greedy`) and by the prediction guard, so proposal and execution agree; checked
+against a dynamic-programming optimum on 20000 random cases with no failure.  Effect:
+the 16-rank thin case, whose greedy proposals were always worse, now redistributes
+(1.29 -> 1.25, close to its granularity ceiling); the snake atmosphere goes 1.61 -> 1.10
+with two redistributions costing 0.11 s and 0.08 s each.  (ii) `<montecarlo>
+lb_cost_decay` (default 1, i.e. off) scales the accumulated costs after every check that
+keeps the layout, for runs where recency should count.  (iii) `<montecarlo> lb_initial
+= photons` balances the first transport on each block's share of the photons to emit
+when no cost file exists; informative only with equal-weight emission (thin deck at 16
+ranks, equal weight: 3.97 -> 3.35), uniform and useless otherwise.  (iv) Each
+redistribution reports its own wall cost on rank 0.  L5c, the layout-invariant
+`DistributeSamples`, was not done: the tests have not needed it.  Defaults for the
+window keys await L6.  L4 as built, in `TransportAsync`: the reduction carries a draining flag and
 the photons finished so far; each time `<montecarlo> lb_check_fraction` (default 0.1)
 of the transport's photons have finished since the last check, a nonblocking gather of
 the block costs is posted on the next completed reduction (a blocking collective there

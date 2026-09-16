@@ -398,6 +398,13 @@ void Mesh::RedistributeAndRefineMeshBlocks(ParameterInput *pin, int ntot) {
   }
 
   // Step 2. Calculate new load balance
+#if MONTE_CARLO_ENABLED
+  // The Monte Carlo module supplies its partition when it is present (the optimal
+  // contiguous one by default); the greedy one below stays for every other build.
+  if (pmc != nullptr)
+    pmc->Partition(newcost, ntot, newrank, nslist, nblist);
+  else
+#endif
   CalculateLoadBalance(newcost, newrank, nslist, nblist, ntot);
 
   int nbs = nslist[Globals::my_rank];

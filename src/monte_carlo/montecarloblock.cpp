@@ -63,6 +63,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   next=nullptr;
   lb_time = 0.0;
   lb_nstep = 0;
+  lb_pending = 0.0;
 
   // SWD: eliminate some or all of these?
   // set local flags based on monte_carlo

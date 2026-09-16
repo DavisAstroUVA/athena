@@ -26,6 +26,7 @@
 
 // C++ headers
 #include <complex>
+#include <deque>
 #include <vector>
 
 // Athena++ headers
@@ -95,11 +96,19 @@ class MCRankExchange {
   //! that may have nothing to say this round.
   int DrainIncoming();
 
-  //! Wait for the posted sends to release their buffers, so Reset can reuse them, taking
-  //! delivery of anything that arrives while waiting.  A large send completes only once
-  //! the peer has matched it, so this has to keep receiving or two ranks each waiting on
-  //! their own sends would wait on each other forever.  It is still not a synchronization
-  //! point: termination is decided from the counters below, never from send completion.
+  //! Release the buffers of every posted send that has completed, and return; nothing
+  //! waits.  Each SendStaged moves its buffers into an in-flight entry of their own, so
+  //! the next sweep never has to wait for a peer to take the last one.  Before this, the
+  //! loop waited for all sends at the top of every pass, and since a peer receives only
+  //! between its own sweeps, every rank ran in loose lockstep with its slowest peer: on
+  //! the XRB snapshot at 16 ranks that wait was 85 to 290 s of a 550 s transport, more
+  //! than the sweep imbalance itself.
+  void RetireSends();
+
+  //! Wait for every posted send, taking delivery of anything that arrives while waiting.
+  //! A large send completes only once the peer has matched it, so this has to keep
+  //! receiving or two ranks each waiting on their own sends would wait on each other
+  //! forever.  Used at termination and at a quiescent point, never inside the loop.
   void CompleteSends();
 
   //! Cumulative photons handed to other ranks and taken from them.  Termination needs a
@@ -140,13 +149,21 @@ class MCRankExchange {
   int nbtotal_at_build_;          //!> global block count
   std::vector<int> gid_at_build_; //!> gid of each local block, in lid order
 
-  // Buffers for the probe-driven path.  The int stream is sent as one message that leads
-  // with the header, so a receiver that has probed it can work out the length of every
-  // other stream from its contents and post exact receives for them.
-  std::vector<std::vector<int> > smsg_;
+  // The probe-driven path.  The int stream is sent as one message that leads with the
+  // header, so a receiver that has probed it can work out the length of every other
+  // stream from its contents and post exact receives for them.  Each posted message set
+  // owns its buffers until RetireSends finds it complete; a deque keeps their addresses
+  // stable while more are appended.
+  struct InFlight {
+    std::vector<int> msg;
+    std::vector<Real> real;
+    std::vector<std::complex<Real> > cplx;
 #ifdef MPI_PARALLEL
-  std::vector<MPI_Request> sreq_;
+    MPI_Request req[3];
 #endif
+    int nreq;
+  };
+  std::deque<InFlight> inflight_;
 
   // Staging, one entry per peer.  The header holds (lid, bufid, npar) per contributing
   // block; the three streams hold the photon properties back to back in that order.

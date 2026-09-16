@@ -239,7 +239,7 @@ public:
   Real tmax;   // Maximum evolution time
   Real weightratio; // used for setting minimum weight for absorption
 
-  int ntype; // number of emission types 
+  int ntype; // number of emission types
   int64_t nsamp;  // total number of photons to integrate per timestep/output
   int64_t *nsamptype; // number of sample per type
   int nblocal; // number of montecarloblocks on this process
@@ -330,6 +330,16 @@ public:
   void ReportLoadBalance(int etype);
   //! this rank's own sweep time prior to move
   double lb_rank_time;
+  //! wall-clock seconds of the current emission type's transport
+  double lb_transport_wall;
+  //! this rank's wall time inside the asynchronous loop spent in passes with no
+  //! work to sweep, and in the exchange
+  double lb_idle_time, lb_exchange_time;
+  //! the exchange time split by call: completing the previous sends, taking delivery
+  //! from other ranks, flushing receive buffers into blocks, the same-rank hand-off
+  //! sweep (ExchangeLocal), and posting the staged sends
+  double lb_t_complete, lb_t_drain_in, lb_t_drain_arr, lb_t_local, lb_t_send;
+  long lb_passes;
 
   //! the fluid-derived arrays of one block, from its MeshBlock's primitives: density,
   //! temperature, number density, free-free prefactor, frame, scalars, field.
@@ -388,16 +398,30 @@ public:
   //! The mesh tests whether the current layout is imbalanced, not whether its greedy
   //! contiguous partition improves on it, and with few blocks per rank it can be worse.
   Real lb_min_gain;
+  //! move every block's pending hand-off time into its cost, its window time and this
+  //! rank's time.  Called before any of them is read.
+  void FoldPendingCosts();
   //! this rank's blocks' costs as the balancer will see them (aged as it ages them),
   //! written into a gid-indexed list that a gather then completes
-  void FillLocalBalancerCosts(std::vector<double> &cost) const;
+  void FillLocalBalancerCosts(std::vector<double> &cost);
   //! the same, gathered (blocking collective)
-  void GatherBalancerCosts(std::vector<double> &cost) const;
+  void GatherBalancerCosts(std::vector<double> &cost);
   //! would the new partition improve on current layout
   bool WorthwhileFromCosts(const std::vector<double> &cost) const;
   //! gather and judge, in one blocking step
-  bool RedistributionWorthwhile() const;
-  void WriteCostFile() const;
+  bool RedistributionWorthwhile();
+  //! partition of a cost list the mesh will use when it redistributes
+  void Partition(double *cost, int nb, int *rlist, int *slist, int *nlist) const;
+  bool lb_partition_optimal;
+  //! <montecarlo> lb_cost_decay: after every balance check the accumulated block costs
+  //! are scaled by this. 1 (default) keeps everything since the last redistribution.
+  Real lb_cost_decay;
+  void DecayCosts();
+  //! <montecarlo> lb_initial = none|photons: with photons and no cost file, the first
+  //! transport is balanced on each block's share of the photons to emit before any is
+  //! moved in equal_weight emission scheme
+  bool lb_initial_photons;
+  void WriteCostFile();
   bool ReadCostFile();
 
  private:
@@ -498,6 +522,9 @@ public:
   int64_t nphremain; // total number of photons to integrate
   double lb_time; // transport cost for this block
   int64_t lb_nstep;
+  //! hand-off time charged by Photon's exchange functions since the last fold; see
+  //! MonteCarlo::FoldPendingCosts
+  double lb_pending;
   //! everything of this block that has to move with it and cannot be rebuilt from the
   //! fluid: resident photons, the accumulated moments and source terms, the emission
   //! array and cursor, counters, weights, the random generator

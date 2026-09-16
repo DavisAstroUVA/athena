@@ -16,6 +16,19 @@
 #include "../athena_arrays.hpp"
 #include "mcexchange.hpp"
 
+namespace {
+//! Charges the time a hand-off function spends to its block's pending load-balancing
+//! cost, which MonteCarlo folds into the block's cost with its sweeps.  Photons crossing
+//! block boundaries are a large part of the transport time on a mesh of many blocks
+//! and it falls on the blocks the photons leave and enter
+struct HandoffTimer {
+  MonteCarloBlock *pmcb;
+  double t0;
+  explicit HandoffTimer(MonteCarloBlock *b) : pmcb(b), t0(MonteCarlo::LoadBalanceClock()) {}
+  ~HandoffTimer() { pmcb->lb_pending += MonteCarlo::LoadBalanceClock() - t0; }
+};
+} // namespace
+
 // class variable initialization
 bool Photon::initialized = false;
 MCPolarization Photon::polarized = MCPOL_NONE;
@@ -460,6 +473,7 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
 //! \brief sends photons outside boundary to the buffers of neighboring meshblocks.
 
 void Photon::SendToNeighbors() {
+  HandoffTimer timer(pmy_mcb);
   const int IS = pmy_block->is;
   const int IE = pmy_block->ie;
   const int JS = pmy_block->js;
@@ -706,6 +720,7 @@ void Photon::ApplyPeriodicBoundary(Real &x1, Real &x2, Real &x3, int k) {
 //!        if all receives are completed.
 
 bool Photon::ReceiveFromNeighbors() {
+  HandoffTimer timer(pmy_mcb);
   bool flag = true;
 
   for (int i = 0; i < pbval_->nneighbor; ++i) {
@@ -851,6 +866,7 @@ void Photon::CollectPeerRanks(std::vector<bool> &seen) const {
 
 void Photon::AcceptPhotons(int bufid, const int *ib, const Real *rb,
                            const std::complex<Real> *cb, int npar) {
+  HandoffTimer timer(pmy_mcb);
   if (npar <= 0) return;
   ParticleBuffer& recv = recv_[bufid];
   // Append rather than overwrite.  Several rounds of local transport can happen before
