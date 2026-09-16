@@ -242,6 +242,8 @@ public:
   int ntype; // number of emission types
   int64_t nsamp;  // total number of photons to integrate per timestep/output
   int64_t *nsamptype; // number of sample per type
+  //! Counts of actual photons run and scatterings performed, globally
+  int64_t nphot_run, nscat_run;
   int nblocal; // number of montecarloblocks on this process
   int nbtotal; // total number of montecarloblocks
   int nout;  // number of outputs
@@ -274,6 +276,9 @@ public:
   MCPolarization polarized;// how much of the polarization state is tracked
   bool acceleration;  // use MRW acceleration
   bool computedmin;
+  //! <montecarlo>/compute_dmin: build MCCoord::dmin even without MRW acceleration, for a
+  //! user hook that needs the smallest cell width
+  bool compute_dmin;
   bool time_acc;  // use MRW acceleration with time limit
   bool raytrace_flag; // Will trace photons rather than scatter
   bool general_pusher_flag; // Use integration for photon movement
@@ -335,9 +340,9 @@ public:
   //! this rank's wall time inside the asynchronous loop spent in passes with no
   //! work to sweep, and in the exchange
   double lb_idle_time, lb_exchange_time;
-  //! the exchange time split by call: completing the previous sends, taking delivery
+  //! exchange time split by call: completing the previous sends, taking delivery
   //! from other ranks, flushing receive buffers into blocks, the same-rank hand-off
-  //! sweep (ExchangeLocal), and posting the staged sends
+  //! sweep, and posting the staged sends
   double lb_t_complete, lb_t_drain_in, lb_t_drain_arr, lb_t_local, lb_t_send;
   long lb_passes;
 
@@ -410,16 +415,21 @@ public:
   bool WorthwhileFromCosts(const std::vector<double> &cost) const;
   //! gather and judge, in one blocking step
   bool RedistributionWorthwhile();
-  //! partition of a cost list the mesh will use when it redistributes
+  //! the partition of a cost list the mesh will use when it redistributes: the
+  //! module's optimal contiguous one under <montecarlo> lb_partition = optimal (the
+  //! default), the mesh's greedy CalculateLoadBalance under greedy.  Called by the mesh
+  //! from RedistributeAndRefineMeshBlocks and by the prediction guard, so the two agree.
   void Partition(double *cost, int nb, int *rlist, int *slist, int *nlist) const;
   bool lb_partition_optimal;
   //! <montecarlo> lb_cost_decay: after every balance check the accumulated block costs
-  //! are scaled by this. 1 (default) keeps everything since the last redistribution.
+  //! are scaled by this, so what the next check sees leans toward the recent window.
+  //! 1 (the default) keeps everything since the last redistribution.
   Real lb_cost_decay;
   void DecayCosts();
   //! <montecarlo> lb_initial = none|photons: with photons and no cost file, the first
   //! transport is balanced on each block's share of the photons to emit before any is
-  //! moved in equal_weight emission scheme
+  //! moved.  Informative for equal-weight emission, where that share follows the
+  //! emissivity; uniform, and so useless, for the variable-weight scheme.
   bool lb_initial_photons;
   void WriteCostFile();
   bool ReadCostFile();

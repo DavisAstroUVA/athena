@@ -226,9 +226,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   }
 
   // Set up photon movement and initialization methods
-  computedmin = false;
-  if (acceleration)
-    computedmin = true;
+  computedmin = acceleration || pmy_mc->compute_dmin;
   pmy_mc->computedmin = computedmin;
   tetrads = true;
   // Number of cells including ghosts, for the standalone (pmb == nullptr) constructors.

@@ -31,6 +31,7 @@
 #include "../inputs/hdf5_reader.hpp"
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"
+#include "../scalars/scalars.hpp"
 #include "mcgrid.hpp"
 #include "mcsnapshot.hpp"
 
@@ -392,6 +393,33 @@ void MCReadSnapshotBlock(MeshBlock *pmb, ParameterInput *pin, int max_blocks_per
       HDF5ReadRealArray(filename.c_str(), bsrc[n]->dataset.c_str(), 5, start_file,
                         count_file, 4, start_mem, count_mem, pmb->pfield->bcc,
                         collective);
+      ++nread;
+    }
+  }
+
+  // Passive scalars.  Athena++ writes the concentration r_n = s_n/rho, which is exactly
+  // what PassiveScalars::r holds, so the values go straight in and the problem generator
+  // forms s = r*rho when it builds the conserved state.  A snapshot without them is not an
+  // error as a build can carry scalars the file never had, but the user is nofified.
+  if (NSCALARS > 0) {
+    for (int n = 0; n < NSCALARS; ++n) {
+      const std::string rname = "r" + std::to_string(n);
+      const std::string key = "var_scalar" + std::to_string(n);
+      const char *cand[1] = {rname.c_str()};
+      VarRef sn = cat.Find(cand, 1, pin, key.c_str());
+      if (!sn.found) {
+        if (Globals::my_rank == 0 && pmb->lid == 0) {
+          std::cout << "  scalar " << rname << " is not in " << filename
+                    << "; left as the problem generator set it" << std::endl;
+        }
+        continue;
+      }
+      if (Globals::my_rank == 0 && pmb->lid == 0)
+        std::cout << "  scalar " << n << " = " << sn.name << std::endl;
+      start_file[0] = sn.index;
+      start_mem[0] = n;
+      HDF5ReadRealArray(filename.c_str(), sn.dataset.c_str(), 5, start_file, count_file,
+                        4, start_mem, count_mem, pmb->pscalars->r, collective);
       ++nread;
     }
   }

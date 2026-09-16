@@ -159,6 +159,7 @@ Python tools are in `vis/python/montecarlo/`. Add this directory to `PYTHONPATH`
 - `make_spectrum.py` — CLI wrapper around `athena_mc.make_spectrum()`
 - `plot_spectrum.py` — plots spectra
 - `make_spectrum_single.py` — single-file variant (untracked, in progress)
+- `scattering_histogram.py` — distribution of the per-photon scattering count, read from whichever user variable a problem generator copied `nscp` into (`--nscat-col`, default 0; `mc_readhdf*` use 2). Reports how concentrated the scatterings are in the worst photons, which is the number that matters in a resonant-line run where the mean is set by a handful of photons
 
 Photon list files use a custom binary format read by `athena_mc.read_list_generator()`.
 

@@ -85,6 +85,12 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   boosts = pin->GetOrAddBoolean("montecarlo","boosts",false);
   polarized = GetMCPolarizationFlag(pin->GetOrAddString("montecarlo","polarized","none"));
   acceleration = pin->GetOrAddBoolean("montecarlo","acceleration",false);
+  // MCCoord::dmin, the smallest cell width, is built for the MRW acceleration.  A user
+  // hook can want it for its own reasons -- mc_hotjupiter's core skipping compares the
+  // cell's comoving line optical depth against a threshold -- and reading an array that
+  // was never allocated segfaults, so a problem generator that needs it asks here rather
+  // than turning MRW on as a side effect.
+  compute_dmin = pin->GetOrAddBoolean("montecarlo","compute_dmin",false);
   time_acc = pin->GetOrAddBoolean("montecarlo","time_acc",false);
   verbose = pin->GetOrAddBoolean("montecarlo", "verbose", true);
   lb_report = pin->GetOrAddBoolean("montecarlo", "lb_report", false);
@@ -107,6 +113,8 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   frame_tag = general_pusher_flag ? "normal" : "lab";
   nuser_var = 0; // photon user variables to zero
   nuser_mom = 0; // user moments
+  nphot_run = 0; // what the run actually transports, filled in RunMonteCarlo
+  nscat_run = 0;
 
   // Set mininmum weight if using weighting for absorption
   weightratio = pin->GetOrAddReal("montecarlo","minweight",1.0e-20);
@@ -952,7 +960,13 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
     emission_face[0] = SetEmissionSurface(pin->GetString("montecarlo","emission_face"));
     emission_array = true; // allocate memory for array
   } else if (emission_flag ==  MULTI) {
-    // GetEmission and other arrays must be set in InitUserMonteCarloData
+    // GetEmission and other arrays must be set in InitUserMonteCarloData.  nsamp is summed
+    // there over the types the problem generator turns on, so it has to start at zero:
+    // every other branch above assigns it, this one is the only one that accumulates, and
+    // leaving it uninitialized put garbage into the end-of-run rate and into the
+    // nsrun/nsamp moment normalization in MCOutput.
+    nsamp = 0;
+    for (int n=0; n<ntype; ++n) nsamptype[n] = 0;
     emission_array = pin->GetOrAddBoolean("montecarlo","emission_array",true);
   }
 
@@ -1281,6 +1295,10 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&ntot,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
   #endif
+    // Global totals for the whole run, for the end-of-run cost report.  These are the
+    // reduced values, so every rank holds the same number and rank 0 can print it.
+    nphot_run += ntot;
+    nscat_run += nscat;
     if (Globals::my_rank == 0) {
       std::cout  << "ntot: " << ntot
                 << " nesc: " << nesc

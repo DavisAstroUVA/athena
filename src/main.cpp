@@ -23,6 +23,7 @@
 #include <csignal>    // ISO C/C++ signal() and sigset_t, sigemptyset() POSIX C extensions
 #include <cstdint>    // int64_t
 #include <cstdio>     // sscanf()
+#include <chrono>     // steady_clock
 #include <cstdlib>    // strtol
 #include <ctime>      // clock(), CLOCKS_PER_SEC, clock_t
 #include <exception>  // exception
@@ -499,6 +500,10 @@ int main(int argc, char *argv[]) {
   }
 
   clock_t tstart = clock();
+  // Wall time as well as CPU time.  A Monte Carlo run spends part of its CPU time spinning
+  // in the termination reductions, so CPU seconds alone neither measure how long the run
+  // took nor how much work it did; both numbers are reported at the end.
+  std::chrono::steady_clock::time_point wall_start = std::chrono::steady_clock::now();
 #ifdef OPENMP_PARALLEL
   double omp_start_time = omp_get_wtime();
 #endif
@@ -672,6 +677,21 @@ int main(int argc, char *argv[]) {
   MPI_Allreduce(MPI_IN_PLACE, &mem_sum_kb, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
 #endif
 
+  // Wall and CPU time.  clock() measures this rank's process only, so the rate a rank-0
+  // CPU time implies is not the rate the job achieved; the sum over ranks is what the job
+  // charged and the wall time is how long it took.  Both are collected here, before the
+  // rank-0 print, for the same reason the memory figures are.
+  const double wall_time = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - wall_start).count();
+  clock_t tstop = clock();
+  double cpu_time = (tstop>tstart ? static_cast<double> (tstop-tstart) :
+                     1.0)/static_cast<double> (CLOCKS_PER_SEC);
+  double cpu_time_rank0 = cpu_time;
+  double cpu_time_sum = cpu_time;
+#ifdef MPI_PARALLEL
+  MPI_Allreduce(MPI_IN_PLACE, &cpu_time_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
   if (Globals::my_rank == 0) {
     if (write_fluid_diagnostics) {
       if (SignalHandler::GetSignalFlag(SIGTERM) != 0) {
@@ -700,9 +720,6 @@ int main(int argc, char *argv[]) {
 #ifdef OPENMP_PARALLEL
     double omp_time = omp_get_wtime() - omp_start_time;
 #endif
-    clock_t tstop = clock();
-    double cpu_time = (tstop>tstart ? static_cast<double> (tstop-tstart) :
-                       1.0)/static_cast<double> (CLOCKS_PER_SEC);
     std::uint64_t zonecycles = mbcnt
       *static_cast<std::uint64_t> (pmesh->my_blocks(0)->GetNumberOfMeshBlockCells());
     double zc_cpus = static_cast<double> (zonecycles) / cpu_time;
@@ -711,9 +728,33 @@ int main(int argc, char *argv[]) {
       std::cout << "cpu time used  = " << cpu_time << std::endl;
       std::cout << "zone-cycles/cpu_second = " << zc_cpus << std::endl;
     } else { // Static Monte Carlo output
-      float phot_cpus = static_cast<float> (pmc->nsamp*pmc->nout)/cpu_time;
-      std::cout << std::endl << "cpu time used  = " << cpu_time << std::endl;
-      std::cout << "samples/cpu_second = " << phot_cpus << std::endl;
+      // What the run actually transported, counted as photons were retired, rather than
+      // the number of samples that were asked for: the two differ whenever a photon is
+      // re-emitted, a type emits fewer samples than requested, or a run stops early.
+      // Scatterings are the unit of work in a resonant-line problem, where a single
+      // photon can carry 1e5 of them, so the per-scattering cost is the stable number and
+      // the per-photon cost is only meaningful beside it.
+      const double phot = static_cast<double>(pmc->nphot_run);
+      const double scat = static_cast<double>(pmc->nscat_run);
+      std::cout << std::endl
+                << "wall time used = " << wall_time << std::endl
+                << "cpu time used  = " << cpu_time_sum << " summed over "
+                << Globals::nranks << " rank(s) (" << cpu_time_rank0 << " on rank 0)"
+                << std::endl
+                << "photons transported = " << pmc->nphot_run
+                << ", scatterings = " << pmc->nscat_run << std::endl;
+      if (phot > 0.0) {
+        std::cout << "photons/wall_second = " << phot/wall_time << std::endl
+                  << "cpu_seconds/photon  = " << cpu_time_sum/phot << std::endl;
+      }
+      if (scat > 0.0) {
+        std::cout << "cpu_microseconds/scattering = " << 1.0e6*cpu_time_sum/scat
+                  << std::endl;
+      }
+      const double busy = (wall_time > 0.0 && Globals::nranks > 0)
+                          ? cpu_time_sum/(wall_time*Globals::nranks) : 0.0;
+      std::cout << "cpu/wall per rank   = " << busy
+                << " (1 = every rank busy the whole run)" << std::endl;
     }
     if (mem_max_kb > 0) {
       std::cout << "peak resident memory = " << mem_max_kb/1024.0 << " MB per rank (max), "
