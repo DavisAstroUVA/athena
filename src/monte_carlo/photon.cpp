@@ -16,6 +16,19 @@
 #include "../athena_arrays.hpp"
 #include "mcexchange.hpp"
 
+namespace {
+//! Charges the time a hand-off function spends to its block's pending load-balancing
+//! cost, which MonteCarlo folds into the block's cost with its sweeps.  Photons crossing
+//! block boundaries are a large part of the transport time on a mesh of many blocks
+//! and it falls on the blocks the photons leave and enter
+struct HandoffTimer {
+  MonteCarloBlock *pmcb;
+  double t0;
+  explicit HandoffTimer(MonteCarloBlock *b) : pmcb(b), t0(MonteCarlo::LoadBalanceClock()) {}
+  ~HandoffTimer() { pmcb->lb_pending += MonteCarlo::LoadBalanceClock() - t0; }
+};
+} // namespace
+
 // class variable initialization
 bool Photon::initialized = false;
 MCPolarization Photon::polarized = MCPOL_NONE;
@@ -206,6 +219,42 @@ bool Photon::IsNanTransport(int ip) const {
   return std::isnan(wp[ip]) || std::isnan(x0p[ip]) || std::isnan(x1p[ip]) ||
          std::isnan(x2p[ip]) || std::isnan(x3p[ip]) || std::isnan(k0p[ip]) ||
          std::isnan(k1p[ip]) || std::isnan(k2p[ip]) || std::isnan(k3p[ip]);
+}
+
+//--------------------------------------------------------------------------------------
+//! \fn void Photon::PackAll(std::vector<int> &ib, std::vector<Real> &rb) const
+//! \brief append every resident photon to the two streams, in ParticleBuffer's order
+
+void Photon::PackAll(std::vector<int> &ib, std::vector<Real> &rb) const {
+  if (ncplx > 0) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in Photon::PackAll" << std::endl
+        << "complex photon properties are not packed" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  ib.reserve(ib.size() + static_cast<std::size_t>(npar)*nint);
+  rb.reserve(rb.size() + static_cast<std::size_t>(npar)*(nreal + naux));
+  for (int k=0; k<npar; ++k) {
+    for (int j=0; j<nint; ++j) ib.push_back(intprop[j][k]);
+    for (int j=0; j<nreal; ++j) rb.push_back(rp[j][k]);
+    for (int j=0; j<naux; ++j) rb.push_back(aux[j][k]);
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Photon::UnpackAll(const int *ib, const Real *rb, int n)
+//! \brief append n photons read from the two streams PackAll writes
+
+void Photon::UnpackAll(const int *ib, const Real *rb, int n) {
+  if (n <= 0) return;
+  const int k0 = npar;
+  Resize(k0 + n);
+  for (int k=k0; k<npar; ++k) {
+    for (int j=0; j<nint; ++j) intprop[j][k] = *ib++;
+    for (int j=0; j<nreal; ++j) rp[j][k] = *rb++;
+    for (int j=0; j<naux; ++j) aux[j][k] = *rb++;
+  }
+  EnsureScratch();
 }
 
 //--------------------------------------------------------------------------------------
@@ -424,6 +473,7 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
 //! \brief sends photons outside boundary to the buffers of neighboring meshblocks.
 
 void Photon::SendToNeighbors() {
+  HandoffTimer timer(pmy_mcb);
   const int IS = pmy_block->is;
   const int IE = pmy_block->ie;
   const int JS = pmy_block->js;
@@ -670,6 +720,7 @@ void Photon::ApplyPeriodicBoundary(Real &x1, Real &x2, Real &x3, int k) {
 //!        if all receives are completed.
 
 bool Photon::ReceiveFromNeighbors() {
+  HandoffTimer timer(pmy_mcb);
   bool flag = true;
 
   for (int i = 0; i < pbval_->nneighbor; ++i) {
@@ -815,6 +866,7 @@ void Photon::CollectPeerRanks(std::vector<bool> &seen) const {
 
 void Photon::AcceptPhotons(int bufid, const int *ib, const Real *rb,
                            const std::complex<Real> *cb, int npar) {
+  HandoffTimer timer(pmy_mcb);
   if (npar <= 0) return;
   ParticleBuffer& recv = recv_[bufid];
   // Append rather than overwrite.  Several rounds of local transport can happen before

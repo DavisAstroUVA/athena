@@ -107,6 +107,23 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   EnrollUserWorkInMove(InsideHorizon);
   
   emission_type = pin->GetOrAddString("montecarlo","emission","none");
+  // The opacity and emission tables of the table path are file-scope arrays indexed by
+  // local block id and sized to the blocks this rank starts with, so they do not survive
+  // a redistribution.  Refuse the combination until they are rebuilt in
+  // UserWorkAfterRebalance, rather than read another block's table.
+  if (emission_type != "freefree") {
+    const bool balancing =
+        pin->GetOrAddString("loadbalancing", "balancer", "default") != "default"
+        || pin->GetOrAddString("montecarlo", "lb_test_repack", "none") != "none";
+    if (balancing) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo::InitUserMonteCarloData" << std::endl
+          << "mc_readhdf_gr keeps per-block opacity tables that are not rebuilt after a"
+          << " redistribution; load balancing is supported with emission = freefree only"
+          << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
   if (emission_type == "freefree") {
     EnrollUserGetNumberDensity(GetNelFloor);
     return;

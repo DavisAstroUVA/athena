@@ -1,7 +1,148 @@
 # Load balancing Monte Carlo transport on the Athena++ mesh: assessment and plan
 
-Status: **assessment written 2026-09-13, revised the same day so that one mechanism
-serves static and dynamic runs; nothing implemented.**  The first target is the static
+Status: **L0 to L6 done 2026-09-14/16 on `load_balance`.**  L6, the XRB snapshot at 16
+ranks (200k photons, polarized Compton, free-free, asynchronous transport), turned up
+something the small decks could not: the transport wall was 553 to 564 s while the
+busiest rank's sweeps were only 446 s, and a per-call split of the exchange time showed
+85 to 288 s per rank inside `CompleteSends`.  That call waited at the top of every pass
+for *all* of the previous pass's sends to be taken, and since a peer takes them only
+between its own sweeps, every rank ran in loose lockstep with its slowest peer -- an
+imbalance larger than the sweep imbalance this project set out to fix, and one no
+partition could remove.  `MCRankExchange` now gives each posted message set its own
+buffers (`SendStaged` swaps the staging vectors into an in-flight entry) and retires
+them lazily (`RetireSends`, non-blocking); `CompleteSends` remains for termination and
+for the quiescent point before a rebuild.  That alone took the plain run to 453 s wall
+with the same sweep times, leaving the wall within 7 s of the busiest rank's sweeps,
+which is the state in which balancing sweeps buys wall time.
+
+Measured after it, same deck and rank count:
+
+| | busiest rank / fair share | transport wall |
+|---|---|---|
+| plain | 1.28 | 453 s |
+| balanced (`automatic`, mid-transport checks) | 1.17 | 472 s |
+
+So the balancer does what it claims -- 1.28 to 1.17, two redistributions moving 71 and
+110 of 464 blocks -- and still loses on wall time here, because each redistribution
+costs 6.5 to 13 s of rebuild on a 460 MB-per-rank mesh and the transport is only ~470 s
+long.  At 200k photons the redistributions are 4 percent of the run; at the production
+1e8 photons the same transport is hundreds of times longer while the rebuild cost is
+unchanged, so the gain should carry.  Memory is the other cost: 4.2 GB per rank peak
+against 2.4 GB plain, from payloads in flight during a 110-block move.
+
+Also fixed while here: the hand-off functions (`SendToNeighbors`,
+`ReceiveFromNeighbors`, `AcceptPhotons`) now charge their time to the block, folded into
+its cost with its sweeps, so the balancer sees photon exchange as well as pusher work;
+and `RebuildAfterRedistribution` frees departed blocks before constructing arrivals, to
+keep the peak nearer one copy.  The report gained the transport wall, the per-rank idle
+and exchange times, and the per-call exchange split.
+
+Regression after these changes: Kerr-Schild list byte-identical; thin deck 4 ranks
+plain against balanced agree to 4e-13; snake atmosphere 4 ranks 1.68 -> 1.19 with
+spectra within noise.
+
+L5 detail follows.  L5 as built: (i) `OptimalContiguousPartition`
+(`mcpartition.cpp`), the exact minimum of the largest range sum over contiguous
+partitions by bisection on the capacity with a linear sweep, used by the mesh through
+`MonteCarlo::Partition` whenever the module is present (`<montecarlo> lb_partition =
+optimal|greedy`) and by the prediction guard, so proposal and execution agree; checked
+against a dynamic-programming optimum on 20000 random cases with no failure.  Effect:
+the 16-rank thin case, whose greedy proposals were always worse, now redistributes
+(1.29 -> 1.25, close to its granularity ceiling); the snake atmosphere goes 1.61 -> 1.10
+with two redistributions costing 0.11 s and 0.08 s each.  (ii) `<montecarlo>
+lb_cost_decay` (default 1, i.e. off) scales the accumulated costs after every check that
+keeps the layout, for runs where recency should count.  (iii) `<montecarlo> lb_initial
+= photons` balances the first transport on each block's share of the photons to emit
+when no cost file exists; informative only with equal-weight emission (thin deck at 16
+ranks, equal weight: 3.97 -> 3.35), uniform and useless otherwise.  (iv) Each
+redistribution reports its own wall cost on rank 0.  L5c, the layout-invariant
+`DistributeSamples`, was not done: the tests have not needed it.  Defaults for the
+window keys await L6.  L4 as built, in `TransportAsync`: the reduction carries a draining flag and
+the photons finished so far; each time `<montecarlo> lb_check_fraction` (default 0.1)
+of the transport's photons have finished since the last check, a nonblocking gather of
+the block costs is posted on the next completed reduction (a blocking collective there
+would deadlock against a rank waiting in `CompleteSends`); when it lands every rank
+judges the same list, and if a better partition exists enters draining, transporting
+nothing but still taking delivery and completing sends; once a completed reduction
+shows every rank draining and the sent and received totals equal and unchanged from the
+one before, all ranks make the same blocking balance call, and the termination history
+restarts.  A reduction-count cadence was tried first and rejected: reductions complete
+far more often than a synchronous round, giving 1123 checks in one snake transport.
+Verified: thin deck at 4 ranks, forced and automatic, one redistribution each with
+spectra equal to the plain run to 1e-12; 16 ranks, four checks, layout kept; snake
+atmosphere on `gr_user` at 4 ranks, forced, two redistributions of 9 and 11 blocks with
+photons resident, counts conserved, spectra within noise; automatic on the same deck,
+one redistribution of 6 blocks, busiest rank 1.62 -> 1.04 times the fair share, wall
+53.5 s -> 48.2 s.  No hang or false termination in any run.  L3 as built: a balance point after `FinishRound` in the synchronous loop,
+every `<montecarlo> lb_check_interval` rounds (0 disables), at most
+`lb_max_per_transport` redistributions per transport and at least `lb_min_window`
+rounds after one; the same prediction guard and mesh call as between intervals
+(`BalanceNow`), rank exchange required.  Verified with photons resident: thin deck at 4
+ranks, forced moves every third round and every round (17 to 21 blocks each time),
+spectra equal to the plain run to 1e-11 and 1e-7 because each block's RNG stream moves
+with it; snake atmosphere on `gr_user` at 4 ranks with user moments, six forced
+redistributions of 9 to 11 blocks inside one transport, counts conserved, spectra within
+noise; automatic mode on the same deck, whose real imbalance is 1.62, redistributed six
+times inside the transport, ended with the busiest rank at 1.46 times the fair share,
+and finished in 46.7 s wall against 54.0 s plain, a 13 percent gain on a transport of
+only about 25 rounds.  The report's
+per-rank totals are now the time each rank actually spent, since a moved block carries
+its window time with it.  At 16 ranks the 3-to-1 test pattern gives the greedy
+partitioner no better cut at two blocks per rank, so the forced runs there move nothing
+and the guard says so.  L2d was run on a dynamic variant of the thin spherical-polar deck
+(`dynamic = true`, `tmax` large, six hydro cycles, four ranks) rather than the
+hot-Jupiter deck, which does not finish a cycle in useful time at any photon count:
+forced moves of 17 to 21 blocks every cycle through the mesh's own per-cycle call with
+counts conserved and spectra within noise; `balancer = automatic` (hydro time plus
+transport time) 1.23 -> 1.09 after one move and then held.  The prediction guard is
+shared with dynamic runs: when the mesh would choose a partition that is no better, the
+module holds the mesh's cycle counter one short of the interval so the check waits a
+cycle, which removed the rebuild-to-an-identical-layout the mesh otherwise did every
+cycle.  Two pre-existing dynamic-mode defects were found and fixed in passing:
+`ResetMoments` zeroed only the lab array, which is unallocated when just user moments
+are enrolled (a segfault at the top of every dynamic cycle), and left the other frames
+accumulating across cycles; and `Photon::ClearBoundary` was called for static runs only,
+so a dynamic run with more than one block per rank hung at its first same-rank hand-off.  L2 as built: `MonteCarlo::BalanceStatic`
+at the top of `RunMonteCarlo` hands control to the mesh's balancer under
+`<loadbalancing> balancer = automatic|manual`, `tolerance`, `interval` (set
+`interval = 1` to consider every output interval); a prediction guard runs the mesh's
+partitioner on a copy first and redistributes only if the busiest rank improves by
+`<montecarlo> lb_min_gain` (default 0.05), because the greedy contiguous partition can
+be worse than the current layout at few blocks per rank (the thin deck at 16 ranks,
+two blocks per rank, oscillated 1.26 -> 1.59 -> 1.43 -> 1.59 without it and holds at
+1.28 with it; a better partitioner is the lever there, section L5); forced moves for
+tests via `<montecarlo> lb_test_costs = alternate` with `balancer = manual`;
+`<loadbalancing> cost_file` written after every transport and read at startup, in
+which case the first transport is already balanced.  Measured on the thin deck: 4
+ranks 1.21 -> 1.08 after moving 3 blocks, then held; forced moves of 17 to 29 blocks
+per interval at 4 and 16 ranks with counts conserved and spectra within Poisson noise
+of the plain runs (max |chi| 3.5, 0.14 percent of bins above 3); cost-file run starts
+at 1.08.  Note that under `automatic` the mesh accumulates `MeshBlock::cost_` from one
+redistribution to the next rather than per interval (upstream semantics), so between
+redistributions the costs are "since the last move"; harmless for the ratios.  L1
+as built: `MonteCarloBlock::PackForTransfer`/`UnpackFromTransfer` with `Photon::PackAll`
+and `MCRandom::SaveState`; `Mesh::pmc` and the two hooks in
+`RedistributeAndRefineMeshBlocks` calling `PackDeparting` and
+`RebuildAfterRedistribution`; `RelinkAll`; `UserWorkAfterRebalance`; the table-mode
+guard in `mc_readhdf_gr`.  Test knob `<montecarlo> lb_test_repack = local|mesh`: on
+the Kerr-Schild shell (one rank, two intervals) and the thin spherical-polar deck (four
+ranks) both modes give photon lists and spectra **byte-identical** to the plain run,
+so pack, unpack, relink, RNG carry and both hooks are exact; the mesh mode also showed
+the inversion at `Initialize(2)` to be idempotent on already round-tripped primitives.
+The cross-rank payload path is first exercised by L2b's forced moves.  L0d on `edd_survey.full.00600`, 16 ranks, 200k
+photons, polarized Compton, free-free: transport 5740 s summed over ranks, busiest rank
+1.29 times the fair share, costliest block 0.116 times the fair share (29 blocks per
+rank), 1.35 us per pusher step, 29 ms per photon at 198 scatterings each.  So at 16
+ranks balancing can recover up to 29 percent and the granularity ceiling is far away;
+at 64 ranks (7 blocks per rank) the ceiling rises to about 0.46 and the imbalance will
+be larger, which is the production case to measure in L6.  Also seen: 2.8 percent of
+photons retired by `capmove = 50000` in that deck (`nrem`), which is energy lost from
+the outputs and worth a look independent of this plan.  Gate results after L0: KS
+shell list byte-identical, poltest, kerr_frames and the 16-rank disk atmosphere pass;
+block timers sum to the run's CPU time within 0.3 percent on one rank.
+
+Assessment written 2026-09-13, revised the same day so that one mechanism serves
+static and dynamic runs.  The first target is the static
 (post-processing) Monte Carlo run on a mesh whose block tree does not change: uniform,
 static mesh refinement, or a tree replayed from an athdf snapshot.  Dynamic (coupled)
 runs use the same mechanism with a smaller payload (section 3.6); adaptive refinement

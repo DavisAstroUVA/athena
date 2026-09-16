@@ -43,7 +43,8 @@ const char *GetMCSnapshotVarsName(MCSnapshotVars v);
 
 // Fill this block's primitives from the snapshot named by <problem>/input_filename,
 // falling back to <montecarlo>/grid_from_file.  Fills pfield->bcc as well when the build
-// has magnetic fields and the file carries a cell-centred field.  Does not convert to
+// has magnetic fields and the file carries a cell-centred field, and pscalars->r when the
+// build has passive scalars and the file carries r0, r1, ...  Does not convert to
 // conserved variables: the caller does that once it has finished with the primitives.
 //
 // max_blocks_per_rank is the largest number of MeshBlocks held by any rank.  It is only

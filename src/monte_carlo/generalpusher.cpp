@@ -207,6 +207,7 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
     // calls and blocks, which is what it takes to bound a flight; it is reset at each
     // scattering, in TransferPhotonsOnBlock.
     pphot->nmvp[ip] = nmv0 + iter;
+    pmy_mcb->lb_nstep += iter;
     if (capmove > 0 && pphot->nmvp[ip] >= capmove &&
         (pphot->statp[ip] == EVOLVING || pphot->statp[ip] == BUFFERED))
       pphot->statp[ip] = REMOVED;
