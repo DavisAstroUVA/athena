@@ -358,12 +358,12 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   // Photon user variables for incident and outgoing direction vector and position
   nuser_var = 2;
 
-  // Enroll user functions for handling MC trnasport
+  // Enroll user functions for handling MC transport
+  EnrollUserScatteringFunction(ResonantScattering);
+  EnrollUserOpacityFunction(ResonantScatteringOpacity, false);
   flag_lya_abs = pin->GetOrAddBoolean("problem", "lya_abs", false);
   if (!flag_lya_abs) {
     EnrollUserOpacityFunction(BoundFreeAbsorptionOpacity, true);
-    EnrollUserOpacityFunction(ResonantScatteringOpacity, false);
-    EnrollUserScatteringFunction(ResonantScattering);
   } else {
     EnrollUserOpacityFunction(ChooseAbsorptionOpacity, true);
   }
@@ -1605,6 +1605,9 @@ Real GetProjectedArea(MonteCarloBlock *pmcb, int k, int j, int i) {
 }
 
 
+/*
+ * Returns projected area*dOmega for finite star emissivity calculation
+*/
 Real GetProjectedAreaOmegaFiniteStar(MonteCarloBlock *pmcb, int k, int j, int i) {
   Coordinates *pco = pmcb->pmy_block->pcoord;
 
@@ -1696,12 +1699,25 @@ void ResonantScattering(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe) 
 }
 
 
+bool IsLyaPhot(Photon *pphot, int ip) {
+  Real erg_away_from_lc = std::fabs(pphot->ep[ip] - energy_lya);
+  return erg_away_from_lc <= linewidth_cutoff_energy;
+}
+
+
+bool IsEUVPhot(Photon *pphot, int ip) {
+  Real emin = MCConstants::h_cgs * numin;
+  return pphot->ep[ip] >= emin;
+}
+
+
 Real BoundFreeAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
   Real h_cgs = MCConstants::h_cgs;
   Real emin = h_cgs * numin;
-  Real opac;
-  if (pphot->ep[ip] >= numin * h_cgs) {
+  Real opac = 0.;
+  //if (pphot->ep[ip] >= emin) {
+  if (IsEUVPhot(pphot, ip)) {
     int i1 = pphot->i1p[ip];
     int i2 = pphot->i2p[ip];
     int i3 = pphot->i3p[ip];
@@ -1713,8 +1729,6 @@ Real BoundFreeAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
     //Real nH = pmcb->pmy_block->pscalars->s(0,i3,i2,i1) * n_cgs;
     Real nH = pmcb->species(0,i3,i2,i1);
     opac = xsec * nH; // opacities in cgs units
-  } else {
-    opac = 0.0;
   }
 
   return opac;
@@ -1723,27 +1737,43 @@ Real BoundFreeAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
 Real ResonantScatteringOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
-  Real opac;
-  Real erg_away_from_lc = std::fabs(pphot->ep[ip] - energy_lya);
-  if (erg_away_from_lc <= linewidth_cutoff_energy) {
+  Real opac = 0.;
+  //Real erg_away_from_lc = std::fabs(pphot->ep[ip] - energy_lya);
+  //if (erg_away_from_lc <= linewidth_cutoff_energy) {
+  if (IsLyaPhot(pphot, ip)) {
     opac = ResonanceLineOpacity(pmcb, pphot, ip);
-  } else {
-    opac = 0.0;
+  }
+  return opac;
+}
+
+
+Real LyaPureAbsOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
+  Real opac = 0.;
+  if (IsLyaPhot(pphot, ip)) {
+    int i1 = pphot->i1p[ip];
+    int i2 = pphot->i2p[ip];
+    int i3 = pphot->i3p[ip];
+    Real nH = pmcb->species(0,i3,i2,i1);
+    Real nH_n2 = nH * 1.e-7; // simplification of Huang et al. 2017
+    Real xsec = 1.e-20; // simplification of bound-free n=2
+    opac = nH_n2 * xsec; 
   }
   return opac;
 }
 
 /*
  * Choose between bound-free or resonant absorption opacity functions
- * based on photon energy, with cutoff at threshold
- */
+*/
 Real ChooseAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   Real h_cgs = MCConstants::h_cgs;
   Real opac = 0;
-  if (pphot->ep[ip] < numin * h_cgs) {
+  //if (pphot->ep[ip] < numin * h_cgs) {
+  if (IsEUVPhot(pphot, ip)) {
     opac = BoundFreeAbsorptionOpacity(pmcb, pphot, ip);
-  } else {
-    opac = ResonantScatteringOpacity(pmcb, pphot, ip);
+  }
+  if (IsLyaPhot(pphot, ip)) {
+    opac = LyaPureAbsOpacity(pmcb, pphot, ip);
+    //opac = ResonantScatteringOpacity(pmcb, pphot, ip);
   }
   return opac;
 }
