@@ -42,7 +42,7 @@ public:
   ~Spectrum();
 
   MonteCarlo *pmy_mc;
-  int nsrun;  // total number of photons samples run for this spectrum
+  std::int64_t nsrun;  // total number of photons samples run for this spectrum
   std::string base_name;
   MomentumRange range;
   MCPolarization polarized;
@@ -101,7 +101,7 @@ public:
   MonteCarlo *pmy_mc;
   std::string base_name;
 
-  int nsrun;  // total number of photons samples run for this list
+  std::int64_t nsrun;  // total number of photons samples run for this list
   int length; // number of occupied elements
   int nparams; // number of properties for each photon in list
   int output_number;// current output number
@@ -232,7 +232,7 @@ public:
   void ReceiveMonteCarloSpectrum(Spectrum *spect, bool add);
   void OutputPhotonList(bool wtflag);
   void OutputTrajectoryList();
-  void UpdateOutputCount(int nph);
+  void UpdateOutputCount(std::int64_t nph);
   void MakeOutputs(bool wtflag);
 };
 

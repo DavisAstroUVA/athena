@@ -336,7 +336,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
 
 void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
-  nphremain = pin->GetInteger("montecarlo","nphot");
+  nphremain = pin->GetInteger64("montecarlo","nphot");
   return;
   if (emission_type == "freefree") {
     // Set the energy boundaries for free-free emission

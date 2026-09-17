@@ -7,7 +7,11 @@
 //! \brief implementation of functions in class MonteCarloBlock
 
 // C++ headers
+#include <algorithm>  // min
+#include <cstdint>    // int64_t
 #include <cstring>   // strcmp
+#include <limits>     // numeric_limits
+#include <vector>
 #include <iostream>
 #include <stdexcept>  // runtime_error
 
@@ -57,6 +61,9 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   pran = new MCRandom(iseed);
 
   next=nullptr;
+  lb_time = 0.0;
+  lb_nstep = 0;
+  lb_pending = 0.0;
 
   // SWD: eliminate some or all of these?
   // set local flags based on monte_carlo
@@ -219,10 +226,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   }
 
   // Set up photon movement and initialization methods
-  //computedmin = false;
-  computedmin = true; // CMF: need for coreskipping
-  if (acceleration)
-    computedmin = true;
+  computedmin = acceleration || pmy_mc->compute_dmin;
   pmy_mc->computedmin = computedmin;
   tetrads = true;
   // Number of cells including ghosts, for the standalone (pmb == nullptr) constructors.
@@ -488,6 +492,167 @@ MonteCarloBlock::~MonteCarloBlock() {
 }
 
 //----------------------------------------------------------------------------------------
+// Payload helpers.  Counters are 64-bit and ride in the int stream as two halves; arrays
+// are written as a count followed by the elements, and read back against the shape the
+// receiving block already has, so a mismatch is caught rather than silently misaligned.
+
+namespace {
+
+void PackI64(std::vector<int> &ib, int64_t v) {
+  const uint64_t u = static_cast<uint64_t>(v);
+  ib.push_back(static_cast<int>(static_cast<uint32_t>(u & 0xffffffffu)));
+  ib.push_back(static_cast<int>(static_cast<uint32_t>(u >> 32)));
+}
+
+int64_t UnpackI64(const std::vector<int> &ib, std::size_t &p) {
+  const uint32_t lo = static_cast<uint32_t>(ib.at(p++));
+  const uint32_t hi = static_cast<uint32_t>(ib.at(p++));
+  return static_cast<int64_t>((static_cast<uint64_t>(hi) << 32) | lo);
+}
+
+void PackArray(std::vector<Real> &rb, const AthenaArray<Real> &a) {
+  const int n = a.GetSize();
+  rb.push_back(static_cast<Real>(n));
+  if (n > 0) rb.insert(rb.end(), a.data(), a.data() + n);
+}
+
+void PackArray(std::vector<int> &ib, const AthenaArray<int> &a) {
+  const int n = a.GetSize();
+  ib.push_back(n);
+  if (n > 0) ib.insert(ib.end(), a.data(), a.data() + n);
+}
+
+void ShapeMismatch(const char *name, int packed, int have) {
+  std::stringstream msg;
+  msg << "### FATAL ERROR in MonteCarloBlock::UnpackFromTransfer" << std::endl
+      << "array " << name << " arrived with " << packed << " elements but this block"
+      << " allocates " << have << "; the two blocks were not built from the same input"
+      << std::endl;
+  ATHENA_ERROR(msg);
+}
+
+void UnpackArray(const std::vector<Real> &rb, std::size_t &p, AthenaArray<Real> &a,
+                 const char *name) {
+  const int n = static_cast<int>(rb.at(p++));
+  if (n != a.GetSize()) ShapeMismatch(name, n, a.GetSize());
+  if (n > 0) std::copy(rb.begin() + p, rb.begin() + p + n, a.data());
+  p += n;
+}
+
+void UnpackArray(const std::vector<int> &ib, std::size_t &p, AthenaArray<int> &a,
+                 const char *name) {
+  const int n = ib.at(p++);
+  if (n != a.GetSize()) ShapeMismatch(name, n, a.GetSize());
+  if (n > 0) std::copy(ib.begin() + p, ib.begin() + p + n, a.data());
+  p += n;
+}
+
+const int kPayloadVersion = 1;
+
+} // namespace
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::PackForTransfer(...)
+//! \brief serialize the movable state of this block; see the declaration for the list
+//!
+//! Anything added to MonteCarloBlock later has to be classified against that list: it
+//! either travels here, is rebuilt by MonteCarlo::SetupBlockFromFluid or the problem
+//! generator on the receiving side, or is layout state that RelinkAll refreshes.
+
+void MonteCarloBlock::PackForTransfer(std::vector<int> &ib, std::vector<Real> &rb,
+                                      std::vector<char> &sb) const {
+  ib.clear(); rb.clear(); sb.clear();
+  ib.push_back(kPayloadVersion);
+  ib.push_back(pphot->nphot);
+  pphot->PackAll(ib, rb);
+  PackI64(ib, nphrun);
+  PackI64(ib, nphremain);
+  PackI64(ib, nabs);
+  PackI64(ib, nesc);
+  PackI64(ib, ndes);
+  PackI64(ib, nscat);
+  PackI64(ib, nrem);
+  PackI64(ib, lb_nstep);
+  ib.push_back(i1_);
+  ib.push_back(i2_);
+  ib.push_back(i3_);
+  PackArray(ib, emit_count_);
+  rb.push_back(minweight);
+  rb.push_back(emiss_to_weight);
+  rb.push_back(lb_time);
+  PackArray(rb, moments);
+  PackArray(rb, moments_com);
+  PackArray(rb, moments_coord);
+  PackArray(rb, moments_user);
+  PackArray(rb, moments_scat);
+  PackArray(rb, moments_scat_error);
+  PackArray(rb, sourceterms);
+  PackArray(rb, emission);
+  const std::string state = pran->SaveState();
+  sb.assign(state.begin(), state.end());
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::UnpackFromTransfer(...)
+//! \brief the inverse of PackForTransfer, into a block built from the same input
+
+void MonteCarloBlock::UnpackFromTransfer(const std::vector<int> &ib,
+                                         const std::vector<Real> &rb,
+                                         const std::vector<char> &sb) {
+  std::size_t pi = 0, pr = 0;
+  const int version = ib.at(pi++);
+  if (version != kPayloadVersion) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarloBlock::UnpackFromTransfer" << std::endl
+        << "payload version " << version << ", expected " << kPayloadVersion << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  const int npar = ib.at(pi++);
+  const std::size_t ni = static_cast<std::size_t>(npar)*Photon::PropertyCountInt();
+  const std::size_t nr = static_cast<std::size_t>(npar)*Photon::PropertyCountReal();
+  if (pi + ni > ib.size() || pr + nr > rb.size()) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarloBlock::UnpackFromTransfer" << std::endl
+        << "payload shorter than its " << npar << " photons" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  pphot->UnpackAll(ni > 0 ? &ib[pi] : nullptr, nr > 0 ? &rb[pr] : nullptr, npar);
+  pi += ni;
+  pr += nr;
+  nphrun = UnpackI64(ib, pi);
+  nphremain = UnpackI64(ib, pi);
+  nabs = UnpackI64(ib, pi);
+  nesc = UnpackI64(ib, pi);
+  ndes = UnpackI64(ib, pi);
+  nscat = UnpackI64(ib, pi);
+  nrem = UnpackI64(ib, pi);
+  lb_nstep = UnpackI64(ib, pi);
+  i1_ = ib.at(pi++);
+  i2_ = ib.at(pi++);
+  i3_ = ib.at(pi++);
+  UnpackArray(ib, pi, emit_count_, "emit_count");
+  minweight = rb.at(pr++);
+  emiss_to_weight = rb.at(pr++);
+  lb_time = rb.at(pr++);
+  UnpackArray(rb, pr, moments, "moments");
+  UnpackArray(rb, pr, moments_com, "moments_com");
+  UnpackArray(rb, pr, moments_coord, "moments_coord");
+  UnpackArray(rb, pr, moments_user, "moments_user");
+  UnpackArray(rb, pr, moments_scat, "moments_scat");
+  UnpackArray(rb, pr, moments_scat_error, "moments_scat_error");
+  UnpackArray(rb, pr, sourceterms, "sourceterms");
+  UnpackArray(rb, pr, emission, "emission");
+  if (pi != ib.size() || pr != rb.size()) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarloBlock::UnpackFromTransfer" << std::endl
+        << "payload not fully consumed: " << ib.size() - pi << " ints, "
+        << rb.size() - pr << " reals left" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  pran->RestoreState(std::string(sb.begin(), sb.end()));
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::RayTracePhotonsOnBlock(int etype)
 //! \brief Integrate photons to termination condtion without scattering
 
@@ -497,10 +662,10 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
   Real const to_eulr = -1.0;
   int nbuf = 0;
 
-  printf("remain: %d \n",nphremain);
+  printf("remain: %lld \n",static_cast<long long>(nphremain));
   // Emit photons to replace those that left meshblock or were terminated
   // Limit ntodo to number of remaining photons on block
-  int ntodo = (loop_max_size > nphremain) ? nphremain : loop_max_size;
+  int ntodo = static_cast<int>(std::min<int64_t>(nphremain, loop_max_size));
 
   // if photons remain to transfer, make space for new photons
   if (ntodo > 0) {
@@ -581,13 +746,12 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
   // Set absorption method for this photon type
   enum AbsorptionMethodFlag absorption_meth = pmy_mc->absorption_method[etype];
 
-  //int nbuf = 0;
   int nold = pphot->nphot;
-  int ntot = nold + nphremain;
+  const int64_t navail = static_cast<int64_t>(nold) + nphremain;
 
   // Emit photons to replace those that left meshblock or were terminated
   // limit ntot < loop_max_size unless nold is larger than loop_max_size
-  ntot = (loop_max_size > ntot) ? ntot : loop_max_size;
+  int ntot = (navail > loop_max_size) ? loop_max_size : static_cast<int>(navail);
   ntot = (nold > ntot) ? nold : ntot;
   int nnew = ntot - nold;
 
@@ -1287,18 +1451,15 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
 //! \brief set moments to zero on block
 
 void MonteCarloBlock::ResetMoments() {
-
-  // set moments to zero
-  for (int m=0; m<pmy_mc->ntype; ++m) {
-    for (int n=0; n<nmom-3; ++n) {
-      for (int k=ks; k<=ke; ++k) {
-        for (int j=js; j<=je; ++j) {
-          for (int i=is; i<=ie; ++i) {
-            moments(m,n,k,j,i) = 0.;
-          }
-        }
-      }
-    }
+  // Every moment array that exists, ghost cells included.  Which arrays exist depends
+  // on the outputs and user moments requested, and call_moments is true if any does:
+  // this used to zero the lab array alone, which is not allocated when only user
+  // moments are enrolled (a segfault at the top of every dynamic cycle), and it left
+  // the other frames and the user moments accumulating across cycles.
+  AthenaArray<Real> *arrays[] = {&moments, &moments_com, &moments_coord, &moments_user,
+                                 &moments_scat, &moments_scat_error};
+  for (AthenaArray<Real> *a : arrays) {
+    if (a->GetSize() > 0) std::fill(a->data(), a->data() + a->GetSize(), 0.0);
   }
 }
 
@@ -1636,8 +1797,8 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
 void MonteCarloBlock::ComputeEmissionSampleArray() {
 
   int ncells = nx1 * nx2 * nx3;
-  Real prob[ncells];
-  int count[ncells];
+  std::vector<Real> prob(ncells);
+  std::vector<int64_t> count(ncells, 0);
 
   // contruct probability array
   Real total_emission = 0.;
@@ -1655,14 +1816,22 @@ void MonteCarloBlock::ComputeEmissionSampleArray() {
     prob[i] /= total_emission;
   }
   // sample multinomial distribution
-  pran->SampleMultinomial(nphremain,ncells,prob,count);
-  // set counts in emit_count_ array
-  int sum = 0;
+  pran->SampleMultinomial(nphremain,ncells,prob.data(),count.data());
+  // set counts in emit_count_ array, which holds ints per cell
+  int64_t sum = 0;
   for (int k=ks; k<=ke; ++k) {
     for (int j=js; j<=je; ++j) {
       for (int i=is; i<=ie; ++i) {
         int n = (k-ks)*nx2*nx1 + (j-js)*nx1 + i-is;
-        emit_count_(k,j,i) = count[n];
+        if (count[n] > std::numeric_limits<int>::max()) {
+          std::stringstream msg;
+          msg << "### FATAL ERROR in function [MonteCarloBlock::ComputeEmissionSampleArray]"
+              << std::endl << "cell (" << k << "," << j << "," << i << ") of block "
+              << pmy_block->gid << " is to emit " << count[n]
+              << " photons, more than the per-cell counter holds" << std::endl;
+          ATHENA_ERROR(msg);
+        }
+        emit_count_(k,j,i) = static_cast<int>(count[n]);
         sum += count[n];
       }
     }

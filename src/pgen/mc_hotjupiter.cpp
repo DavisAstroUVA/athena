@@ -12,6 +12,7 @@
 // C headers
 
 // C++ headers
+#include <algorithm> // upper_bound()
 #include <cmath>
 #include <cstdio>  // fopen(), fprintf(), freopen()
 #include <cstring> // strcmp()
@@ -20,9 +21,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <chrono>
-#include <gsl/gsl_interp.h>
-#include <gsl/gsl_spline.h>
 
 // Athena++ headers
 #include "../athena.hpp"
@@ -33,13 +33,13 @@
 #include "../globals.hpp"
 #include "../hydro/hydro.hpp"
 #include "../mesh/mesh.hpp"
+#include "../monte_carlo/mcsnapshot.hpp"
 #include "../monte_carlo/montecarlo.hpp"
 #include "../monte_carlo/photon.hpp"
 #include "../monte_carlo/photonpusher.hpp"
 #include "../monte_carlo/spectrum_reader.hpp"
 #include "../parameter_input.hpp"
 #include "../scalars/scalars.hpp"
-#include "../inputs/hdf5_reader.hpp"
 
 #if NSCALARS < 1
 #error "This problem generator requires scalars to track neutral hydrogen fraction"
@@ -95,13 +95,9 @@ Real spectrum_lya_energy; // mean energy from spectrum [erg]
 std::vector<Real> spectrum_lya_wl; // lya wavelengths [cm]
 std::vector<Real> spectrum_lya_cdf; // lya CDF per wl bin
 
-// gsl interpolation
-gsl_interp_accel *gsl_interp_accel_lya;
-gsl_spline *gsl_spline_lya;
-
 // Flag for performance-saving random deviate sampling using Box-Muller method
 //  which generates two deviates at a time, used for stellar lyman alpha
-int iset = 0; 
+int iset = 0;
 Real gset; // saves extra deviate
 
 enum EmissionType {LYA=0, IONIZING=1};
@@ -111,6 +107,14 @@ enum EmissionGeometryHJ {VOLUME=0, SURFACE=1};
 
 // Box-Muller sampling uses for stellar lyman alpha
 void gasdev(MeshBlock *pmb, Real mean, Real sigma, Real &samp);
+
+// Read a two-column stellar spectrum and build the CDF used to sample from it
+void ReadSpectrumToCDF(const std::string& filename, std::vector<Real>& wl,
+                       std::vector<Real>& cdf, Real& itot, Real& emean);
+
+// Invert the spectrum CDF: linear interpolation of wl(cdf) at cdf = u
+Real SampleSpectrumWavelength(const std::vector<Real>& wl, const std::vector<Real>& cdf,
+                              Real u);
 
 // velocity initial isothermal wind profile
 Real GetIsowindVelocity(Real x);
@@ -178,7 +182,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   // Enroll the user gravity source term
 
   psi = pin->GetOrAddReal("problem", "psi", 0.0)*PI; // radians, defaults to star in -x direction
-  
+
   Real l_cgs = pin->GetOrAddReal("problem","l_cgs",1.);
   Real vel_cgs = pin->GetOrAddReal("problem","vel_cgs",1.);
   Real rho_cgs = pin->GetOrAddReal("problem","rho_cgs",1.);
@@ -226,15 +230,9 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
 void MeshBlock::InitUserMeshBlockData(ParameterInput *pin) {
 
-  int nx1 = pmy_mesh->mesh_size.nx1+2*NGHOST;
-  int nx2 = pmy_mesh->mesh_size.nx2+2*NGHOST;
-  int nx3 = pmy_mesh->mesh_size.nx3+2*NGHOST;
-
-  AllocateRealUserMeshBlockDataField(2);
-  // Array for each component of the tidal gravity acceleration
-  ruser_meshblock_data[0].NewAthenaArray(3,nx3,nx2,nx1);
-  // Array for data loaded in from external file
-  ruser_meshblock_data[1].NewAthenaArray(6,ncells3,ncells2,ncells1);
+  AllocateRealUserMeshBlockDataField(1);
+  // Array for each component of the tidal gravity acceleration.
+  ruser_meshblock_data[0].NewAthenaArray(3,ncells3,ncells2,ncells1);
 
   AllocateUserOutputVariables(7);
   SetUserOutputVariableName(0, "vol_emis");
@@ -292,11 +290,14 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
         << std::endl;
     throw std::runtime_error(msg.str());
   }
-  // set up emission methods
+  // set up emission methods.  nsamp accumulates over the types that are turned on, so it
+  // starts from zero here as well as in the MULTI branch of InitializeEmission: assigning
+  // it in the first block only worked while the first block was the one that ran.
   int etype = 0;
+  nsamp = 0;
   if (nion > 0) {
     ion_str = etype;
-    nsamp = nsamptype[etype] = nion;
+    nsamp += nsamptype[etype] = nion;
     emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "ion_eqwt",true);
     initialize_comoving[etype] = false; // ions initialized in lab frame
     std::string abs_meth = pin->GetOrAddString("problem","ion_str_abs","tau");
@@ -373,6 +374,18 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
 
   flag_core_skipping = pin->GetOrAddBoolean("problem", "core_skip", false);
   if (flag_core_skipping) {
+    // CoreSkipping compares the cell's comoving line optical depth against a threshold,
+    // so it reads MCCoord::dmin.  That array is only built under MRW acceleration or
+    // <montecarlo>/compute_dmin
+    if (!acceleration && !compute_dmin) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo::InitUserMonteCarloData" << std::endl
+          << "<problem>/core_skip needs the smallest cell width, MCCoord::dmin."
+          << std::endl
+          << "Set <montecarlo>/compute_dmin = true (or acceleration = true, which also "
+          << "turns on" << std::endl << "the MRW random walk)." << std::endl;
+      throw std::runtime_error(msg.str());
+    }
     EnrollUserWorkInMove(CoreSkipping);
   }
 
@@ -382,18 +395,12 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   flag_sample_lya = pin->GetOrAddBoolean("problem", "sample_lya", false);
   if (flag_sample_lya) {
     std::string input_spectrum = pin->GetString("problem", "lya_filename");
-    
     ReadSpectrumToCDF(input_spectrum, spectrum_lya_wl, spectrum_lya_cdf, spectrum_lya_itot, spectrum_lya_energy);
     if (report_setup && (Globals::my_rank == 0)) {
       std::cout << "Sampling from finite star:" << std::endl;
       std::cout << "itot: " << spectrum_lya_itot << " [erg/cm^2/s]" << std::endl;
       std::cout << "emean: " << spectrum_lya_energy << " [erg], emean / linecenter: " << spectrum_lya_energy/MCConstants::h_cgs/MCConstants::nu_lya << std::endl;
     }
-
-    // initialize gsl interpolation objects
-    gsl_interp_accel_lya = gsl_interp_accel_alloc();
-    gsl_spline_lya = gsl_spline_alloc(gsl_interp_linear, spectrum_lya_wl.size());
-    gsl_spline_init(gsl_spline_lya, spectrum_lya_cdf.data(), spectrum_lya_wl.data(), spectrum_lya_wl.size());
   }
 
 
@@ -412,47 +419,20 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   bool flag_initialize_velocity_from_file = pin->GetBoolean("problem", "initialize_velocity_from_file");
   bool flag_initialize_density_from_file = pin->GetBoolean("problem", "initialize_density_from_file");
 
-  // SWD: Maybe better to move this to InitUserMeshBlockData
   // BEGIN INITIALIZATION FILE I/O
-  if ((flag_initialize_scalar_from_file || flag_initialize_pressure_from_file)) {
-    std::string input_filename = pin->GetString("problem", "input_filename");
-    std::string dataset_prim = pin->GetString("problem", "dataset_prim");
-    int start_prim_file[5];
-    start_prim_file[1] = gid;
-    start_prim_file[2] = 0;
-    start_prim_file[3] = 0;
-    start_prim_file[4] = 0;
-    int start_prim_indices[6];
-    start_prim_indices[0] = 0;
-    start_prim_indices[1] = 1;
-    start_prim_indices[2] = 2;
-    start_prim_indices[3] = 3;
-    start_prim_indices[4] = 4;
-    start_prim_indices[5] = 5;
-    int count_prim_file[5];
-    count_prim_file[0] = 1;
-    count_prim_file[1] = 1;
-    count_prim_file[2] = block_size.nx3;
-    count_prim_file[3] = block_size.nx2;
-    count_prim_file[4] = block_size.nx1;
-    int start_prim_mem[4];
-    start_prim_mem[1] = ks;
-    start_prim_mem[2] = js;
-    start_prim_mem[3] = is;
-    int count_prim_mem[4];
-    count_prim_mem[0] = 1;
-    count_prim_mem[1] = block_size.nx3;
-    count_prim_mem[2] = block_size.nx2;
-    count_prim_mem[3] = block_size.nx1;
-
-
-    for (int n=0; n<6; ++n) {
-      start_prim_file[0] = start_prim_indices[n];
-      start_prim_mem[0] = n;
-      HDF5ReadRealArray(input_filename.c_str(), dataset_prim.c_str(), 5, start_prim_file,
-                        count_prim_file, 4, start_prim_mem,
-                        count_prim_mem, ruser_meshblock_data[1], true);
-    }
+  //
+  // Ugilizd MCReadSnapshotBlock for parsing the athdf inputfile
+  const bool read_from_file = flag_initialize_scalar_from_file
+                              || flag_initialize_pressure_from_file
+                              || flag_initialize_density_from_file
+                              || flag_initialize_velocity_from_file;
+  if (read_from_file) {
+    // Mesh::nblist is private to everything but MeshBlock, so the collective-read padding
+    // count is gathered here and handed over.
+    int max_blocks_per_rank = 0;
+    for (int r = 0; r < Globals::nranks; ++r)
+      max_blocks_per_rank = std::max(max_blocks_per_rank, pmy_mesh->nblist[r]);
+    MCReadSnapshotBlock(this, pin, max_blocks_per_rank);
   }
   // END INITIALIZATION FILE I/O
 
@@ -516,7 +496,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         //Real hydrostatic_profile = HydrostaticAdiabaticDensity(r, th, ph, rin, a2, invgm1, flag_tidal_gravity+1);
         Real rho = nbase * hydrostatic_profile;
         Real P = a2 * nbase / gamma * std::pow(hydrostatic_profile, gamma);
-        //printf("rad=%g, the=%g, phi=%g, hydro=%g, rho=%g, pres=%g\n", r*l_cgs, th, ph, hydrostatic_profile, rho*n_cgs, P*P_cgs); 
 
         // adiabatic solution has critical point where density -> zero; correct for this
         if (rho <= dfloor) {
@@ -565,7 +544,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
        //   vel1 = 0.0;
        //   rho = (nH + np);
        // }
-  
         // SWD: not sure if this need recomputing if !flag_wind
         //mmw = (nH + np)/(2.*np + nH);
         //Real a2_mmw = kb_cgs * temp0 / mmw / mp_cgs;
@@ -576,21 +554,23 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         //if ((r <= rin) && (i < NGHOST)) {
         //  rho_gz[i] = nbase * hydrostatic_profile;
         //  P_gz[i] = a2 * nbase / gamma * std::pow(hydrostatic_profile, gamma);
-        //  //printf("boundary: rad=%g, the=%g, phi=%g, hydro=%g, nd=%g, pres=%g\n", r*l_cgs, th, ph, hydrostatic_profile, rho_gz[i]*n_cgs, P_gz[i]*P_cgs); 
-        //}
 
-        if (flag_initialize_pressure_from_file) {
-          P = ruser_meshblock_data[1](1,k,j,i);
+        // A snapshot covers the active cells only, so the x1 ghosts this loop also visits
+        // keep the analytic hydrostatic values above.
+        const bool from_file = (i >= is && i <= ie);
+
+        if (flag_initialize_pressure_from_file && from_file) {
+          P = phydro->w(IPR,k,j,i);
         }
 
-        if (flag_initialize_density_from_file) {
-          rho = ruser_meshblock_data[1](0,k,j,i);
+        if (flag_initialize_density_from_file && from_file) {
+          rho = phydro->w(IDN,k,j,i);
         }
 
-        if (flag_initialize_velocity_from_file) {
-          vel1 = ruser_meshblock_data[1](2,k,j,i);
-          vel2 = ruser_meshblock_data[1](3,k,j,i);
-          vel3 = ruser_meshblock_data[1](4,k,j,i);
+        if (flag_initialize_velocity_from_file && from_file) {
+          vel1 = phydro->w(IVX,k,j,i);
+          vel2 = phydro->w(IVY,k,j,i);
+          vel3 = phydro->w(IVZ,k,j,i);
         }
 
         // Set corresponding conserved fluid variables for the above
@@ -603,9 +583,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         phydro->u(IEN,k,j,i) += 0.5 * SQR(phydro->u(IM2,k,j,i)) / phydro->u(IDN,k,j,i);
         phydro->u(IEN,k,j,i) += 0.5 * SQR(phydro->u(IM3,k,j,i)) / phydro->u(IDN,k,j,i);
 
-        // Ionization state of the gas
-        if (flag_initialize_scalar_from_file) {
-          pscalars->s(0,k,j,i) = ruser_meshblock_data[1](5,k,j,i)*rho;
+        // Ionization state of the gas.  The file carries the concentration r0 = s0/rho,
+        // which MCReadSnapshotBlock left in pscalars->r.
+        if (flag_initialize_scalar_from_file && from_file) {
+          pscalars->s(0,k,j,i) = pscalars->r(0,k,j,i)*rho;
         } else {
           pscalars->s(0,k,j,i) = nH;
         }
@@ -750,7 +731,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
           pphot->x3p[ip] = pran->uniform() * (phmax - phmin) + phmin;
 
           // check for nightside emission
-          if (pphot->x2p[ip] > 0.5*PI) { 
+          if (pphot->x2p[ip] > 0.5*PI) {
             pphot->PrintPhoton("Warning: Photon on nightside",ip);
             pphot->statp[ip] = DESTROYED;
           }
@@ -776,7 +757,6 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
           pphot->x1p[ip] = pmy_block->pmy_mesh->mesh_size.x1max;
           pphot->x2p[ip] = th;
           pphot->x3p[ip] = ph;
-            
           pphot->k0p[ip] = 1.;
           pphot->k1p[ip] = -1.;
           pphot->k2p[ip] = 0.0;
@@ -843,7 +823,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
 
             // compute the comparison function
             // we normalize here with another factor of lsp2
-            Real fcomp = lsp_min2 / SQR(lsp2) * ndoters * (-ndoterp); 
+            Real fcomp = lsp_min2 / SQR(lsp2) * ndoters * (-ndoterp);
             Real rcomp = pran->uniform();
             //printf("found fcomp=%g, rcomp=%g\n", fcomp, rcomp);
             if (rcomp > fcomp) continue;
@@ -855,7 +835,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
             kr = ndoterp;
             kth = xsp*costhp*cosphp + ysp*costhp*sinphp - zsp*sinthp;
             kph = -xsp*sinphp + ysp*cosphp;
-            
+
             // normalize to unit vectors
             Real lsp = std::sqrt(lsp2);
             kr /= lsp;
@@ -953,8 +933,8 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
         if (emis_geometry == SURFACE) {
           if (flag_sample_lya) { // sample from input spectrum
             Real rsample = pran->uniform();
-            Real wl = gsl_spline_eval(gsl_spline_lya, rsample, gsl_interp_accel_lya);
-            
+            Real wl = SampleSpectrumWavelength(spectrum_lya_wl, spectrum_lya_cdf, rsample);
+
             pphot->ep[ip] = h_cgs * c_cgs / wl;
             //printf("rsample=%g, wl=%g, ep=%g\n", rsample, wl, pphot->ep[ip]/energy_lya-1.);
 
@@ -1004,7 +984,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
     pphot->nscp[ip] = 0;
 
     // initialize start time in ms
-    const auto now = std::chrono::system_clock::now() - global_start_time; 
+    const auto now = std::chrono::system_clock::now() - global_start_time;
     Real diff = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
     pphot->user[1][ip] = diff;
 
@@ -1041,7 +1021,7 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
 
         // Do an implicit update of the neutral fraction to solve for the ionization state at the end of this step
         Real rho = pmy_block->phydro->u(IDN,k,j,i); // SWD: Why not use MCBlock rho?
- 
+
         Real nh = pmy_block->pscalars->s(0,k,j,i);
         Real np = rho - nh;
         Real na = nh + np;
@@ -1103,7 +1083,7 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
         Real vol = pcoord->vol(k,j,i);
         sourceterms(MCRS0,k,j,i) -= cool * vol * tint;
         pmy_block->user_out_var(5,k,j,i) += cool;
-      
+
       }
     }
   }
@@ -1117,7 +1097,7 @@ void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip) {
 
   // store wall time elapsed since initialization
   Real start = pphot->user[1][ip];
-  const auto now = std::chrono::system_clock::now() - global_start_time; 
+  const auto now = std::chrono::system_clock::now() - global_start_time;
   Real diff = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
   Real time_elapsed = diff - start;
   //printf("time_elapsed=%g\n", time_elapsed);
@@ -1371,7 +1351,7 @@ void ThirdOrderTidalGravity(MeshBlock *pmb, const Real time, const Real dt,
 }
 
 
-/* 
+/*
  * Hydrostatic, isothermal density initial condition
  * Use tidal_order to set order of tidal source expansion
  * Inputs in code units
@@ -1405,7 +1385,7 @@ Real HydrostaticIsothermalDensity(Real r, Real th, Real ph, Real r0, Real a2, in
 }
 
 
-/* 
+/*
  * Hydrostatic, adiabatic density initial condition
  * Use tidal_order to set order of tidal source expansion
  * Inputs in code units
@@ -1511,7 +1491,7 @@ Real SurfaceEmissivityLya(MonteCarloBlock *pmcb, int k, int j, int i, int etype)
     }
     Real area_omega = GetProjectedAreaOmegaFiniteStar(pmcb, k, j, i); // projected area on planet * solid angle on star
     ndot = nintens * area_omega;
-    
+
   } else { // projections along coordinate directions
     Real nflux0; // number / area / time
     if (flag_sample_lya) {
@@ -1539,7 +1519,7 @@ Real SurfaceEmissivityIonizing(MonteCarloBlock *pmcb, int k, int j, int i, int e
     Real nintens = ion_flux / PI * SQR(sep / rstar) / energy_euv; // number / area / time / solid angle
     Real area_omega = GetProjectedAreaOmegaFiniteStar(pmcb, k, j, i); // projected area on planet * solid angle on star
     ndot = nintens * area_omega;
-    
+
   } else { // projections along coordinate directions
     Real nflux0 = ion_flux / energy_euv; // number / area / time
     Real projected_area = GetProjectedArea(pmcb, k, j, i); // projected area on planet
@@ -1684,7 +1664,7 @@ Real GetProjectedAreaOmegaFiniteStar(MonteCarloBlock *pmcb, int k, int j, int i)
 
 
 // SWD: should be able to remove this
-void ResonantScattering(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe) {  
+void ResonantScattering(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe) {
 
   //for (int ip=ips; ip<=ipe; ip++) {
   //  pphot->statp[ip] = ESCAPED;
@@ -1779,6 +1759,113 @@ Real ChooseAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 }
 
 
+//! \fn void ReadSpectrumToCDF(...)
+//! \brief Read two-column spectrum data from an ASCII file
+//!   - Column 0: wavelength [cm]
+//!   - Column 1: intensity [erg/cm^2/s/cm]
+//! Modifies wavelength 'wl' and cumulative distribution function 'cdf' as vectors.
+//! Also accumulates total intensity 'itot' and average energy 'emean'.
+
+void ReadSpectrumToCDF(const std::string& filename, std::vector<Real>& wl,
+                       std::vector<Real>& cdf, Real& itot, Real& emean) {
+  std::ifstream file(filename);
+  if (!file.is_open()) {
+    throw std::runtime_error("ReadSpectrumToCDF: cannot open file " + filename);
+  }
+
+  // clear any values that might already be in wl and cdf
+  wl.clear();
+  cdf.clear();
+
+  std::vector<Real> ilam;
+  std::string line;
+  int line_number = 0;
+  while (std::getline(file, line)) {
+    ++line_number;
+
+    // skip empty lines and comments
+    if (line.empty()) continue;
+    if (line[0] == '#') continue;
+
+    std::istringstream iss(line);
+    Real wavelength, intensity;
+
+    // check for lines that don't read nicely into two doubles
+    if (!(iss >> wavelength >> intensity)) {
+      throw std::runtime_error("ReadSpectrumToCDF: malformed line " + std::to_string(line_number) + " in input file '" + filename + "'");
+    }
+
+    wl.push_back(wavelength);
+    ilam.push_back(intensity);
+
+  }
+  file.close();
+
+  const int nrows = wl.size();
+  if (nrows == 0) {
+    throw std::runtime_error("ReadSpectrumToCDF: no valid data in file " + filename);
+  }
+  if (nrows < 2) {
+    throw std::runtime_error("ReadSpectrumToCDF: need at least 2 data points for interpolation, found " + std::to_string(nrows));
+  }
+
+  // PDF = ilam / (int dlambda*ilam) = ilam / itot
+  // compute CDF[i] as int dlambda*ilam from wl[0] to wl[i]
+  // compute mean energy as int dlambda * (ilam/itot) * (h*c/lambda)
+  // assumes wavelengths are uniformly spaced and increasing
+  Real dlambda = wl[1] - wl[0];
+  cdf.push_back(0.);
+  emean = 0.;
+
+  // integrate using trapezoid rule
+  for (int i = 1; i < nrows; ++i) {
+    cdf.push_back(cdf[i-1] + 0.5*dlambda*(ilam[i-1] + ilam[i]));
+    emean += 0.5*dlambda*(ilam[i-1]/wl[i-1] + ilam[i]/wl[i]);
+  }
+  emean *= MCConstants::h_cgs * MCConstants::c_cgs;
+
+  // normalize: CDF runs from 0 to 1
+  itot = cdf[nrows-1];
+  if (itot == 0.) {
+    throw std::runtime_error("ReadSpectrumToCDF: cdf norm is zero");
+  }
+  for (int i=0; i<nrows; ++i) {
+    cdf[i] = cdf[i] / itot;
+  }
+  emean /= itot;
+
+} // end ReadSpectrumToCDF
+
+
+// \fn Real SampleSpectrumWavelength(...)
+// \brief Inverse-transform sampling of the spectrum built by ReadSpectrumToCDF
+//
+// Returns wl(u) by piecewise-linear interpolation of the tabulated wl against cdf,
+// for a uniform deviate u in [0,1). The cdf is non-decreasing by construction, so the
+// containing bin is found by binary search. A bin of zero width (cdf flat across a
+// stretch of zero intensity) contributes zero probability and is collapsed to its
+// left edge rather than dividing by zero.
+
+Real SampleSpectrumWavelength(const std::vector<Real>& wl, const std::vector<Real>& cdf,
+                              Real u) {
+  const int nrows = cdf.size();
+
+  // first index with cdf > u; the containing bin is the one to its left
+  int ihi = std::upper_bound(cdf.begin(), cdf.end(), u) - cdf.begin();
+
+  // clamp so that [ilo, ilo+1] is always a valid bin, which also handles u outside
+  // the tabulated range by extrapolating from the end bins
+  int ilo = ihi - 1;
+  if (ilo < 0) ilo = 0;
+  if (ilo > nrows-2) ilo = nrows-2;
+
+  Real dcdf = cdf[ilo+1] - cdf[ilo];
+  Real frac = (dcdf > 0.0) ? (u - cdf[ilo]) / dcdf : 0.0;
+  return wl[ilo] + frac * (wl[ilo+1] - wl[ilo]);
+
+}
+
+
 // SWD: redo this function?
 void gasdev(MeshBlock *pmb, Real mean, Real sigma, Real &samp) {
 
@@ -1833,7 +1920,7 @@ Real ConstantTimestep(MeshBlock *pmb) {
 }
 
 void GetIonizationTemperature(MonteCarloBlock *pmcb) {
-	
+
   Hydro* phydro = pmcb->pmy_block->phydro;
   Real kb_cgs = MCConstants::kb_cgs;
   Real mp_cgs = MCConstants::mp_cgs;
@@ -1911,7 +1998,7 @@ void UpdateSourceTerms(MonteCarloBlock *pmcb, Photon *pphot, Real energy0, Real 
                   Real k1p0, Real k2p0, Real k3p0, int ip) {
 
   // if continuous absorption, handle source terms in UpdateMoments()
-  if (pmcb->pmy_mc->absorption_method[pphot->type[ip]] == ABSTAU) 
+  if (pmcb->pmy_mc->absorption_method[pphot->type[ip]] == ABSTAU)
     return;
 
 
@@ -2027,7 +2114,6 @@ void StaticInflowInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
         // fix initial density and pressure
         prim(IDN,k,j,il-i) = rho;
         prim(IPR,k,j,il-i) = P;
-        //printf("boundary: rad=%g, the=%g, phi=%g, nd=%g, pres=%g\n", pco->x1v(il-i), pco->x2v(j), pco->x3v(k), rho_gz[i]*n_cgs, P_gz[i]*P_cgs); 
 
         // outflow diode for velocity
         prim(IVY,k,j,il-i) = prim(IVY,k,j,il);

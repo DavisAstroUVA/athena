@@ -26,6 +26,9 @@
 #include "mesh.hpp"
 #include "mesh_refinement.hpp"
 #include "meshblock_tree.hpp"
+#if MONTE_CARLO_ENABLED
+#include "../monte_carlo/montecarlo.hpp"
+#endif
 
 // MPI/OpenMP header
 #ifdef MPI_PARALLEL
@@ -395,6 +398,13 @@ void Mesh::RedistributeAndRefineMeshBlocks(ParameterInput *pin, int ntot) {
   }
 
   // Step 2. Calculate new load balance
+#if MONTE_CARLO_ENABLED
+  // The Monte Carlo module supplies its partition when it is present (the optimal
+  // contiguous one by default); the greedy one below stays for every other build.
+  if (pmc != nullptr)
+    pmc->Partition(newcost, ntot, newrank, nslist, nblist);
+  else
+#endif
   CalculateLoadBalance(newcost, newrank, nslist, nblist, ntot);
 
   int nbs = nslist[Globals::my_rank];
@@ -547,6 +557,12 @@ void Mesh::RedistributeAndRefineMeshBlocks(ParameterInput *pin, int ntot) {
   } // if (nsend !=0)
 #endif // MPI_PARALLEL
 
+#if MONTE_CARLO_ENABLED
+  // Monte Carlo blocks are not MeshBlock data.  Pack what leaves this rank before
+  // the MeshBlocks below are deleted; it rebuilds its block list after Initialize.
+  if (pmc != nullptr) pmc->PackDeparting(newrank, newtoold, oldtonew, ntot);
+#endif
+
   // Step 7. construct a new MeshBlock list (moving the data within the MPI rank)
   AthenaArray<MeshBlock*> newlist;
   newlist.NewAthenaArray(nblist[Globals::my_rank]);
@@ -669,6 +685,10 @@ void Mesh::RedistributeAndRefineMeshBlocks(ParameterInput *pin, int ntot) {
     }
   }
   Initialize(2, pin);
+
+#if MONTE_CARLO_ENABLED
+  if (pmc != nullptr) pmc->RebuildAfterRedistribution(pin);
+#endif
 
   ResetLoadBalanceVariables();
 

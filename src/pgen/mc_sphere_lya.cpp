@@ -165,7 +165,7 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     }
   }
   // Set number of samples per block because emmision_flag is set to EMISNONE
-  nphremain = pin->GetInteger("montecarlo", "nphot");
+  nphremain = pin->GetInteger64("montecarlo", "nphot");
   nphrun = 0;
 }
 

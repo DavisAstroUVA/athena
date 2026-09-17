@@ -16,6 +16,7 @@
 
 // C++ headers
 #include <cstddef>  // std::size_t
+#include <cstdint>  // std::int64_t
 #include <ostream>  // ostream
 #include <string>   // string
 
@@ -85,6 +86,7 @@ class ParameterInput {
   void ParameterDump(std::ostream& os);
   int  DoesParameterExist(std::string block, std::string name);
   int  GetInteger(std::string block, std::string name);
+  std::int64_t GetInteger64(std::string block, std::string name);
   int  GetOrAddInteger(std::string block, std::string name, int value);
   int  SetInteger(std::string block, std::string name, int value);
   Real GetReal(std::string block, std::string name);

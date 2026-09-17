@@ -781,8 +781,11 @@ Real PhotonEnergyAtInfinity(Photon *pphot, int ip) {
 void PhotonList::AddPhoton(Photon *pphot, int ip) {
 
   // Bound the resident list.  Past max_resident the photons already collected are
-  // streamed to the file and the array is reused, so the memory held is bounded.
-  if (max_resident > 0 && length >= max_resident) SpillToFile();
+  // streamed to the file and the array is reused, so the memory held is bounded.  The
+  // count on disk, nwritten_, is 64-bit; length (int) only counts what is in memory
+  const int kResidentCeiling = 1 << 30;
+  if ((max_resident > 0 && length >= max_resident) || length >= kResidentCeiling)
+    SpillToFile();
   if (length == len_limit) {
     // double array size when list is full
     ResizeList(2*len_limit);
@@ -886,7 +889,7 @@ void PhotonList::OpenAndWriteHeader(const std::string &filename, Real tint_out) 
   fprintf(fp_,"length=%-20lld\n",static_cast<long long>(0));
   fprintf(fp_,"npars=%d\n",nparams);
   ntot_pos_ = ftell(fp_);
-  fprintf(fp_,"ntot=%-20d\n",nsrun);
+  fprintf(fp_,"ntot=%-20lld\n",static_cast<long long>(nsrun));
   fprintf(fp_,"polarized=%s\n",GetMCPolarizationName(polarized));
   fprintf(fp_,"coord=%s\n",pmy_mc->geometry_tag.c_str());
   // free parameters of the metric, so the file is self-describing; absent for
@@ -960,7 +963,7 @@ void PhotonList::WriteList(std::string filename, Real tint_out) {
   fseek(fp_, length_pos_, SEEK_SET);
   fprintf(fp_,"length=%-20lld",static_cast<long long>(nwritten_));
   fseek(fp_, ntot_pos_, SEEK_SET);
-  fprintf(fp_,"ntot=%-20d",nsrun);
+  fprintf(fp_,"ntot=%-20lld",static_cast<long long>(nsrun));
   fclose(fp_);
   fp_ = nullptr;
 }
@@ -1440,7 +1443,7 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
   fprintf(pfile,"nx=%d\n",ne);
   fprintf(pfile,"nmu=%d\n",nmu);
   fprintf(pfile,"nphi=%d\n",nphi);
-  fprintf(pfile,"ntot=%d\n",nsrun);
+  fprintf(pfile,"ntot=%lld\n",static_cast<long long>(nsrun));
   int nintens = 1 + NumStokesStored(polarized);
   fprintf(pfile,"nintens=%d\n",nintens);
   fprintf(pfile,"units=ev\n");
@@ -1484,8 +1487,7 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
   Real norms;
   if (nsrun != pmy_mc->nsamp) {
     norms = static_cast<Real>(nsrun)/static_cast<Real>(pmy_mc->nsamp);
-    // nsamp is 64-bit; %d on it is undefined and prints garbage.
-    printf("nsrun != nsamp: %d %lld\n",nsrun,
+    printf("nsrun != nsamp: %lld %lld\n",static_cast<long long>(nsrun),
            static_cast<long long>(pmy_mc->nsamp));
   } else {
     norms = 1.;
@@ -1636,7 +1638,7 @@ void MCOutput::SendMonteCarloSpectrum(Spectrum *pspect, int dest) {
 
   int p=0;
   ne--; ncth--; nphi--;
-  MPI_Isend(&pspect->nsrun,1,MPI_INT,dest,tag++,MPI_COMM_WORLD,&send_rq);
+  MPI_Isend(&pspect->nsrun,1,MPI_INT64_T,dest,tag++,MPI_COMM_WORLD,&send_rq);
   MPI_Wait(&send_rq, MPI_STATUS_IGNORE);
   BufferUtility::PackData(pspect->intensity,send_buf,0,ne,0,ncth,0,nphi,p);
   BufferUtility::PackData(pspect->intensity_sq,send_buf,0,ne,0,ncth,0,nphi,p);
@@ -1670,15 +1672,15 @@ void MCOutput::ReceiveMonteCarloSpectrum(Spectrum *pspect, bool add) {
   unsigned int tag = 100; // temporary
 
   ne--; ncth--; nphi--;
-  int nsrun;
+  std::int64_t nsrun;
   MPI_Status st;
   // Two corrections to what this used to do.  The count is 1, not size: nsrun is a single
-  // int, and posting a receive for size of them into it overruns the stack the moment any
+  // integer, and posting a receive for size of them into it overruns the stack the moment any
   // sender puts more than one on this tag.  And the source is taken from the first
   // message rather than left as MPI_ANY_SOURCE on both, so the sample count and the
   // spectrum that follows it come from the same rank; with ANY_SOURCE twice, one rank's
   // count could be paired with another's spectrum.
-  MPI_Recv(&nsrun,1,MPI_INT,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&st);
+  MPI_Recv(&nsrun,1,MPI_INT64_T,MPI_ANY_SOURCE,tag++,MPI_COMM_WORLD,&st);
   MPI_Recv(recv_buf,size,MPI_ATHENA_REAL,st.MPI_SOURCE,tag++,MPI_COMM_WORLD,
            MPI_STATUS_IGNORE);
   Spectrum *ptemp;
@@ -1767,11 +1769,11 @@ void MCOutput::OutputTrajectoryList() {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MCOutput::UpdateOutputCount(int nph)
+//! \fn void MCOutput::UpdateOutputCount(std::int64_t nph)
 //! \brief updates total numbers of photons run for output normalization
 
 // SWD Add Trajectory, image?
-void MCOutput::UpdateOutputCount(int nph) {
+void MCOutput::UpdateOutputCount(std::int64_t nph) {
 
   if (pphlist != nullptr)
     pphlist->nsrun += nph;

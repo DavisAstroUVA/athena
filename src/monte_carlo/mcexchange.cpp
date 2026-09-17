@@ -68,7 +68,13 @@ void MCRankExchange::BuildPeerList() {
   const std::size_t np = peers_.size();
   shdr_.resize(np);  sint_.resize(np);  sreal_.resize(np);  scplx_.resize(np);
   rhdr_.resize(np);  rint_.resize(np);  rreal_.resize(np);  rcplx_.resize(np);
-  smsg_.resize(np);
+  if (!inflight_.empty()) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MCRankExchange::BuildPeerList" << std::endl
+        << inflight_.size() << " message set(s) still in flight; the peer list may only"
+        << " be rebuilt at a quiescent point" << std::endl;
+    ATHENA_ERROR(msg);
+  }
   active_ = !peers_.empty();
 #endif
 
@@ -267,24 +273,44 @@ void MCRankExchange::SendStaged() {
   for (std::size_t p = 0; p < peers_.size(); ++p) {
     if (shdr_[p].empty()) continue;
 
-    smsg_[p].clear();
-    smsg_[p].reserve(1 + shdr_[p].size() + sint_[p].size());
-    smsg_[p].push_back(static_cast<int>(shdr_[p].size()/kHdrWords));
-    smsg_[p].insert(smsg_[p].end(), shdr_[p].begin(), shdr_[p].end());
-    smsg_[p].insert(smsg_[p].end(), sint_[p].begin(), sint_[p].end());
+    // The message set takes the staged buffers with it; the staging vectors are left
+    // empty for the next sweep, which is what Reset would do anyway.
+    inflight_.emplace_back();
+    InFlight &f = inflight_.back();
+    f.msg.reserve(1 + shdr_[p].size() + sint_[p].size());
+    f.msg.push_back(static_cast<int>(shdr_[p].size()/kHdrWords));
+    f.msg.insert(f.msg.end(), shdr_[p].begin(), shdr_[p].end());
+    f.msg.insert(f.msg.end(), sint_[p].begin(), sint_[p].end());
+    f.real.swap(sreal_[p]);
+    f.cplx.swap(scplx_[p]);
+    shdr_[p].clear();
+    sint_[p].clear();
 
-    MPI_Request r;
-    MPI_Isend(smsg_[p].data(), static_cast<int>(smsg_[p].size()), MPI_INT,
-              peers_[p], kTagInt, MPI_COMM_WORLD, &r);
-    sreq_.push_back(r);
-    MPI_Isend(sreal_[p].data(), static_cast<int>(sreal_[p].size()), MPI_ATHENA_REAL,
-              peers_[p], kTagReal, MPI_COMM_WORLD, &r);
-    sreq_.push_back(r);
-    if (!scplx_[p].empty()) {
-      MPI_Isend(scplx_[p].data(), static_cast<int>(scplx_[p].size()),
-                MPI_ATHENA_COMPLEX, peers_[p], kTagCplx, MPI_COMM_WORLD, &r);
-      sreq_.push_back(r);
+    f.nreq = 0;
+    MPI_Isend(f.msg.data(), static_cast<int>(f.msg.size()), MPI_INT,
+              peers_[p], kTagInt, MPI_COMM_WORLD, &f.req[f.nreq++]);
+    MPI_Isend(f.real.data(), static_cast<int>(f.real.size()), MPI_ATHENA_REAL,
+              peers_[p], kTagReal, MPI_COMM_WORLD, &f.req[f.nreq++]);
+    if (!f.cplx.empty()) {
+      MPI_Isend(f.cplx.data(), static_cast<int>(f.cplx.size()),
+                MPI_ATHENA_COMPLEX, peers_[p], kTagCplx, MPI_COMM_WORLD, &f.req[f.nreq++]);
     }
+  }
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MCRankExchange::RetireSends()
+//! \brief free the buffers of completed message sets, oldest first, without waiting
+
+void MCRankExchange::RetireSends() {
+#ifdef MPI_PARALLEL
+  while (!inflight_.empty()) {
+    InFlight &f = inflight_.front();
+    int flag = 0;
+    MPI_Testall(f.nreq, f.req, &flag, MPI_STATUSES_IGNORE);
+    if (!flag) break;
+    inflight_.pop_front();
   }
 #endif
 }
@@ -360,13 +386,10 @@ int MCRankExchange::DrainIncoming() {
 
 void MCRankExchange::CompleteSends() {
 #ifdef MPI_PARALLEL
-  if (sreq_.empty()) return;
-  while (true) {
-    int flag = 0;
-    MPI_Testall(static_cast<int>(sreq_.size()), sreq_.data(), &flag, MPI_STATUSES_IGNORE);
-    if (flag) break;
+  while (!inflight_.empty()) {
+    RetireSends();
+    if (inflight_.empty()) break;
     DrainIncoming();
   }
-  sreq_.clear();
 #endif
 }
