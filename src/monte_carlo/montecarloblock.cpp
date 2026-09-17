@@ -158,7 +158,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   if (scattering_meth == SCATUSER) {
     ScatteringOpacity = pmy_mc->UserScatteringOpacity;
     Scatter = pmy_mc->UserScattering;
-    coherent_scattering = pin->GetOrAddBoolean("montecarlo","coherent_scattering",true);
+    coherent_scattering = pin->GetOrAddBoolean("montecarlo","coherent_scattering",false);
   } else if (scattering_meth == SCATNONE) {
     ScatteringOpacity = NoOpacity;
     Scatter = NoScatter;  // should not be called
