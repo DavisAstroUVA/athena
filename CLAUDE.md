@@ -160,6 +160,7 @@ Python tools are in `vis/python/montecarlo/`. Add this directory to `PYTHONPATH`
 - `plot_spectrum.py` — plots spectra
 - `make_spectrum_single.py` — single-file variant (untracked, in progress)
 - `scattering_histogram.py` — distribution of the per-photon scattering count, read from whichever user variable a problem generator copied `nscp` into (`--nscat-col`, default 0; `mc_readhdf*` use 2). Reports how concentrated the scatterings are in the worst photons, which is the number that matters in a resonant-line run where the mean is set by a handful of photons
+- `average_moments.py` — combines the moment athdf files a `nout > 1` run writes into one lower-noise estimate. Values are averaged, `*_err` variables combine in quadrature and are divided by M. It inherits the athdf format by copying the first input and overwriting the data, so there is no writer to keep in step with the output code. `--empirical` writes a second file whose error slots hold the scatter between intervals instead, which assumes nothing about correlations within a photon's path and is the only error estimate available for `mclab`, `mccom`, `mccoord` and `mcsrc`
 
 Photon list files use a custom binary format read by `athena_mc.read_list_generator()`.
 
