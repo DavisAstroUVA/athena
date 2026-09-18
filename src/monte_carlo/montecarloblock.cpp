@@ -65,6 +65,10 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   lb_nstep = 0;
   lb_pending = 0.0;
 
+  // Initialize scat_pend_* to empty state
+  scat_pend_sum_ = 0.0;
+  scat_pend_n_ = scat_pend_i1_ = scat_pend_i2_ = scat_pend_i3_ = -1;
+
   // SWD: eliminate some or all of these?
   // set local flags based on monte_carlo
   coord_system = pmy_mc->coord_system;
@@ -158,7 +162,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   if (scattering_meth == SCATUSER) {
     ScatteringOpacity = pmy_mc->UserScatteringOpacity;
     Scatter = pmy_mc->UserScattering;
-    coherent_scattering = pin->GetOrAddBoolean("montecarlo","coherent_scattering",true);
+    coherent_scattering = pin->GetOrAddBoolean("montecarlo","coherent_scattering",false);
   } else if (scattering_meth == SCATNONE) {
     ScatteringOpacity = NoOpacity;
     Scatter = NoScatter;  // should not be called
@@ -1123,9 +1127,21 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
 
     if (n >= 0 && n < nf_scat) {
       Real norm = c_cgs/(4.*PI*freq_scat_mid(n)*dloge_scat*log10);
-      moments_scat(n,i3,i2,i1) += norm * weight_scat;
-      moments_scat_error(n,i3,i2,i1) += SQR(norm) * SQR(weight_scat);
+      const Real contrib = norm * weight_scat;
+      moments_scat(n,i3,i2,i1) += contrib;
       //moments_scat(n,i3,i2,i1) += norm * pphot->scp[ip] * weight * k0 * k0;
+
+      // The variance estimator needs independent samples, so the contribution is accumulated
+      // until the photon leaves this (bin, cell) pair and then squared once
+      if (n != scat_pend_n_ || i1 != scat_pend_i1_ || i2 != scat_pend_i2_
+          || i3 != scat_pend_i3_) {
+        FlushScatError();
+        scat_pend_n_ = n;
+        scat_pend_i1_ = i1;
+        scat_pend_i2_ = i2;
+        scat_pend_i3_ = i3;
+      }
+      scat_pend_sum_ += contrib;
     }
   }
 
@@ -1304,6 +1320,11 @@ void MonteCarloBlock::UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl,
 
 void MonteCarloBlock::NormalizeMoments(bool normalize) {
 
+  // Nothing should be pending here -- every pusher flushes when it finishes a photon --
+  // but normalizing a held-back contribution into moments_scat while its square never
+  // reached moments_scat_error would be a silent inconsistency, so make sure.
+  FlushScatError();
+
   // Derive the comoving moments from the lab accumulation unless they were accumulated
   // directly.  Done before the normalization factor is applied; it is a scalar so the two
   // commute, but doing it here keeps the derived array in step with what is written out.
@@ -1460,6 +1481,24 @@ void MonteCarloBlock::ResetMoments() {
   for (AthenaArray<Real> *a : arrays) {
     if (a->GetSize() > 0) std::fill(a->data(), a->data() + a->GetSize(), 0.0);
   }
+  // Nothing held back can belong to the cycle that is starting.
+  scat_pend_sum_ = 0.0;
+  scat_pend_n_ = -1;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::FlushScatError()
+//! \brief fold the held-back scattering-moment contribution in as one squared term
+//
+// See the comment in UpdateMoments for why the sum is held back at all.  Cheap enough to
+// call unconditionally: with nothing pending it is one comparison.
+
+void MonteCarloBlock::FlushScatError() {
+  if (scat_pend_n_ < 0 || moments_scat_error.GetSize() == 0) return;
+  moments_scat_error(scat_pend_n_, scat_pend_i3_, scat_pend_i2_, scat_pend_i1_)
+      += SQR(scat_pend_sum_);
+  scat_pend_sum_ = 0.0;
+  scat_pend_n_ = -1;
 }
 
 //----------------------------------------------------------------------------------------

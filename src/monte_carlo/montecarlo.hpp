@@ -612,6 +612,10 @@ public:
   AthenaArray<Real> moments_user;
   AthenaArray<Real> moments_scat;
   AthenaArray<Real> moments_scat_error;
+  //! Contribution the photon currently being pushed has made to one (frequency bin, cell)
+  //! pair so far, held back until the photon leaves that pair.
+  Real scat_pend_sum_;
+  int scat_pend_n_, scat_pend_i1_, scat_pend_i2_, scat_pend_i3_;
   AthenaArray<Real> energy_scat;
   AthenaArray<Real> freq_scat_mid;
   AthenaArray<Real> sourceterms;
@@ -648,6 +652,8 @@ public:
   void UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl, Real k1, Real k2,
                                  Real k3,Real etau, int ip);
   void NormalizeMoments(bool normalize);
+  //! Fold the scattering-moment contribution into moments_scat_error
+  void FlushScatError();
   void AccumulateMoments(AthenaArray<Real> &mom, int type, int i3, int i2, int i1,
                          const PhotonFrameState &s, Real wp);
   void ComovingFrameMatrix(int k, int j, int i, const AthenaArray<Real> &g,
