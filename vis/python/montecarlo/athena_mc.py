@@ -861,47 +861,73 @@ def header_match(dict1, dict2, dict_type):
 
     return match
 
+ADD_SPECTRA_METHODS = ('statistical', 'time')
+
+
 def add_spectra(spec1, spec2, method='statistical'):
     """
-    Add two spectra to create single spectrum
+    Combine two spectra into one, returned as a new dictionary.
+
+    'statistical' sums them, for spectra that each hold a share of the photons of one
+    interval, as the lists of the ranks of one output do; their dt must agree.  'time'
+    averages them weighted by integration time, for spectra of independent intervals
+    or runs that are each already normalized, as the outputs of a run with nout > 1
+    are.  Errors combine in quadrature either way, and ntot, the photons run, is
+    summed.  An empty dict stands for "nothing yet" and returns the other spectrum, so
+    a loop over files can start from {}.
     """
 
-    if spec1 == {}:
+    if not spec1:
         return spec2
-    elif spec2 == {}:
+    if not spec2:
         return spec1
-    
+
+    if method not in ADD_SPECTRA_METHODS:
+        raise ValueError(f"[add_spectra]: method {method!r} is not one of "
+                         f"{ADD_SPECTRA_METHODS}")
     if not header_match(spec1, spec2, 'spec'):
-        raise RuntimeError('[add_specta]: headers do not match')
+        # say which fields, so a wrong file in a glob can be picked out
+        differ = [key for key in ('nx', 'nmu', 'nphi', 'nintens', 'units', 'polarized',
+                                  'yerror', 'coord', 'metric_params', 'frame')
+                  if (spec1.get(key) or None) != (spec2.get(key) or None)]
+        raise RuntimeError('[add_spectra]: headers do not match in '
+                           + ', '.join(f"{k} ({spec1.get(k)} vs {spec2.get(k)})"
+                                       for k in differ))
+    # header_match compares the bin counts; the bins have to be the same bins as well
+    for key in ('xfaces', 'mufaces', 'phifaces'):
+        if not np.allclose(spec1[key], spec2[key], rtol=1.0e-12, atol=0.0):
+            raise RuntimeError(f'[add_spectra]: {key} do not match')
 
-    # copy spectra to new dictionaries to avoid modification of originals
-    spec1c = spec1.copy()
-    spec2c = spec2.copy()
+
+    has_errors = spec1['yerror'] == 'true'
+
+    # the arrays are replaced, never written into, so a shallow copy leaves the inputs
+    # untouched
+    spec_out = spec1.copy()
 
     if method == 'statistical':
-        if spec1c['dt'] != spec2c['dt']:
-            raise RuntimeError('[add_specta]: statistical averaging requested' \
-                               'but spectra have different integration times')
-    
-    # intialize spec_out as copy for simplicity
-    spec_out = spec1c.copy()
-
-    has_errors = spec_out['yerror'] == 'true'
-
-    if method == 'statistical':
-        # sum unormalized intensity and error arrays
-        spec_out['intensity'] = spec1c['intensity'] + spec2c['intensity']
+        # a file carries dt to eight decimals, so a spectrum read back is compared to
+        # one made in memory at that precision, not to the bit
+        if not math.isclose(spec1['dt'], spec2['dt'], rel_tol=1.0e-7):
+            raise RuntimeError('[add_spectra]: statistical addition requested but the '
+                               f"spectra have different integration times, "
+                               f"{spec1['dt']:.8e} and {spec2['dt']:.8e}")
+        spec_out['intensity'] = spec1['intensity'] + spec2['intensity']
         if has_errors:
-            spec_out['errors'] = np.sqrt((spec1c['errors'])**2 + (spec2c['errors'])**2)
-    elif method == 'time':
-        # weighted sum of intensities and errors
-        total_dt = spec1c['dt'] + spec2c['dt']
-        w1 = spec1c['dt']/total_dt
-        w2 = spec2c['dt']/total_dt
-        spec_out['intensity'] = w1*spec1c['intensity'] + w2*spec2c['intensity']
+            spec_out['errors'] = np.sqrt(spec1['errors']**2 + spec2['errors']**2)
+    else:
+        total_dt = spec1['dt'] + spec2['dt']
+        w1 = spec1['dt']/total_dt
+        w2 = spec2['dt']/total_dt
+        spec_out['intensity'] = w1*spec1['intensity'] + w2*spec2['intensity']
         if has_errors:
-            spec_out['errors'] = np.sqrt((w1*spec1c['errors'])**2 + (w2*spec2c['errors'])**2)
+            spec_out['errors'] = np.sqrt((w1*spec1['errors'])**2
+                                         + (w2*spec2['errors'])**2)
         spec_out['dt'] = total_dt
+
+    # each list's ntot is the photons run on its rank, so the total is the sum whether
+    # the parts are ranks of one interval or whole intervals
+    spec_out['ntot'] = spec1['ntot'] + spec2['ntot']
 
     return spec_out
 
