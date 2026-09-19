@@ -507,11 +507,13 @@ int main(int argc, char *argv[]) {
 #ifdef OPENMP_PARALLEL
   double omp_start_time = omp_get_wtime();
 #endif
+  int mc_ncycle0 = 0;
   if (MONTE_CARLO_ENABLED) {
     // Simple method for modifying main loop
     if (!pmc->dynamic) {
-      pmesh->tlim = static_cast<Real>(pmc->nout)*pmc->tint;
+      pmesh->tlim = pmesh->start_time + static_cast<Real>(pmc->nout)*pmc->tint;
       pmesh->dt = pmc->tint;
+      mc_ncycle0 = pmesh->ncycle;
     }
   }
   while ((pmesh->time < pmesh->tlim) &&
@@ -572,6 +574,11 @@ int main(int argc, char *argv[]) {
 
     pmesh->ncycle++;
     pmesh->time += pmesh->dt;
+    // Forming the time the same way tlim was formed makes the two agree to the bit
+    // on the last cycle, so the run does exactly nout outputs.
+    if (MONTE_CARLO_ENABLED && !pmc->dynamic)
+      pmesh->time = pmesh->start_time
+                    + static_cast<Real>(pmesh->ncycle - mc_ncycle0)*pmc->tint;
     mbcnt += pmesh->nbtotal;
     pmesh->step_since_lb++;
 
