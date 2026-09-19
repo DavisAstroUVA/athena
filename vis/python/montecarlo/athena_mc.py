@@ -886,10 +886,12 @@ def add_spectra(spec1, spec2, method='statistical'):
     # intialize spec_out as copy for simplicity
     spec_out = spec1c.copy()
 
+    has_errors = spec_out['yerror'] == 'true'
+
     if method == 'statistical':
         # sum unormalized intensity and error arrays
         spec_out['intensity'] = spec1c['intensity'] + spec2c['intensity']
-        if spec_out['yerror']:
+        if has_errors:
             spec_out['errors'] = np.sqrt((spec1c['errors'])**2 + (spec2c['errors'])**2)
     elif method == 'time':
         # weighted sum of intensities and errors
@@ -897,7 +899,7 @@ def add_spectra(spec1, spec2, method='statistical'):
         w1 = spec1c['dt']/total_dt
         w2 = spec2c['dt']/total_dt
         spec_out['intensity'] = w1*spec1c['intensity'] + w2*spec2c['intensity']
-        if spec_out['yerror']:
+        if has_errors:
             spec_out['errors'] = np.sqrt((w1*spec1c['errors'])**2 + (w2*spec2c['errors'])**2)
         spec_out['dt'] = total_dt
 

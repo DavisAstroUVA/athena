@@ -156,7 +156,7 @@ Problem generators live in `src/pgen/`. Monte Carlo problem generators have the 
 Python tools are in `vis/python/montecarlo/`. Add this directory to `PYTHONPATH` to use them.
 
 - `athena_mc.py` — core library; `read_list_generator()` streams photon list files in chunks, `Photons` class wraps a single chunk, `make_spectrum()` bins photons into a spectrum
-- `make_spectrum.py` — CLI wrapper around `athena_mc.make_spectrum()`
+- `make_spectrum.py` — CLI wrapper around `athena_mc.make_spectrum()`. Takes any number of list files, sums the ranks of each output into one spectrum (`<base>.<output>.spec`) and with `--combine` averages the outputs weighted by integration time into `<base>.spec`. Same `parse_args()`/`main(args)` layout as `plot_spectrum.py`; replaced the separate `make_spectrum_multi.py`
 - `plot_spectrum.py` — plots spectra
 - `make_spectrum_single.py` — single-file variant (untracked, in progress)
 - `scattering_histogram.py` — distribution of the per-photon scattering count, read from whichever user variable a problem generator copied `nscp` into (`--nscat-col`, default 0; `mc_readhdf*` use 2). Reports how concentrated the scatterings are in the worst photons, which is the number that matters in a resonant-line run where the mean is set by a handful of photons
