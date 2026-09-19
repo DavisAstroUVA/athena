@@ -34,6 +34,7 @@ namespace {
   Real logemin, logemax;
   Real abh, r_hor;
   Real dcut;
+  Real tcut;
   std::string emission_type;
   // frequency table parameters
   int nfre, nrho, ntem;
@@ -298,6 +299,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
 void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
   dcut = pin->GetOrAddReal("problem", "dcut",1.e-20);
+  tcut = pin->GetOrAddReal("problem", "tcut",1.e20);
   if (emission_type == "freefree") {
     // Set the energy boundaries for free-free emission
     tnorm = pin->GetOrAddBoolean("problem","tnorm",false);
@@ -798,14 +800,15 @@ void GetNelFloor(MonteCarloBlock *pmcb) {
     for (int j=pmcb->js; j<=pmcb->je; ++j) {
       for (int i=pmcb->is; i<=pmcb->ie; ++i) {
         Real rho = pmcb->rho(k,j,i);
-	
-	if (rho < dmin) {
-	  //printf("rho: %d %d %d %d %g\n",pmcb->pmy_block->gid,k,j,i,rho);
-	  rho = 1.e-30;
-	}
+        if (rho < dmin) {
+          rho = 1.e-30;
+        }
+        if (pmcb->tgas(k,j,i) > tcut) {
+         rho = 1.e-30;
+        }
         Real nh = rho / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
-	pmcb->species(1,k,j,i) = nh + 4. * nhe;
+	      pmcb->species(1,k,j,i) = nh + 4. * nhe;
         pmcb->species(0,k,j,i) = nh + 2. * nhe;
       }
     }

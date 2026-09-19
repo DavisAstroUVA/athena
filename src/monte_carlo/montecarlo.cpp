@@ -1180,15 +1180,14 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb-> nrem = 0;
   }
 
-   // reset moments/sourcterms for start of new timestep
-  if (dynamic) {
-    for(int nb=0; nb<nblocal; ++nb) {
-      MonteCarloBlock *pmcb = my_blocks(nb);
-      if (pmcb->call_moments)
-        pmcb->ResetMoments();
-      if (pmcb->call_srcterms)
-        pmcb->ResetSourceTerms();
-    }
+  // Reset the moments and source terms for this transport, in both modes.  Every output
+  // is an independent estimate of the same steady state.
+  for(int nb=0; nb<nblocal; ++nb) {
+    MonteCarloBlock *pmcb = my_blocks(nb);
+    if (pmcb->call_moments)
+      pmcb->ResetMoments();
+    if (pmcb->call_srcterms)
+      pmcb->ResetSourceTerms();
   }
 
   for (int etype=0; etype < ntype; etype++) {
