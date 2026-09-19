@@ -13,7 +13,7 @@ The spectra written are read back by plot_spectrum.py and athena_mc.read_spectru
 How the lists are grouped
 -------------------------
 A run writes one list per rank and output, named <base>.proc<rank>.<output>.list, for
-example xrb.out1.proc3.00002.list.  The ranks of one output together hold the photons
+example xrb.out1.proc3.00002.list. The ranks of one output together hold the photons
 of that interval, so their spectra are summed.  Each output then becomes a spectrum of
 its own, <base>.<output>.spec, or with --combine the outputs are averaged, weighted by
 their integration times, into a single spectrum <base>.spec.  A file not named this
@@ -58,207 +58,36 @@ independent of the binning, and --outfile overrides the default output name.
 
 # python standard modules
 import argparse
-import collections
-import glob
-import os
-import re
-import sys
 
 import numpy as np
 
 # Athena++ modules
 import athena_mc as athenamc
-from athena_mc import Photons
-
-# Optional user module supplying --screen functions.  A screen.py is a per-dataset input
-# kept next to the lists, so the working directory is searched as well as PYTHONPATH.
-# Appended rather than prepended, so it cannot shadow an installed module.
-sys.path.append(os.getcwd())
-try:
-    import screen
-except ModuleNotFoundError:
-    screen = None
+import mc_cli
 
 # values accepted on the command line
 XUNITS = ['ev', 'kev', 'nu', 'lambda']
 ANGLEBINS = ['cartesian', 'spherical', 'hybrid']
 
-# how the code names a photon list: <base>.proc<rank>.<output>.list
-LIST_NAME = re.compile(r'^(?P<base>.+)\.proc(?P<rank>\d+)\.(?P<output>\d+)\.list$')
-
-# chunks read between progress messages
-PROGRESS_EVERY = 20
-
-# the list files of one output of one run; output is None for a file not named like one
-Output = collections.namedtuple('Output', ['base', 'output', 'files'])
-
-
-def load_screen(name):
-    """
-    Return the function of the given name from the user's screen.py, or None when no
-    screen was asked for.  Exits with a message saying what was looked for and where.
-    """
-
-    if name is None:
-        return None
-    if screen is None:
-        raise SystemExit(
-            f"--screen={name} needs a screen.py module providing a function "
-            f"{name}(phots), and none was importable.\n"
-            "Looked in the working directory, on PYTHONPATH, "
-            "and alongside make_spectrum.py.\n"
-            "It takes a Photons chunk and returns a boolean array that is True for "
-            "the photons to leave out of the spectrum.")
-    function = getattr(screen, name, None)
-    if not callable(function):
-        available = sorted(n for n in dir(screen)
-                           if not n.startswith('_') and callable(getattr(screen, n)))
-        raise SystemExit(
-            f"screen.py ({getattr(screen, '__file__', 'location unknown')}) has no "
-            f"function named {name!r}.\n"
-            f"Defined there: {', '.join(available) if available else 'nothing callable'}")
-    return function
-
-
-def expand_files(patterns):
-    """
-    Expand any glob patterns the shell left unexpanded, keeping the order given; a
-    pattern that matches nothing is kept as a name so that it is reported as missing.
-    """
-
-    files = []
-    for pattern in patterns:
-        files.extend(sorted(glob.glob(pattern)) or [pattern])
-    return files
-
-
-def group_outputs(files):
-    """
-    Group list files by run and output number, ranks in order within each output and
-    outputs in order within each run.
-    """
-
-    groups = {}
-    for file in files:
-        match = LIST_NAME.match(file)
-        if match:
-            key = (match['base'], match['output'])
-        else:
-            key = (os.path.splitext(file)[0], None)
-        groups.setdefault(key, []).append(file)
-    return [Output(base, output, sorted(names))
-            for (base, output), names in sorted(groups.items(), key=lambda kv: (
-                kv[0][0], kv[0][1] or ''))]
-
-
-def output_names(outputs, args):
-    """
-    Names of the spectrum files to write, one per output or a single one with --combine.
-    An --outfile given for several outputs has the output number put before its extension.
-    """
-
-    if args.combine:
-        if args.outfile is not None:
-            return [args.outfile]
-        return [outputs[0].base + '.spec']
-
-    names = []
-    for out in outputs:
-        if args.outfile is None:
-            tag = '' if out.output is None else f".{out.output}"
-            names.append(f"{out.base}{tag}.spec")
-        elif len(outputs) == 1:
-            names.append(args.outfile)
-        else:
-            stem, ext = os.path.splitext(args.outfile)
-            tag = os.path.basename(out.base) if out.output is None else out.output
-            names.append(f"{stem}.{tag}{ext}")
-    return names
-
-
-def spectrum_from_list(infile, args, screen_function):
-    """
-    Bin one list file, streamed in chunks so that the whole list is never in memory.
-    Returns the spectrum and the luminosity of the list, None unless --calclum.
-    """
-
-    reader = athenamc.read_list_generator(infile)
-    header = next(reader)['header']
-    print(f"  reading {infile} ({header['length']} samples)")
-
-    spectrum = {}
-    luminosity = 0.0 if args.calclum else None
-    for nchunk, result in enumerate(reader):
-        if nchunk > 0 and nchunk % PROGRESS_EVERY == 0:
-            print(f"    {result['remaining']} samples remain")
-        phlist = dict(header, list=result['chunk'], length=result['length'])
-        if args.calclum:
-            luminosity += athenamc.get_luminosity_list(phlist)
-
-        phots = Photons(phlist)
-        mask = None if screen_function is None else screen_function(phots)
-        spec = athenamc.make_spectrum(phots, args.nx, args.xmin, args.xmax,
-                                      xaxis=args.xunit, logx=not args.linearx,
-                                      nmu=args.nmu, mumin=args.mumin, mumax=args.mumax,
-                                      nphi=args.nphi, phimin=args.phimin,
-                                      phimax=args.phimax, anglebin=args.anglebin,
-                                      yerror=args.yerror, mask=mask)
-        spectrum = athenamc.add_spectra(spectrum, spec)
-        if result['done']:
-            break
-
-    return spectrum, luminosity
-
-
-def spectrum_from_output(out, args, screen_function):
-    """
-    Sum the ranks of one output into its spectrum; each rank holds a share of the same
-    photons, so the sum is the spectrum of all of them.  Also returns the luminosity of
-    the output, None unless --calclum.
-    """
-
-    spectrum = {}
-    luminosity = 0.0 if args.calclum else None
-    for infile in out.files:
-        spec, lum = spectrum_from_list(infile, args, screen_function)
-        spectrum = athenamc.add_spectra(spectrum, spec)
-        if args.calclum:
-            luminosity += lum
-    return spectrum, luminosity
 
 
 def main(args):
     """
     Make one spectrum per output, or one for all outputs together, from the options
-    returned by parse_args().
+    returned by parse_args().  The streaming, grouping and writing are mc_cli's; this
+    supplies how one chunk of photons becomes a spectrum.
     """
 
-    screen_function = load_screen(args.screen)
+    def bin_chunk(phots, mask):
+        return athenamc.make_spectrum(phots, args.nx, args.xmin, args.xmax,
+                                      xaxis=args.xunit, logx=not args.linearx,
+                                      nmu=args.nmu, mumin=args.mumin, mumax=args.mumax,
+                                      nphi=args.nphi, phimin=args.phimin,
+                                      phimax=args.phimax, anglebin=args.anglebin,
+                                      yerror=args.yerror, mask=mask)
 
-    combined = {}
-    lum_dt = 0.0
-    total_dt = 0.0
-    for i, out in enumerate(args.outputs):
-        label = out.base if out.output is None else f"{out.base} output {out.output}"
-        print(f"{label}: {len(out.files)} file(s)")
-        spectrum, luminosity = spectrum_from_output(out, args, screen_function)
-        if args.calclum:
-            print(f"  luminosity: {luminosity:e}")
-            lum_dt += luminosity*spectrum['dt']
-            total_dt += spectrum['dt']
-
-        if args.combine:
-            # outputs are independent intervals, so their spectra are averaged in time
-            combined = athenamc.add_spectra(combined, spectrum, method='time')
-        else:
-            athenamc.write_spectrum(args.outnames[i], spectrum)
-            print(f"  wrote {args.outnames[i]}")
-
-    if args.combine:
-        if args.calclum and len(args.outputs) > 1:
-            print(f"combined luminosity: {lum_dt/total_dt:e}")
-        athenamc.write_spectrum(args.outnames[0], combined)
-        print(f"wrote {args.outnames[0]}")
+    mc_cli.bin_outputs(args, 'make_spectrum.py', bin_chunk, athenamc.add_spectra,
+                       athenamc.write_spectrum)
 
 
 def parse_args(argv=None):
@@ -319,24 +148,8 @@ def parse_args(argv=None):
     if not args.linearx and args.xmin <= 0.0:
         parser.error(f"logarithmic bins need xmin > 0, got {args.xmin}; or use --linearx")
 
-    # the inputs, grouped into outputs
-    args.infile = expand_files(args.infile)
-    missing = [f for f in args.infile if not os.path.isfile(f)]
-    if missing:
-        parser.error(f"input file(s) not found: {', '.join(missing)}")
-    args.outputs = group_outputs(args.infile)
-
-    # a combined spectrum of several runs has no natural name
-    bases = {out.base for out in args.outputs}
-    if args.combine and args.outfile is None and len(bases) > 1:
-        parser.error("--combine over lists from different runs needs --outfile")
-
-    # never write an output over an input list
-    args.outnames = output_names(args.outputs, args)
-    inputs = {os.path.realpath(f) for f in args.infile}
-    clash = [n for n in args.outnames if os.path.realpath(n) in inputs]
-    if clash:
-        parser.error(f"output file(s) {clash} would overwrite an input file")
+    # the inputs, grouped into outputs, and the names of the spectra to write
+    mc_cli.check_inputs(parser, args, '.spec')
 
     return args
 

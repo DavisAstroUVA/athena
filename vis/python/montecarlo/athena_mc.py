@@ -855,13 +855,103 @@ def header_match(dict1, dict2, dict_type):
             match = False
         elif dict1.get('frame') != dict2.get('frame'):
             match = False
+    elif dict_type == 'image':
+        if dict1['ninc'] != dict2['ninc']:
+            match = False
+        elif dict1['nen'] != dict2['nen']:
+            match = False
+        elif dict1['nx'] != dict2['nx']:
+            match = False
+        elif dict1['ny'] != dict2['ny']:
+            match = False
+        elif dict1['nintens'] != dict2['nintens']:
+            match = False
+        elif dict1['unit'] != dict2['unit']:
+            match = False
+        elif dict1['polarized'] != dict2['polarized']:
+            match = False
+        elif dict1.get('coord') != dict2.get('coord'):
+            match = False
+        elif (dict1.get('metric_params') or {}) != (dict2.get('metric_params') or {}):
+            match = False
+        elif dict1.get('frame') != dict2.get('frame'):
+            match = False
     else:
         print("file type: "+dict_type+" not supported. Returning false.")
         match = False
 
     return match
 
-ADD_SPECTRA_METHODS = ('statistical', 'time')
+COMBINE_METHODS = ('statistical', 'time')
+ADD_SPECTRA_METHODS = COMBINE_METHODS
+
+# the header fields two spectra or two images must share to be combined
+_COMBINE_FIELDS = {
+    'spec': ('nx', 'nmu', 'nphi', 'nintens', 'units', 'polarized', 'yerror',
+             'coord', 'metric_params', 'frame'),
+    'image': ('ninc', 'nen', 'nx', 'ny', 'nintens', 'unit', 'polarized',
+              'coord', 'metric_params', 'frame'),
+}
+_COMBINE_FACES = {
+    'spec': ('xfaces', 'mufaces', 'phifaces'),
+    'image': ('ifaces', 'efaces', 'xfaces', 'yfaces'),
+}
+
+
+def _combine_binned(bin1, bin2, method, kind, has_errors):
+    """
+    The combination shared by add_spectra and add_images; kind is 'spec' or 'image'.
+    """
+
+    if not bin1:
+        return bin2
+    if not bin2:
+        return bin1
+
+    name = 'add_spectra' if kind == 'spec' else 'add_images'
+    if method not in COMBINE_METHODS:
+        raise ValueError(f"[{name}]: method {method!r} is not one of {COMBINE_METHODS}")
+    if not header_match(bin1, bin2, kind):
+        # say which fields, so a wrong file in a glob can be picked out
+        differ = [key for key in _COMBINE_FIELDS[kind]
+                  if (bin1.get(key) or None) != (bin2.get(key) or None)]
+        raise RuntimeError(f'[{name}]: headers do not match in '
+                           + ', '.join(f"{k} ({bin1.get(k)} vs {bin2.get(k)})"
+                                       for k in differ))
+    # header_match compares the bin counts; the bins have to be the same bins as well
+    for key in _COMBINE_FACES[kind]:
+        if not np.allclose(bin1[key], bin2[key], rtol=1.0e-12, atol=0.0):
+            raise RuntimeError(f'[{name}]: {key} do not match')
+
+    # the arrays are replaced, never written into, so a shallow copy leaves the inputs
+    # untouched
+    out = bin1.copy()
+
+    if method == 'statistical':
+        # a file carries dt to eight decimals, so a spectrum read back is compared to
+        # one made in memory at that precision, not to the bit
+        if not math.isclose(bin1['dt'], bin2['dt'], rel_tol=1.0e-7):
+            raise RuntimeError(f'[{name}]: statistical addition requested but the '
+                               f"inputs have different integration times, "
+                               f"{bin1['dt']:.8e} and {bin2['dt']:.8e}")
+        out['intensity'] = bin1['intensity'] + bin2['intensity']
+        if has_errors:
+            out['errors'] = np.sqrt(bin1['errors']**2 + bin2['errors']**2)
+    else:
+        total_dt = bin1['dt'] + bin2['dt']
+        w1 = bin1['dt']/total_dt
+        w2 = bin2['dt']/total_dt
+        out['intensity'] = w1*bin1['intensity'] + w2*bin2['intensity']
+        if has_errors:
+            out['errors'] = np.sqrt((w1*bin1['errors'])**2
+                                    + (w2*bin2['errors'])**2)
+        out['dt'] = total_dt
+
+    # each list's ntot is the photons run on its rank, so the total is the sum whether
+    # the parts are ranks of one interval or whole intervals
+    out['ntot'] = bin1['ntot'] + bin2['ntot']
+
+    return out
 
 
 def add_spectra(spec1, spec2, method='statistical'):
@@ -877,59 +967,20 @@ def add_spectra(spec1, spec2, method='statistical'):
     a loop over files can start from {}.
     """
 
-    if not spec1:
-        return spec2
-    if not spec2:
-        return spec1
-
-    if method not in ADD_SPECTRA_METHODS:
-        raise ValueError(f"[add_spectra]: method {method!r} is not one of "
-                         f"{ADD_SPECTRA_METHODS}")
-    if not header_match(spec1, spec2, 'spec'):
-        # say which fields, so a wrong file in a glob can be picked out
-        differ = [key for key in ('nx', 'nmu', 'nphi', 'nintens', 'units', 'polarized',
-                                  'yerror', 'coord', 'metric_params', 'frame')
-                  if (spec1.get(key) or None) != (spec2.get(key) or None)]
-        raise RuntimeError('[add_spectra]: headers do not match in '
-                           + ', '.join(f"{k} ({spec1.get(k)} vs {spec2.get(k)})"
-                                       for k in differ))
-    # header_match compares the bin counts; the bins have to be the same bins as well
-    for key in ('xfaces', 'mufaces', 'phifaces'):
-        if not np.allclose(spec1[key], spec2[key], rtol=1.0e-12, atol=0.0):
-            raise RuntimeError(f'[add_spectra]: {key} do not match')
+    # 'yerror' is the string the file header carries, "true" or "false", so it has to be
+    # compared, not tested: "false" is a non-empty string and used to take this branch,
+    # and spectra made without errors could not be combined at all.
+    has_errors = bool(spec1) and spec1['yerror'] == 'true'
+    return _combine_binned(spec1, spec2, method, 'spec', has_errors)
 
 
-    has_errors = spec1['yerror'] == 'true'
+def add_images(image1, image2, method='statistical'):
+    """
+    Combine two images into one, returned as a new dictionary, with the same two
+    methods and the same meaning as add_spectra.  Images carry no errors.
+    """
 
-    # the arrays are replaced, never written into, so a shallow copy leaves the inputs
-    # untouched
-    spec_out = spec1.copy()
-
-    if method == 'statistical':
-        # a file carries dt to eight decimals, so a spectrum read back is compared to
-        # one made in memory at that precision, not to the bit
-        if not math.isclose(spec1['dt'], spec2['dt'], rel_tol=1.0e-7):
-            raise RuntimeError('[add_spectra]: statistical addition requested but the '
-                               f"spectra have different integration times, "
-                               f"{spec1['dt']:.8e} and {spec2['dt']:.8e}")
-        spec_out['intensity'] = spec1['intensity'] + spec2['intensity']
-        if has_errors:
-            spec_out['errors'] = np.sqrt(spec1['errors']**2 + spec2['errors']**2)
-    else:
-        total_dt = spec1['dt'] + spec2['dt']
-        w1 = spec1['dt']/total_dt
-        w2 = spec2['dt']/total_dt
-        spec_out['intensity'] = w1*spec1['intensity'] + w2*spec2['intensity']
-        if has_errors:
-            spec_out['errors'] = np.sqrt((w1*spec1['errors'])**2
-                                         + (w2*spec2['errors'])**2)
-        spec_out['dt'] = total_dt
-
-    # each list's ntot is the photons run on its rank, so the total is the sum whether
-    # the parts are ranks of one interval or whole intervals
-    spec_out['ntot'] = spec1['ntot'] + spec2['ntot']
-
-    return spec_out
+    return _combine_binned(image1, image2, method, 'image', False)
 
 # Retrun x for desired units
 def convert_xaxis(newunit, spectrum):
@@ -1532,6 +1583,18 @@ def get_luminosity(spec):
 
     return lumin
 
+def sum_into_bins(shape, indices, weights):
+    """
+    Sum weights into a zero array of the given shape at the bin indices, a tuple of one
+    integer array per axis, all in range.  Does what np.add.at(out, indices, weights)
+    does, several times faster: the multi-index is flattened and summed with
+    np.bincount, which is a single pass in C rather than an unbuffered per-element loop.
+    """
+    flat = np.ravel_multi_index(indices, shape)
+    counts = np.bincount(flat, weights=weights, minlength=int(np.prod(shape)))
+    return counts.reshape(shape)
+
+
 def build_bins(xmin, xmax, nx, logx):
     """
     Builds a x-axis grid for binning the photons
@@ -1753,6 +1816,11 @@ def get_angle_bins_hybrid(photons, nmu, mufaces, nphi, phifaces):
     cph = np.cos(photons.x3)
     sph = np.sin(photons.x3)
     kph = -kx*sph + ky*cph
+    # radial component, used below to place the azimuth in the right quadrant; it was
+    # never defined here, so the hybrid binning raised NameError on every call
+    sth = np.sin(photons.x2)
+    cth = np.cos(photons.x2)
+    kr = (kx*cph + ky*sph)*sth + kz*cth
 
     # Bin based on k . z
     mu = abs(kz)
@@ -1865,23 +1933,19 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
 
     valid_weights = phots.weight[valid_phots] * phots.energy[valid_phots]
 
-    # Use np.add.at for accumulation
-    #np.add.at(count, (valid_phi, valid_mu, valid_x), 1.0)
-    np.add.at(intensity, (0, valid_phi, valid_mu, valid_x), valid_weights)
-
-    # Stokes planes follow the intensity in the order Q, U, V
+    # Accumulate each plane with a flat bincount; the Stokes planes follow the intensity
+    # in the order Q, U, V
+    bins = (valid_phi, valid_mu, valid_x)
+    shape = (nphi, nmu, nx)
     stokes = [phots.q, phots.u] if npol >= 2 else []
     if npol == 3:
         stokes.append(phots.v)
-    for m, spol in enumerate(stokes):
-        np.add.at(intensity, (m+1, valid_phi, valid_mu, valid_x),
-                  valid_weights * spol[valid_phots])
-
-    if yerror:
-        np.add.at(errors, (0, valid_phi, valid_mu, valid_x), valid_weights**2)
-        for m, spol in enumerate(stokes):
-            np.add.at(errors, (m+1, valid_phi, valid_mu, valid_x),
-                      (valid_weights * spol[valid_phots])**2)
+    plane_weights = [valid_weights]
+    plane_weights += [valid_weights * spol[valid_phots] for spol in stokes]
+    for m, w in enumerate(plane_weights):
+        intensity[m] = sum_into_bins(shape, bins, w)
+        if yerror:
+            errors[m] = sum_into_bins(shape, bins, w**2)
 
     # Compute frequency width and mean energy (in erg) of bins
     h = 6.62607015e-27
@@ -1947,18 +2011,24 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
 
     return spectrum
 
-def get_image_bins(phots, rcam, ifaces, xfaces, yfaces):
+def image_bins(phots, ifaces, xfaces, yfaces):
     """
-    Bin photons in image plane coordinates
+    Bin photons by the inclination of their direction and by where they fall in the
+    image plane of a distant observer looking back along that direction.
+
+    The observer sees a photon at its impact parameter, the part of its position
+    perpendicular to its direction, b = r - (r.k)k. The image axes are those of the
+    sky: y increases toward the +z pole, x toward decreasing azimuth, so that with
+    north up, east is to the left.  Inclination is cos(theta) of the direction, signed,
+    so that the two hemispheres fall in different bins.
     """
- 
+
     ninc = ifaces.size - 1
-    nx  = xfaces.size - 1
+    nx = xfaces.size - 1
     ny = yfaces.size - 1
 
     # Cartesian position and direction, whatever chart and wavevector basis the file
-    # carries.  Previously keyed on the raw coord string, which knew only the two legacy
-    # tags and read the spherical wavevector as if it were always on the local legs.
+    # carries.
     geometry = phots.props['geometry']
     if geometry == 'spherical':
         sth = np.sin(phots.x2)
@@ -1971,42 +2041,46 @@ def get_image_bins(phots, rcam, ifaces, xfaces, yfaces):
         zp = phots.x3
     else:
         xp, yp, zp = phots.x1, phots.x2, phots.x3
-    rp = np.sqrt(xp**2 + yp**2 + zp**2)
     kx, ky, kz = unit_direction_cartesian(phots)
-    kdx = xp*kx + yp*ky + zp*kz
 
+    # impact parameter vector
+    rdotk = xp*kx + yp*ky + zp*kz
+    bx = xp - rdotk*kx
+    by = yp - rdotk*ky
+    bz = zp - rdotk*kz
 
-    dl = np.sqrt(rcam**2-rp**2+kdx**2)-kdx
-    xf = xp + dl * kx
-    yf = yp + dl * ky
-    zf = zp + dl * kz
+    # The sky axes of the direction: theta-hat points away from the +z pole and phi-hat
+    # toward increasing azimuth, so up is -theta-hat and left is +phi-hat.  A direction
+    # along the pole has no azimuth; phi = 0 is taken, which only rotates that image.
+    sth = np.sqrt(np.maximum(1.0 - kz*kz, 0.0))
+    safe = np.where(sth > 0.0, sth, 1.0)
+    cph = np.where(sth > 0.0, kx/safe, 1.0)
+    sph = np.where(sth > 0.0, ky/safe, 0.0)
+    y = -(bx*kz*cph + by*kz*sph - bz*sth)
+    x = -(-bx*sph + by*cph)
 
-    cthf = zf/rcam
-    sthf = np.sqrt(1.-cthf**2)
-    phf =  np.arctan2(yf,xf)
-    cphf = np.cos(phf)
-    sphf = np.sin(phf)
-    np.set_printoptions(threshold=1000)
-    print(len(np.where(kz > 0.95)[0]))
-    print(len(np.where(kz < -0.95)[0]))
-    ibins = get_bins(cthf, ifaces, ninc, log=False)
-
-    kth = kx*cthf*cphf + ky*cthf*sphf - kz*sthf
-    kph = -kx*sphf + ky*cphf
-    norm = np.sqrt(1.+kth**2+kph**2)
-    y = kth*rcam*norm
-    x = kph*rcam*norm
-
-    xbins = get_bins(x,xfaces,nx,log=False)
-    ybins = get_bins(y,yfaces,ny,log=False)
-    #for i,q in enumerate(cthf):
-    #    print(q,ibins[i],x[i],y[i],xbins[i],ybins[i])
+    ibins = get_bins(kz, ifaces, ninc, log=False)
+    xbins = get_bins(x, xfaces, nx, log=False)
+    ybins = get_bins(y, yfaces, ny, log=False)
     return ibins, xbins, ybins
 
-def make_image_mc(phots, rcam, ninc, imin, imax, nen, emin, emax,
-                  nx, xmin, xmax, ny, ymin, ymax, unit, mask=None):
+
+def make_image(phots, ninc, imin, imax, nen, emin, emax, nx, xmin, xmax, ny, ymin, ymax,
+               unit='cm', mask=None):
     """
-    Create a binned image from photon list
+    Make an image (dict) of a photon list, as seen by distant observers.
+
+    Photons are binned in the cosine of the inclination of their direction (ninc bins
+    from imin to imax), in photon energy (nen logarithmic bins from emin to emax, in
+    keV) and in the image plane (nx by ny pixels over xmin..xmax by ymin..ymax, in the
+    units of the list's positions, recorded as unit; see image_bins for the axes).
+
+    intensity[0] is the surface brightness: energy per unit time, per unit pixel area
+    and per steradian of observer direction, the solid angle of an inclination bin
+    being 2 pi times its width in cos(theta) because the image is summed over azimuth.
+    It is also per Hz when nen > 1, and integrated over the band when nen == 1, so that
+    a bolometric image is not divided by an enormous bandwidth. The Stokes planes follow
+    in the order Q, U, V.  mask is True for photons to leave out.
     """
 
     # Store the image as a dictionary
@@ -2015,36 +2089,33 @@ def make_image_mc(phots, rcam, ninc, imin, imax, nen, emin, emax,
     # Store integration time
     image['dt'] = phots.dt
 
-    # Store total number of photons for refernce
+    # Store total number of photons for reference
     image['ntot'] = phots.ntot
 
     # Create bins for viewer inclination
-    ifaces = build_bins(imin,imax,ninc,False)
+    ifaces = build_bins(imin, imax, ninc, False)
     image['ninc'] = ninc
     image['ifaces'] = ifaces
 
-    # Create bins for observed frequency/photon energy
-    efaces = build_bins(emin,emax,nen,True)
+    # Create bins for observed photon energy
+    efaces = build_bins(emin, emax, nen, True)
     image['nen'] = nen
     image['efaces'] = efaces
 
     # Create bins for image plane, image will be uniform 2d array
     image['nx'] = nx
     image['ny'] = ny
-    xfaces = build_bins(xmin,xmax,nx,False)
-    yfaces = build_bins(ymin,ymax,ny,False)
+    xfaces = build_bins(xmin, xmax, nx, False)
+    yfaces = build_bins(ymin, ymax, ny, False)
     image['xfaces'] = xfaces
     image['yfaces'] = yfaces
 
     # set units
     image['unit'] = unit
 
-    ibins, xbins, ybins = get_image_bins(phots, rcam, ifaces, xfaces, yfaces)
-    #set ebins temporarily to 0
+    ibins, xbins, ybins = image_bins(phots, ifaces, xfaces, yfaces)
     everg = 1.6021772e-12
-    xphots = phots.energy/everg/1000.
-    ebins = get_bins(xphots, efaces, nen, True, True)
-    #ebins = np.zeros(len(ibins),dtype=int)
+    ebins = get_bins(phots.energy/everg/1000., efaces, nen, True, True)
 
     # Create intensity grid and loop over photons to add contribution
     image['polarized'] = parse_polarization(phots.polarized)
@@ -2059,7 +2130,7 @@ def make_image_mc(phots, rcam, ninc, imin, imax, nen, emin, emax,
     if mask is not None:
         ibins[mask] = -1
 
-    intensity = np.zeros((nintens,ninc,nen,ny,nx))
+    intensity = np.zeros((nintens, ninc, nen, ny, nx))
 
     # Create mask for valid indices
     valid_phots = (ibins >= 0) & (ebins >= 0) & (xbins >= 0) & (ybins >= 0)
@@ -2071,40 +2142,34 @@ def make_image_mc(phots, rcam, ninc, imin, imax, nen, emin, emax,
     valid_x = xbins[valid_phots]
     valid_weights = phots.weight[valid_phots] * phots.energy[valid_phots]
 
-    np.add.at(intensity, (0, valid_i, valid_e, valid_y, valid_x), valid_weights)
-
-    # Stokes planes follow the intensity in the order Q, U, V
+    # Accumulate each plane with a flat bincount; the Stokes planes follow the intensity
+    # in the order Q, U, V
+    bins = (valid_i, valid_e, valid_y, valid_x)
+    shape = (ninc, nen, ny, nx)
     stokes = [phots.q, phots.u] if npol >= 2 else []
     if npol == 3:
         stokes.append(phots.v)
+    intensity[0] = sum_into_bins(shape, bins, valid_weights)
     for m, spol in enumerate(stokes):
-        np.add.at(intensity, (m+1, valid_i, valid_e, valid_y, valid_x),
-                  valid_weights * spol[valid_phots])
-    # Normalize intensities
-    mumid = abs(0.5*(ifaces[1:]+ifaces[:-1]))
-    dmu = ifaces[1:]-ifaces[:-1]
+        intensity[m+1] = sum_into_bins(shape, bins, valid_weights * spol[valid_phots])
 
-    if image['nen'] == 1:
+    # Normalize: per unit time, per steradian of direction, per pixel area, and per Hz
+    # unless the image is a single band
+    domega = 2.*np.pi*(ifaces[1:] - ifaces[:-1])
+    if nen == 1:
         dnu = np.array([1.])
     else:
         h = 6.62607015e-27
-        everg = 1.6021772e-12
-        dnu = (efaces[1:]-efaces[:-1])*1000.*everg/h
-
-    dx = xfaces[1:]-xfaces[:-1]
-    dy = yfaces[1:]-yfaces[:-1]
-    area = np.outer(dy,dx)
-    for k in range(nintens):
-        for j in range(ninc):
-            for i in range(nen):
-                # not divided by dnu for now
-                fac = dnu[i]*dmu[j]*mumid[j]*2.*np.pi*phots.dt
-                intensity[k,j,i,:,:] /= fac*area
-
+        dnu = (efaces[1:] - efaces[:-1])*1000.*everg/h
+    area = np.outer(yfaces[1:] - yfaces[:-1], xfaces[1:] - xfaces[:-1])
+    intensity /= (phots.dt * domega[np.newaxis, :, np.newaxis, np.newaxis, np.newaxis]
+                  * dnu[np.newaxis, np.newaxis, :, np.newaxis, np.newaxis]
+                  * area[np.newaxis, np.newaxis, np.newaxis, :, :])
 
     image['intensity'] = intensity
 
     return image
+
 
 def subsample_polarization(q,u,x,y,step,average):
     """
@@ -2139,9 +2204,17 @@ def subsample_polarization(q,u,x,y,step,average):
 
 
 def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, step=4,
-               ax=None, **kwargs):
+               ax=None, normalize=True, **kwargs):
     """
-    Plot an image
+    Plot an image: one inclination bin iinc and energy bin ie of it, as the quantity
+    itype: 'intensity', a Stokes plane 'q', 'u' or 'v', 'polangle' or 'polfrac'.
+
+    The image holds the Stokes planes summed like the intensity, so Q is polarized
+    energy per unit area and solid angle, not a fraction.  With normalize the Stokes
+    planes and the polarized intensity are divided by I, pixel by pixel, giving Q/I,
+    U/I, V/I and the polarization fraction; without it they are shown as stored.  The
+    polarization angle is a ratio and is the same either way.  pvec draws the
+    polarization vectors, with the same normalization.
     """
     if ax is None:
         # Create figure, axis and assume a single plot window
@@ -2157,35 +2230,43 @@ def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, st
         raise RuntimeError("Polarization type requested ("+itype+
                            ") but image mode is '"
                            +parse_polarization(image['polarized'])+"'")
+
+    # the planes of this inclination and energy; copies, since vals is edited below
+    planes = np.array(image['intensity'][:,iinc,ie,:,:])
+    inten = planes[0]
+    if normalize:
+        # a pixel with no intensity has no polarization to show
+        scale = np.divide(1.0, inten, out=np.zeros_like(inten), where=inten > 0.0)
+        tag = "/I"
+    else:
+        scale = np.ones_like(inten)
+        tag = ""
+
     if itype == 'intensity':
-        vals = image['intensity'][0,iinc,ie,:,:]
+        vals = inten
         clabel=r"$I$"
         if vmin is None:
             vmin = 1.e-5*np.max(vals)
     elif itype == 'q':
-        vals = image['intensity'][1,iinc,ie,:,:]
-        clabel=r"$Q/I$"
+        vals = planes[1]*scale
+        clabel=rf"$Q{tag}$"
     elif itype == 'u':
-        vals = image['intensity'][2,iinc,ie,:,:]
-        clabel=r"$U/I$"
+        vals = planes[2]*scale
+        clabel=rf"$U{tag}$"
     elif itype == 'v':
-        vals = image['intensity'][3,iinc,ie,:,:]
-        clabel=r"$V/I$"
+        vals = planes[3]*scale
+        clabel=rf"$V{tag}$"
     elif itype == 'polangle':
-        q = image['intensity'][1,iinc,ie,:,:]
-        u = image['intensity'][2,iinc,ie,:,:]
-        vals = 90./np.pi*np.arctan2(u,q)
+        vals = 90./np.pi*np.arctan2(planes[2],planes[1])
         vals[vals < 0.] += 360.
         if vmin is None:
             vmin = 0.
         clabel = r"$\rm Pol.\; Angle$"
     elif itype == 'polfrac':
-        q = image['intensity'][1,iinc,ie,:,:]
-        u = image['intensity'][2,iinc,ie,:,:]
-        vals = np.sqrt(q**2+u**2)
+        vals = np.sqrt(planes[1]**2+planes[2]**2)*scale
         if vmin is None:
             vmin = 0.
-        clabel = r"$\rm Pol.\; Fraction$"
+        clabel = r"$\rm Pol.\; Fraction$" if normalize else r"$\rm Pol.\; Intensity$"
     else:
         raise RuntimeError("Type:"+itype+" is not defined.")
 
@@ -2206,13 +2287,17 @@ def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, st
     x_2d, y_2d = np.meshgrid(x,y)
     im = plt.pcolormesh(x_2d, y_2d, vals, cmap=cmap, norm=norm)
 
-    plt.xlim(image['xfaces'][0],image['xfaces'][-1])
-    plt.ylim(image['yfaces'][0],image['yfaces'][-1])
+    # the image's own edges, or a zoom given as xmin, xmax, ymin, ymax in kwargs
+    def limit(key, default):
+        value = kwargs.get(key)
+        return default if value is None else value
+    plt.xlim(limit('xmin', image['xfaces'][0]), limit('xmax', image['xfaces'][-1]))
+    plt.ylim(limit('ymin', image['yfaces'][0]), limit('ymax', image['yfaces'][-1]))
     if image['unit'] == 'cm':
         plt.xlabel(r"$x \; (\rm cm)$")
         plt.ylabel(r"$y \; (\rm cm)$")
         if itype == 'intensity':
-            clabel=r"$I \; (\rm erg/s/cm^2)$"
+            clabel=r"$I \; (\rm erg/s/cm^2/sr)$"
     else:
         plt.xlabel(r"$x$")
         plt.ylabel(r"$y$")
@@ -2221,8 +2306,8 @@ def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, st
     plt.gca().set_aspect('equal')
     if pvec:
         if is_polarized(image['polarized']):
-            q = image['intensity'][1,iinc,ie,:,:]
-            u = image['intensity'][2,iinc,ie,:,:]
+            q = planes[1]*scale
+            u = planes[2]*scale
             q, u, x, y = subsample_polarization(q,u,x,y,step,average)
             x_pol, y_pol = np.meshgrid(x,y)
 

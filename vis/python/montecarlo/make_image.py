@@ -1,137 +1,152 @@
 #! /usr/bin/env python
 
 """
-Read in photon list and create an image from the list.
+Bin photon list files into images with athena_mc.make_image().
+
+    make_image.py XMAX YMAX LIST [LIST ...] [options]
+
+Each photon is placed in the image plane of a distant observer looking back along its
+direction, at its impact parameter: the part of its position perpendicular to its
+direction, in the units of the list's positions.  The plane is --nx by --ny pixels
+from -XMAX to XMAX and -YMAX to YMAX (or from --xmin and --ymin), with the sky's axes,
+y toward the +z pole and x toward decreasing azimuth, north up and east left.
+
+Observers are binned by the cosine of the inclination of the direction, --ninc bins
+from --imin to --imax (default 16 over -1 to 1, so the two hemispheres are separate),
+and photons by energy, --nen logarithmic bins from --emin to --emax in keV (default one
+bin over everything).  The pixel values are the surface brightness, erg/s per unit area
+per steradian of direction, and per Hz when there is more than one energy bin.  The
+images written are read back by plot_image.py and athena_mc.read_image().
+
+How the lists are grouped
+-------------------------
+As for make_spectrum.py: the ranks of one output, <base>.proc<rank>.<output>.list, are
+summed into one image, <base>.<output>.img, and with --combine the outputs are averaged
+weighted by their integration times into <base>.img.
+
+Examples
+--------
+A 64 by 64 pixel image out to 20 (list units) of an MPI run's one output, into
+xrb.out1.00000.img:
+
+    make_image.py 20. 20. xrb.out1.proc*.00000.list --nx 64 --ny 64
+
+All outputs of the run averaged into xrb.out1.img, with four inclination bins covering
+the upper hemisphere only:
+
+    make_image.py 20. 20. xrb.out1.proc*.list --nx 64 --ny 64 --combine \\
+        --ninc 4 --imin 0. --imax 1.
+
+Three energy bands, 1-3, 3-10 and 10-30 keV, so that plot_image.py --ie selects one:
+
+    make_image.py 20. 20. xrb.out1.proc*.list --nx 64 --ny 64 --combine \\
+        --nen 3 --emin 1. --emax 30.
+
+A rectangular field, and a screen function from screen.py in the working directory
+that returns True for photons to leave out:
+
+    make_image.py 30. 10. disk.out1.proc*.list --nx 96 --ny 32 --screen above_zmax
+
+--unit records the unit of the positions in the file for the plot's axis labels;
+--outfile overrides the default output name.
 """
 
 # python standard modules
 import argparse
-import numpy as np
 
 # Athena++ modules
 import athena_mc as athenamc
-from athena_mc import Photons
+import mc_cli
 
-try:
-    import screen
-except ModuleNotFoundError:
-    pass
 
-# Main function
-def main(**kwargs):
+def main(args):
+    """
+    Make one image per output, or one for all outputs together, from the options
+    returned by parse_args().  The streaming, grouping and writing are mc_cli's; this
+    supplies how one chunk of photons becomes an image.
+    """
 
-    # Filenames for io
-    infile = kwargs.pop('infile')
-    outfile = kwargs.pop('outfile')
+    def bin_chunk(phots, mask):
+        return athenamc.make_image(phots, args.ninc, args.imin, args.imax,
+                                   args.nen, args.emin, args.emax,
+                                   args.nx, args.xmin, args.xmax,
+                                   args.ny, args.ymin, args.ymax,
+                                   unit=args.unit, mask=mask)
 
-    # Read photon list
-    phlist = athenamc.read_list(infile)
-    phots = Photons(phlist)
+    mc_cli.bin_outputs(args, 'make_image.py', bin_chunk, athenamc.add_images,
+                       athenamc.write_image)
 
-    # Set parameters
-    rcam = kwargs.pop('rcam')
-    ninc = kwargs.pop('ninc')
-    imin = kwargs.pop('imin')
-    imax = kwargs.pop('imax')
-    nx = kwargs.pop('nx')
-    xmax = kwargs.pop('xmax')
-    xmin = kwargs.pop('xmin')
-    if (xmin is None):
-        xmin = -xmax
-    ny = kwargs.pop('ny')
-    ymax = kwargs.pop('ymax')
-    ymin = kwargs.pop('ymin')
-    if (ymin is None):
-        ymin = -ymax
-    unit = kwargs.pop('unit')
-    nen = kwargs.pop('nen')
-    emin = kwargs.pop('emin')
-    emax = kwargs.pop('emax')
 
-    # check for screening function
-    screen_name = kwargs.pop('screen')
-    if screen_name != 'no_screen':
-        screen_function = getattr(screen, screen_name)
-        mask = screen_function(phots)
-    else:
-        mask = None
+def parse_args(argv=None):
+    """
+    Parse and check command-line options; exits with a usage message on bad input
+    """
 
-    # Create image
-    print(f"Generating image from list.")
-    image = athenamc.make_image_mc(phots,rcam,ninc,imin,imax,
-                                   nen,emin,emax,
-                                   nx,xmin,xmax,
-                                   ny,ymin,ymax,
-                                   unit=unit,mask=mask,**kwargs)
-
-    # Write image to file
-    if outfile is None:
-        outfile = infile.replace('.list','.img')
-    athenamc.write_image(outfile,image)
-
-# Execute main function
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('infile',
-        help='input photon list filename')
-    parser.add_argument('rcam',
-        type=float,
-        help='camera radius')
-    parser.add_argument('xmax',
-        type=float,
-        help='maximum x')
-    parser.add_argument('ymax',
-        type=float,
-        help='maximum y')
-    parser.add_argument('--ninc',
-        default=16,
-        type=int,
-        help='number of camera inclination bins')
-    parser.add_argument('--imin',
-        default=-1.,
-        type=float,
-        help='minimum for inclination variable')
-    parser.add_argument('--imax',
-        default=1.,
-        type=float,
-        help='maximum for inclination variable')
-    parser.add_argument('--nx',
-        type=int,
-        default=16,
-        help='number of x pixels per row')
-    parser.add_argument('--ny',
-        type=int,
-        default=16,
-        help='number of y pixels per column')
-    parser.add_argument('--unit',
-        default='cm',
-        help='unit for x, y arrays')
-    parser.add_argument('--xmin',
-        type=float,
-        default=None,
-        help='minimum x')
-    parser.add_argument('--ymin',
-        type=float,
-        default=None,
-        help='minimum y')
-    parser.add_argument('--nen',
-        type=int,
-        default=1,
-        help='number of camera energy bins')
-    parser.add_argument('--emin',
-        type=float,
-        default=1.e-300,
-        help='minimum for energy variable')
-    parser.add_argument('--emax',
-        type=float,
-        default=1.e300,
-        help='maximum for energy variable')
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('xmax', type=float,
+                        help='right edge of the image, in the units of the positions')
+    parser.add_argument('ymax', type=float,
+                        help='top edge of the image')
+    parser.add_argument('infile', nargs='+',
+                        help='input photon list filename(s); a quoted glob is expanded')
+    parser.add_argument('--xmin', type=float,
+                        help='left edge of the image (default: -xmax)')
+    parser.add_argument('--ymin', type=float,
+                        help='bottom edge of the image (default: -ymax)')
+    parser.add_argument('--nx', type=int, default=16,
+                        help='number of pixels across')
+    parser.add_argument('--ny', type=int, default=16,
+                        help='number of pixels down')
+    parser.add_argument('--ninc', type=int, default=16,
+                        help='number of bins in the cosine of the inclination')
+    parser.add_argument('--imin', type=float, default=-1.0,
+                        help='minimum cosine of the inclination')
+    parser.add_argument('--imax', type=float, default=1.0,
+                        help='maximum cosine of the inclination')
+    parser.add_argument('--nen', type=int, default=1,
+                        help='number of logarithmic energy bins')
+    parser.add_argument('--emin', type=float, default=1.0e-300,
+                        help='minimum photon energy (keV)')
+    parser.add_argument('--emax', type=float, default=1.0e300,
+                        help='maximum photon energy (keV)')
+    parser.add_argument('--unit', default='cm',
+                        help='unit of the positions in the lists, recorded for the plots')
     parser.add_argument('--screen',
-        default = 'no_screen',
-        help = 'name of screen function in screen.py file')
+                        help='name of a function in a user-supplied screen.py that takes '
+                             'a Photons chunk and returns True for photons to leave out')
+    parser.add_argument('--calclum', action='store_true',
+                        help='report the luminosity of each output from its lists')
+    parser.add_argument('--combine', action='store_true',
+                        help='average all outputs into one image, weighted by their '
+                             'integration times')
     parser.add_argument('--outfile',
-        default=None,
-        help='output filename for spectrum')
+                        help='output filename (default: <base>.<output>.img per output, '
+                             '<base>.img with --combine); with several outputs the '
+                             'output number is put before its extension')
 
-    args = parser.parse_args()
-    main(**vars(args))
+    args = parser.parse_args(argv)
+
+    # checks on the binning
+    if args.xmin is None:
+        args.xmin = -args.xmax
+    if args.ymin is None:
+        args.ymin = -args.ymax
+    if min(args.nx, args.ny, args.ninc, args.nen) < 1:
+        parser.error("--nx, --ny, --ninc and --nen must be positive")
+    if args.xmin >= args.xmax or args.ymin >= args.ymax:
+        parser.error(f"need xmin < xmax and ymin < ymax, got {args.xmin}..{args.xmax} "
+                     f"and {args.ymin}..{args.ymax}")
+    if not -1.0 <= args.imin < args.imax <= 1.0:
+        parser.error(f"need -1 <= imin < imax <= 1, got {args.imin} and {args.imax}")
+    if args.emin <= 0.0 or args.emin >= args.emax:
+        parser.error(f"need 0 < emin < emax, got {args.emin} and {args.emax}")
+
+    # the inputs, grouped into outputs, and the names of the images to write
+    mc_cli.check_inputs(parser, args, '.img')
+
+    return args
+
+
+if __name__ == '__main__':
+    main(parse_args())
