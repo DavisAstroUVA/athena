@@ -71,11 +71,12 @@ ANGLEBINS = ['cartesian', 'spherical', 'hybrid']
 
 
 
-def main(args):
+def main(args, screen_function=None):
     """
     Make one spectrum per output, or one for all outputs together, from the options
     returned by parse_args().  The streaming, grouping and writing are mc_cli's; this
-    supplies how one chunk of photons becomes a spectrum.
+    supplies how one chunk of photons becomes a spectrum.  A caller such as a notebook
+    can pass its own screen function instead of naming one in screen.py.
     """
 
     def bin_chunk(phots, mask):
@@ -87,7 +88,7 @@ def main(args):
                                       yerror=args.yerror, mask=mask)
 
     mc_cli.bin_outputs(args, 'make_spectrum.py', bin_chunk, athenamc.add_spectra,
-                       athenamc.write_spectrum)
+                       athenamc.write_spectrum, screen_function)
 
 
 def parse_args(argv=None):

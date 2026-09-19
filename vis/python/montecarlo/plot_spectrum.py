@@ -214,10 +214,11 @@ def plot_blackbody(ax, xfaces, xunit, yunit, bbtemp, bbnorm, *, imu=None, iphi=N
     ax.plot(x, y, linestyle='-', label=f"blackbody, T={bbtemp:.3g} K")
 
 
-def main(args):
+def make_figure(args):
     """
     Read each input spectrum with athena_mc.py and plot them on a shared axis, using the
-    options returned by parse_args().
+    options returned by parse_args().  Returns the figure, for a notebook to show or a
+    caller to save.
     """
 
     axis_opts = {key: getattr(args, key) for key in AXIS_OPTS}
@@ -250,7 +251,15 @@ def main(args):
     if ax.get_legend_handles_labels()[0]:
         ax.legend()
 
-    # save plot to outfile
+    return fig
+
+
+def main(args):
+    """
+    Make the figure and save it to args.outfile.
+    """
+
+    fig = make_figure(args)
     fig.savefig(args.outfile)
     plt.close(fig)
 

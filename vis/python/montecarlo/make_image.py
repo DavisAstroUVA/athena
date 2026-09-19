@@ -47,8 +47,8 @@ that returns True for photons to leave out:
 
     make_image.py 30. 10. disk.out1.proc*.list --nx 96 --ny 32 --screen above_zmax
 
---unit records the unit of the positions in the file for the plot's axis labels;
---outfile overrides the default output name.
+Positions are in code units and the image axes are left unlabeled unless --unit names
+a unit for the plot's axis labels; --outfile overrides the default output name.
 """
 
 # python standard modules
@@ -59,11 +59,12 @@ import athena_mc as athenamc
 import mc_cli
 
 
-def main(args):
+def main(args, screen_function=None):
     """
     Make one image per output, or one for all outputs together, from the options
     returned by parse_args().  The streaming, grouping and writing are mc_cli's; this
-    supplies how one chunk of photons becomes an image.
+    supplies how one chunk of photons becomes an image.  A caller such as a notebook
+    can pass its own screen function instead of naming one in screen.py.
     """
 
     def bin_chunk(phots, mask):
@@ -71,10 +72,10 @@ def main(args):
                                    args.nen, args.emin, args.emax,
                                    args.nx, args.xmin, args.xmax,
                                    args.ny, args.ymin, args.ymax,
-                                   unit=args.unit, mask=mask)
+                                   unit=args.unit or '', mask=mask)
 
     mc_cli.bin_outputs(args, 'make_image.py', bin_chunk, athenamc.add_images,
-                       athenamc.write_image)
+                       athenamc.write_image, screen_function)
 
 
 def parse_args(argv=None):
@@ -110,8 +111,9 @@ def parse_args(argv=None):
                         help='minimum photon energy (keV)')
     parser.add_argument('--emax', type=float, default=1.0e300,
                         help='maximum photon energy (keV)')
-    parser.add_argument('--unit', default='cm',
-                        help='unit of the positions in the lists, recorded for the plots')
+    parser.add_argument('--unit',
+                        help='unit of the positions in the lists, recorded for the plot '
+                             'axis labels; by default they are code units and unlabeled')
     parser.add_argument('--screen',
                         help='name of a function in a user-supplied screen.py that takes '
                              'a Photons chunk and returns True for photons to leave out')

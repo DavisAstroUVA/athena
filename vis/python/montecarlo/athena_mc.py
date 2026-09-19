@@ -2066,14 +2066,15 @@ def image_bins(phots, ifaces, xfaces, yfaces):
 
 
 def make_image(phots, ninc, imin, imax, nen, emin, emax, nx, xmin, xmax, ny, ymin, ymax,
-               unit='cm', mask=None):
+               unit='', mask=None):
     """
     Make an image (dict) of a photon list, as seen by distant observers.
 
     Photons are binned in the cosine of the inclination of their direction (ninc bins
     from imin to imax), in photon energy (nen logarithmic bins from emin to emax, in
     keV) and in the image plane (nx by ny pixels over xmin..xmax by ymin..ymax, in the
-    units of the list's positions, recorded as unit; see image_bins for the axes).
+    units of the list's positions, code units unless unit names one for the plot's axis
+    labels; see image_bins for the axes).
 
     intensity[0] is the surface brightness: energy per unit time, per unit pixel area
     and per steradian of observer direction, the solid angle of an inclination bin
@@ -2224,7 +2225,10 @@ def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, st
     vmin = kwargs['vmin']
     vmax = kwargs['vmax']
     cmap = plt.get_cmap(kwargs['colormap'])
-    plt.figure()
+    # Draw on the figure that holds ax.  A stray plt.figure() here used to open a second,
+    # empty figure and draw into that instead, so the caller's figure stayed blank and a
+    # notebook showed two frames.
+    plt.sca(ax)
 
     if not check_polarization(image, itype, kind='image'):
         raise RuntimeError("Polarization type requested ("+itype+
@@ -2293,10 +2297,13 @@ def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, st
         return default if value is None else value
     plt.xlim(limit('xmin', image['xfaces'][0]), limit('xmax', image['xfaces'][-1]))
     plt.ylim(limit('ymin', image['yfaces'][0]), limit('ymax', image['yfaces'][-1]))
-    if image['unit'] == 'cm':
-        plt.xlabel(r"$x \; (\rm cm)$")
-        plt.ylabel(r"$y \; (\rm cm)$")
-        if itype == 'intensity':
+    # Positions are in code units and the axes are unlabeled unless the image records a
+    # unit; only for cm are the weights known to be erg, so only then does I get units.
+    unit = image.get('unit') or ''
+    if unit:
+        plt.xlabel(rf"$x \; (\rm {unit})$")
+        plt.ylabel(rf"$y \; (\rm {unit})$")
+        if itype == 'intensity' and unit == 'cm':
             clabel=r"$I \; (\rm erg/s/cm^2/sr)$"
     else:
         plt.xlabel(r"$x$")
@@ -2321,6 +2328,8 @@ def plot_image(image, iinc, ie, itype='intensity', pvec=False, average=False, st
         else:
             raise RuntimeError("Polarization vectors requested but image is unpolarized")
 
+    return ax.figure
+
 def write_image(filename,image):
     """
     Writes image to output file
@@ -2340,7 +2349,9 @@ def write_image(filename,image):
     outfile.write("nen={:d}\n".format(nen))
     outfile.write("nx={:d}\n".format(nx))
     outfile.write("ny={:d}\n".format(ny))
-    outfile.write("unit="+image['unit']+"\n")
+    # 'none' for code units: the reader scans each value from its second character, so an
+    # empty value would swallow the next line
+    outfile.write("unit="+(image.get('unit') or 'none')+"\n")
     outfile.write("ntot={:d}\n".format(image['ntot']))
     outfile.write("nintens={:d}\n".format(image['nintens']))
     outfile.write("polarized="+parse_polarization(image['polarized'])+"\n")
@@ -2439,6 +2450,8 @@ def read_image(filename):
     while raw_data_ascii[end_of_line_index] != '\n':
         end_of_line_index += 1
     image['unit'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
+    if image['unit'] == 'none':   # code units, see write_image
+        image['unit'] = ''
     current_index = end_of_line_index + 1
 
     current_index = skip_string("ntot=")

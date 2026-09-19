@@ -1,5 +1,5 @@
 """
-What the scripts that turn photon lists into spectra and images share.
+Shared utilities for generating spectra and images from photon lists
 
 make_spectrum.py and make_image.py take the same input, the lists a run writes, named
 <base>.proc<rank>.<output>.list, and treat it the same way: each list is streamed
@@ -197,16 +197,48 @@ def bin_output(out, bin_chunk, add, screen_function=None, calclum=False):
     return result, luminosity
 
 
-def bin_outputs(args, script, bin_chunk, add, write):
+def argv_from(positional, options):
+    """
+    Build a command line from values, so that a notebook or another script can use a
+    script's parse_args() and its checks instead of a second interface.  positional is
+    the list of positional values in order (a nested list or tuple is spread, for a
+    file list); options maps option names without the leading dashes to values: None
+    and False are left out, True gives a bare flag, a list or tuple gives the flag
+    followed by each value, anything else the flag followed by its str().
+    """
+
+    argv = []
+    for value in positional:
+        if isinstance(value, (list, tuple)):
+            argv.extend(str(v) for v in value)
+        else:
+            argv.append(str(value))
+    for name, value in options.items():
+        if value is None or value is False:
+            continue
+        flag = '--' + name
+        if value is True:
+            argv.append(flag)
+        elif isinstance(value, (list, tuple)):
+            argv.append(flag)
+            argv.extend(str(v) for v in value)
+        else:
+            argv.extend([flag, str(value)])
+    return argv
+
+
+def bin_outputs(args, script, bin_chunk, add, write, screen_function=None):
     """
     The main loop of a binning script: one result per output written to args.outnames,
     or with args.combine all outputs averaged in time into args.outnames[0].  script
     is the caller's name, for messages; bin_chunk and add are as for bin_list, and
     write(filename, result) writes one result.  args.screen names the screen function
-    and args.calclum asks for the luminosity of each output to be printed.
+    in the user's screen.py unless one is passed in directly, as a notebook does, and
+    args.calclum asks for the luminosity of each output to be printed.
     """
 
-    screen_function = load_screen(args.screen, script)
+    if screen_function is None:
+        screen_function = load_screen(args.screen, script)
     calclum = getattr(args, 'calclum', False)
 
     combined = {}
