@@ -135,6 +135,22 @@ int main(int argc, char *argv[]) {
   Globals::nranks  = 1;
 #endif  // MPI_PARALLEL
 
+  // Monte Carlo builds only: wall clock from here, so the phases of setup can be stamped
+  // as they finish and their total reported at the end.
+  const std::chrono::steady_clock::time_point program_start =
+      std::chrono::steady_clock::now();
+  auto setup_seconds = [&program_start]() {
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - program_start).count();
+  };
+  auto setup_stamp = [&setup_seconds](const char *what) {
+    if (MONTE_CARLO_ENABLED && Globals::my_rank == 0) {
+      char stamp[32];
+      std::snprintf(stamp, sizeof(stamp), "[setup %.1f s] ", setup_seconds());
+      std::cout << stamp << what << std::endl;
+    }
+  };
+
   //--- Step 2. --------------------------------------------------------------------------
   // Check for command line options and respond.
 
@@ -365,6 +381,8 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  setup_stamp("mesh and Monte Carlo objects constructed");
+
   //--- Step 5. --------------------------------------------------------------------------
   // Construct and initialize TaskList
 
@@ -429,6 +447,8 @@ int main(int argc, char *argv[]) {
     return(0);
   }
 #endif // ENABLE_EXCEPTIONS
+  setup_stamp("mesh initialized: problem generator (snapshot read), boundaries, "
+              "primitives");
 
 #ifdef ENABLE_EXCEPTIONS
   try {
@@ -495,8 +515,15 @@ int main(int argc, char *argv[]) {
   //=== Step 8. === START OF MAIN INTEGRATION LOOP =======================================
   // For performance, there is no error handler protecting this step (except outputs)
 
+  setup_stamp("Monte Carlo blocks set up (opacity tables)");
+  const double setup_time = setup_seconds();
   if (Globals::my_rank == 0) {
-    std::cout << "\nSetup complete, entering main loop...\n" << std::endl;
+    if (MONTE_CARLO_ENABLED) {
+      std::cout << "\nSetup complete after " << setup_time
+                << " s, entering main loop...\n" << std::endl;
+    } else {
+      std::cout << "\nSetup complete, entering main loop...\n" << std::endl;
+    }
   }
 
   clock_t tstart = clock();
@@ -745,6 +772,8 @@ int main(int argc, char *argv[]) {
       const double scat = static_cast<double>(pmc->nscat_run);
       std::cout << std::endl
                 << "wall time used = " << wall_time << std::endl
+                << "setup wall time = " << setup_time << " (before the main loop; not "
+                << "in the figures below)" << std::endl
                 << "cpu time used  = " << cpu_time_sum << " summed over "
                 << Globals::nranks << " rank(s) (" << cpu_time_rank0 << " on rank 0)"
                 << std::endl

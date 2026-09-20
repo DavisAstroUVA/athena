@@ -11,6 +11,7 @@
 
 // C++ headers
 #include <algorithm>  // max()
+#include <chrono>     // steady_clock
 #include <string>     // c_str(), string
 
 // Athena++ headers
@@ -58,6 +59,7 @@ namespace {
   long long nff_cells = 0, ntab_cells = 0;
   long long noff_rho = 0, noff_temp = 0;
   long long ncut_cells = 0;  // above tcut, given CUT_VALUE instead of either
+  double table_seconds = 0.;  // spent building the per-cell tables on this rank
   int ngray_rows = 0, ntable_rows = 0;
 
   //functions
@@ -317,6 +319,9 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
       logemax = log(everg*pin->GetReal("problem", "emax"));
     }
   } else {
+    // Time the table build on this rank, summed over blocks and reported after the last
+    const std::chrono::steady_clock::time_point table_start =
+        std::chrono::steady_clock::now();
 
     int lid = pmy_block->lid;
     // Compute opacity table corresponding to each cell and frequency
@@ -467,6 +472,14 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
       }
     }
     eta_nu_tab.DeleteAthenaArray();
+
+    table_seconds += std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - table_start).count();
+    if (Globals::my_rank == 0 && lid == pmy_block->pmy_mesh->nblocal - 1) {
+      std::cout << "  opacity and emission tables on rank 0: "
+                << pmy_block->pmy_mesh->nblocal << " blocks, " << table_seconds << " s"
+                << std::endl;
+    }
   }
 
 }

@@ -30,6 +30,19 @@ void HDF5ReadRealArray(const char *filename, const char *dataset_name, int rank_
                        AthenaArray<Real> &array,
                        bool collective=false, bool noop=false);
 
+#ifdef HDF5OUTPUT
+// External library headers
+#include <hdf5.h>  // hid_t
+
+// The same read from a file the caller opened (with H5Pset_fapl_mpio when the reads are
+// collective) and will close, for reading many hyperslabs without an open per read
+void HDF5ReadRealArray(hid_t file, const char *dataset_name, int rank_file,
+                       const int *start_file, const int *count_file, int rank_mem,
+                       const int *start_mem, const int *count_mem,
+                       AthenaArray<Real> &array,
+                       bool collective=false, bool noop=false);
+#endif
+
 void HDF5TableLoader(const char *filename, InterpTable2D* ptable, const int nvar,
                      const char **var_names,
                      const char *x2lim_name=NULL,
