@@ -35,6 +35,7 @@ namespace {
   Real abh, r_hor;
   Real dcut;
   Real tcut;
+  constexpr Real CUT_VALUE = 1.e-20;
   std::string emission_type;
   // frequency table parameters
   int nfre, nrho, ntem;
@@ -56,6 +57,7 @@ namespace {
   // that hides the very thing it is reporting.
   long long nff_cells = 0, ntab_cells = 0;
   long long noff_rho = 0, noff_temp = 0;
+  long long ncut_cells = 0;  // above tcut, given CUT_VALUE instead of either
   int ngray_rows = 0, ntable_rows = 0;
 
   //functions
@@ -298,8 +300,8 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
 
 void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
-  dcut = pin->GetOrAddReal("problem", "dcut",1.e-20);
-  tcut = pin->GetOrAddReal("problem", "tcut",1.e20);
+  dcut = pin->GetOrAddReal("problem", "dcut",1.e-20);   // code units
+  tcut = pin->GetOrAddReal("problem", "tcut",1.e20);    // Kelvin
   if (emission_type == "freefree") {
     // Set the energy boundaries for free-free emission
     tnorm = pin->GetOrAddBoolean("problem","tnorm",false);
@@ -323,11 +325,18 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
         for(int i=is; i<=ie; ++i) {
           // Tables are indexed from the first active cell, not from the ghost zone.
           const int kt = k-ks, jt = j-js, it = i-is;
+          Real temp = tgas(k,j,i);
+          // A cell above tcut takes no part: a negligible extinction at every frequency,
+          // which also makes its emissivity table below negligible.
+          if (temp > tcut) {
+            ++ncut_cells;
+            for(int l=0; l<nfre; ++l) opact(lid,kt,jt,it,l) = CUT_VALUE;
+            continue;
+          }
           bool on_grid = true;
           Real ld = log10(rho(k,j,i));
           //ld = (ld < lmind) ? lmind : ld;
           //ld = (ld > lmaxd) ? lmaxd : ld;
-          Real temp = tgas(k,j,i);
           Real lt = log10(temp);
           //lt = (lt < lmint) ? lmint : lt;
           //lt = (lt > lmaxt) ? lmaxt : lt;
@@ -449,6 +458,11 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
               emis_cum(lid,kt,jt,it,l) /= emis_tot(lid,kt,jt,it);
             }
           }
+          // A cell above tcut emits CUT_VALUE outright, whatever the Planck function at
+          // its temperature made of the CUT_VALUE extinction.  Its cumulative array,
+          // normalized above from that shape, still gives SampleEmissivity a valid
+          // distribution for the negligible weight it will carry.
+          if (tgas(k,j,i) > tcut) emis_tot(lid,kt,jt,it) = CUT_VALUE;
         }
       }
     }
@@ -473,9 +487,9 @@ void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
 
   if (emission_type == "freefree") return;  // no table was ever read
 
-  long long tot[4] = {ntab_cells, nff_cells, noff_rho, noff_temp};
+  long long tot[5] = {ntab_cells, nff_cells, noff_rho, noff_temp, ncut_cells};
 #ifdef MPI_PARALLEL
-  MPI_Allreduce(MPI_IN_PLACE, tot, 4, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, tot, 5, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
 #endif
   if (Globals::my_rank == 0) {
     const long long ncell = tot[0] + tot[1];
@@ -485,6 +499,9 @@ void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
     if (tot[1] > 0)
       printf("                off-grid in density: %lld, in temperature: %lld\n",
              tot[2], tot[3]);
+    if (tot[4] > 0)
+      printf("                %lld cells above tcut = %g K given opacity and emission "
+             "%g\n", tot[4], tcut, CUT_VALUE);
   }
 }
 
@@ -799,13 +816,9 @@ void GetNelFloor(MonteCarloBlock *pmcb) {
   for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
     for (int j=pmcb->js; j<=pmcb->je; ++j) {
       for (int i=pmcb->is; i<=pmcb->ie; ++i) {
+        // below the density floor or above the temperature cut: no matter to speak of
         Real rho = pmcb->rho(k,j,i);
-        if (rho < dmin) {
-          rho = 1.e-30;
-        }
-        if (pmcb->tgas(k,j,i) > tcut) {
-         rho = 1.e-30;
-        }
+        if (rho < dmin || pmcb->tgas(k,j,i) > tcut) rho = 1.e-30;
         Real nh = rho / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
 	      pmcb->species(1,k,j,i) = nh + 4. * nhe;
@@ -824,6 +837,8 @@ void GetNel(MonteCarloBlock *pmcb) {
     for (int j=pmcb->js; j<=pmcb->je; ++j) {
       for (int i=pmcb->is; i<=pmcb->ie; ++i) {
         Real rho = pmcb->rho(k,j,i);
+        // above the temperature cut: no matter to speak of, as in GetNelFloor
+        if (pmcb->tgas(k,j,i) > tcut) rho = 1.e-30;
         Real nh = rho / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
         // species(1) is the ion density read by the free-free opacity and emission in

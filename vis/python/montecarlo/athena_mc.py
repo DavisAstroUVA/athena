@@ -1001,7 +1001,9 @@ def convert_xaxis(newunit, spectrum):
     elif baseunit == 'nu':
         nu = xfaces
     elif baseunit == 'lambda':
-        nu = c/1.e8/xfaces
+        # wavelength in Angstrom, so 1e8 per cm; this and the three conversions below
+        # used to divide by 1e8 instead, putting nu off by 1e16
+        nu = c*1.e8/xfaces
     if newunit == 'kev':
         spectrum['xfaces'] = nu*h/(everg*1000.)
     elif newunit == 'ev':
@@ -1029,7 +1031,7 @@ def get_frequency(xunit, xfaces):
     elif xunit == 'nu':
         nu = 0.5*(xfaces[1:]+xfaces[:-1])
     elif xunit == 'lambda':
-        nu = 0.5*(1./xfaces[:-1]+1./xfaces[1:])*c/1.e8
+        nu = 0.5*(1./xfaces[:-1]+1./xfaces[1:])*c*1.e8
     return nu
 
 def compute_nulnu_error(intensity, nu, errors=None):
@@ -1206,7 +1208,9 @@ def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
     if xunit == 'nu':
         xlabel = r"$\nu~{\rm (Hz)}$"
     if xunit == 'lambda':
-        xlabel = r"$\lambda~{\rm (\AA)$"
+        # the unit as a plain Unicode character outside the math: the mathtext form
+        # \AA needs a closing brace this line lacked and is not in every math font
+        xlabel = "$\\lambda$ (Å)"
 
     # Check if error requested and stored
     if plterr:
@@ -1257,7 +1261,11 @@ def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
     yerr = None
     ylabel = None
     if yunit == 'nulnu':
-        ylabel = r"$\nu L_\nu~{\rm (erg/s)}$"
+        # nu L_nu and lambda L_lambda are the same quantity; name it after the axis
+        if xunit == 'lambda':
+            ylabel = r"$\lambda L_\lambda~{\rm (erg/s)}$"
+        else:
+            ylabel = r"$\nu L_\nu~{\rm (erg/s)}$"
         y, yerr = compute_nulnu_error(intensity,nu,errors)
     elif yunit == 'lnu':
         ylabel = r"$L_\nu~{\rm (erg/s/Hz)}$"
@@ -1574,7 +1582,8 @@ def get_luminosity(spec):
         dnu = xfaces[1:]-xfaces[:-1]
         #emid = 0.5*(xfaces[1:]+xfaces[:-1])*h
     elif xaxis == 'lambda':
-        dnu = (1./xfaces[:-1]-1./xfaces[1:])*c/1.e8
+        # abs: a spectrum converted to a wavelength axis has faces running downward
+        dnu = np.abs((1./xfaces[:-1]-1./xfaces[1:])*c*1.e8)
         #emid = 0.5*(1./xfaces[:-1]-1./xfaces[1:])*c*h/1.e8
 
     # compute sum over frequency and solid angle
@@ -1876,7 +1885,7 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
         xphots = phots.energy/h
         preset = True
     elif xaxis == 'lambda':
-        xphots = c*h/(phots.energy*1.e8)
+        xphots = c*h/phots.energy*1.e8   # Angstrom
         preset = True
     if not preset:
         if xfunc is None:
@@ -1961,7 +1970,7 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
         dnu = xfaces[1:]-xfaces[:-1]
         #emid = 0.5*(xfaces[1:]+xfaces[:-1])*h
     elif xaxis == 'lambda':
-        dnu = (1./xfaces[:-1]-1./xfaces[1:])*c/1.e8
+        dnu = (1./xfaces[:-1]-1./xfaces[1:])*c*1.e8
         #emid = 0.5*(1./xfaces[:-1]-1./xfaces[1:])*c*h/1.e8
     if not preset:
         efaces = xfunc(xfaces,False,**kwargs)
