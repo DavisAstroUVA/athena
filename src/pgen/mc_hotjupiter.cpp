@@ -37,7 +37,6 @@
 #include "../monte_carlo/montecarlo.hpp"
 #include "../monte_carlo/photon.hpp"
 #include "../monte_carlo/photonpusher.hpp"
-#include "../monte_carlo/spectrum_reader.hpp"
 #include "../parameter_input.hpp"
 #include "../scalars/scalars.hpp"
 
