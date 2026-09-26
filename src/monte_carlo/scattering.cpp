@@ -53,11 +53,10 @@ void ScatterIsotropic(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe) {
 //! \fn void ScatterThomsonPolarized(MonteCarloBlock *pmcb, Photon *pphot, int ips,
 //!                                  int ipe)
 //! \brief Thomson scattering of polarized radiation
-//  See Chandrasekhar(1960) Chapter 1 figure 8
-//  Rotation matrix (r):  L(\pi-i2)R(\Theta)L(-i1)
-//  Here \Theta=smu
+//  See Chandrasekhar(1960) Chapter 1 figure 8. Rotation matrix (r):  
+//  L(\pi-i2)R(\Theta)L(-i1). Here \Theta=smu
 
-// SWD: Needs to be changed to handle non-cartesian k
+
 void ScatterThomsonPolarized(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe) {
 
   MCRandom *pran = pmcb->pran;
@@ -282,19 +281,24 @@ void ScatterComptonUnpolarized(MonteCarloBlock *pmcb, Photon *pphot, int ips, in
 
   MCRandom *pran = pmcb->pran;
   Real mec2 = 8.18711e-7;
+  // Coherent Thomson scattering is only the right shortcut when both the photon and the
+  // electrons are non-relativistic: below ethom (10 eV) recoil is negligible, and below
+  // theta_thom the thermal Doppler shift is too (4 theta < 4e-4 per scattering). 
   Real ethom = 1.602176634e-11;
+  const Real kmec2 = 1.68638e-10;  // k_B/(m_e c^2) per kelvin
+  const Real theta_thom = 1.e-4;
   for (int ip=ips; ip<=ipe; ip++) {
-    if (pphot->ep[ip] < ethom) {
-      ScatterThomsonUnpolarized(pmcb,pphot,ip,ip);
-      continue;
-    }
-
     Real &k1 = pphot->k1p[ip];
     Real &k2 = pphot->k2p[ip];
     Real &k3 = pphot->k3p[ip];
     int &i1 = pphot->i1p[ip];
     int &i2 = pphot->i2p[ip];
     int &i3 = pphot->i3p[ip];
+
+    if (pphot->ep[ip] < ethom && kmec2*pmcb->tgas(i3,i2,i1) < theta_thom) {
+      ScatterThomsonUnpolarized(pmcb,pphot,ip,ip);
+      continue;
+    }
 
     Real v1,v2,v3,vdc,gamma,x,onemuvdc;
     do {

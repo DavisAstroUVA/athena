@@ -17,6 +17,7 @@
 // Athena++ headers
 #include "../athena.hpp"              // Real
 #include "../athena_arrays.hpp"       // AthenaArray
+#include "../coordinates/coordinates.hpp"  // Coordinates
 #include "../field/field.hpp"         // Field
 #include "../globals.hpp"             // Globals
 #include "../hydro/hydro.hpp"         // Hydro
@@ -33,9 +34,10 @@ namespace {
   // Global variables
   bool tnorm;
   Real logemin, logemax;
-  Real abh, r_hor;
-  Real dcut;
-  Real tcut;
+  Real abh, mbh, r_hor;
+  Real dcut = 1.e-20;   // code units
+  Real tcut = 1.e20;    // Kelvin
+  Real heabund = 0.09; // helium abundance by number
   constexpr Real CUT_VALUE = 1.e-20;
   std::string emission_type;
   // frequency table parameters
@@ -64,8 +66,9 @@ namespace {
 
   //functions
   void InsideHorizon(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher,int ip);
+  Real KerrSchildRadius(Real x, Real y, Real z);
+  bool InsideHorizonCell(MonteCarloBlock *pmcb, int k, int j, int i);
   Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
-  Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap);
   Real Planck(Real temp, Real nu);
   Real TableEmission(MonteCarloBlock *pmcb, int k, int j, int i, int etype);
   Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
@@ -96,7 +99,6 @@ namespace {
   inline void CheckActiveCell(MonteCarloBlock *, int, int, int) {}
 #endif
 
-  void UserGetDensity(MonteCarloBlock *pmcb);
   void CartesianKerrSchild(Real x1, Real x2, Real x3, ParameterInput *pin,
     AthenaArray<Real> &g, AthenaArray<Real> &g_inv, AthenaArray<Real> &dg_dx1,
     AthenaArray<Real> &dg_dx2, AthenaArray<Real> &dg_dx3);
@@ -107,9 +109,12 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   nuser_var = 3;
 
   abh = pin->GetReal("coord","a");
-  // assumes mbh = 1 in code units
-  r_hor = 1.0 + sqrt(1.0 - SQR(abh));
+  mbh = pin->GetOrAddReal("coord","m",1.0); // always 1?
+  r_hor = mbh + sqrt(SQR(mbh) - SQR(abh));
   EnrollUserWorkInMove(InsideHorizon);
+  dcut = pin->GetOrAddReal("problem", "dcut", dcut);
+  tcut = pin->GetOrAddReal("problem", "tcut", tcut);
+  heabund = pin->GetOrAddReal("problem", "heabund", heabund);
   
   emission_type = pin->GetOrAddString("montecarlo","emission","none");
   // The opacity and emission tables of the table path are file-scope arrays indexed by
@@ -302,8 +307,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
 
 void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
-  dcut = pin->GetOrAddReal("problem", "dcut",1.e-20);   // code units
-  tcut = pin->GetOrAddReal("problem", "tcut",1.e20);    // Kelvin
+  // dcut and tcut are read in InitUserMonteCarloData; see the note at their definition.
   if (emission_type == "freefree") {
     // Set the energy boundaries for free-free emission
     tnorm = pin->GetOrAddBoolean("problem","tnorm",false);
@@ -590,6 +594,12 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
     if (pphot->IsNanPhoton(ip)) {
       pphot->PrintPhoton("init",ip);
     }
+    // Don't evelove cells emitted inside the horizon
+    if (InsideHorizonCell(this,pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip])) {
+      pphot->wp[ip] = 0.;
+      pphot->statp[ip] = REMOVED;
+      continue;
+    }
     // Obtain initial position within zone
     GetZonePosition(pphot,pran,pcoord,ip);
 
@@ -676,22 +686,28 @@ void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip) {
 namespace {
 
 
+// Kerr-Schild radius of the point (x,y,z): the positive root of
+// r^4 - (R^2 - a^2) r^2 - a^2 z^2 = 0 with R^2 = x^2 + y^2 + z^2.
+Real KerrSchildRadius(Real x, Real y, Real z) {
+  Real rr2 = SQR(x) + SQR(y) + SQR(z);
+  Real a2 = SQR(abh);
+  return std::sqrt(0.5*(rr2 - a2 + std::sqrt(SQR(rr2 - a2) + 4.0*a2*SQR(z))));
+}
+
+// Whether the center of cell (k,j,i) lies inside the horizon.  Used to zero the number
+// densities there and to remove samples drawn there at emission.
+bool InsideHorizonCell(MonteCarloBlock *pmcb, int k, int j, int i) {
+  Coordinates *pco = pmcb->pmy_block->pcoord;
+  return KerrSchildRadius(pco->x1v(i), pco->x2v(j), pco->x3v(k)) < r_hor;
+}
+
 void InsideHorizon(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher, int ip) {
 
-  Real x1 = pphot->x1p[ip];
-  Real x2 = pphot->x2p[ip];
-  Real x3 = pphot->x3p[ip];
-
-  Real rad = std::sqrt(SQR(x1) + SQR(x2) + SQR(x3));
-  Real r = sqrt((SQR(rad)-SQR(abh)+sqrt(SQR(SQR(rad)-SQR(abh))+4.0*SQR(abh)*SQR(x3)))/2.);
-
+  Real r = KerrSchildRadius(pphot->x1p[ip], pphot->x2p[ip], pphot->x3p[ip]);
   if (r < r_hor) {
     pphot->statp[ip] = REMOVED;
     //printf("Photon absorbed inside horizon at r=%g\n",r);
   }
-  //Real keverg = 1.602176634e-9;
-  //if (pphot->ep[ip] > 2.e3*keverg)
-  //  pphot->statp[ip] = DESTROYED;
   return;
 }
 
@@ -721,28 +737,6 @@ Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   const int t3 = i3-pmcb->ks, t2 = i2-pmcb->js, t1 = i1-pmcb->is;
   return (1.-xk) * opact(lid,t3,t2,t1,k) + xk * opact(lid,t3,t2,t1,k+1);
 
-}
-
-Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap) {
-
-  int n = 20;
-  Real h_cgs = 6.62607015e-27;
-  Real dlnu = std::log(nup/num)/static_cast<Real>(n);
-  Real dadnu = (ap-am)/(nup-num);
-  Real lnu = std::log(num);
-  Real sum = Planck(temp,num)*am*dlnu/h_cgs/2.;
-  // Interior nodes run to n-1: the composite trapezoid rule over n intervals weights
-  // nodes 1..n-1 fully and the two endpoints by a half.
-  for(int i=1; i<n; ++i) {
-    lnu += dlnu;
-    Real nu = std::exp(lnu);
-    Real alpha = dadnu*(nu-num)+am;
-    sum += Planck(temp,nu)*alpha*dlnu/h_cgs;
-  }
-  sum += Planck(temp,nup)*ap*dlnu/h_cgs/2.;
-  //if (sum < 0)
-  //  printf("sum: %g %g %g %g\n",num,nup,am,ap);
-  return sum;
 }
 
 Real Planck(Real temp, Real nu) {
@@ -805,7 +799,6 @@ Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
 Real FreeFreeOpacity(Real tgas, Real rho, Real energy) {
   Real ffnrm = 3.692146e8;
-  Real heabund = 0.09; //hardcode for now (should be parameter)
   Real mp = 1.67262192369e-24;
   Real h = 6.62607015e-27;
   Real kb = 1.380649e-16;
@@ -822,16 +815,17 @@ Real FreeFreeOpacity(Real tgas, Real rho, Real energy) {
 
 void GetNelFloor(MonteCarloBlock *pmcb) {
 
-  Real heabund = 0.09; //hardcode for now (should be parameter)
   Real mp = 1.67262192369e-24;
   Real dmin = dcut*pmcb->rho_cgs; // dfloor
   
   for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
     for (int j=pmcb->js; j<=pmcb->je; ++j) {
       for (int i=pmcb->is; i<=pmcb->ie; ++i) {
-        // below the density floor or above the temperature cut: no matter to speak of
+        // below the density floor, above the temperature cut, or inside the horizon:
+        // no matter to speak of
         Real rho = pmcb->rho(k,j,i);
-        if (rho < dmin || pmcb->tgas(k,j,i) > tcut) rho = 1.e-30;
+        if (rho < dmin || pmcb->tgas(k,j,i) > tcut || InsideHorizonCell(pmcb,k,j,i))
+          rho = 1.e-30;
         Real nh = rho / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
 	      pmcb->species(1,k,j,i) = nh + 4. * nhe;
@@ -843,15 +837,15 @@ void GetNelFloor(MonteCarloBlock *pmcb) {
   
 void GetNel(MonteCarloBlock *pmcb) {
 
-  Real heabund = 0.09; //hardcode for now (should be parameter)
   Real mp = 1.67262192369e-24;
 
   for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
     for (int j=pmcb->js; j<=pmcb->je; ++j) {
       for (int i=pmcb->is; i<=pmcb->ie; ++i) {
         Real rho = pmcb->rho(k,j,i);
-        // above the temperature cut: no matter to speak of, as in GetNelFloor
-        if (pmcb->tgas(k,j,i) > tcut) rho = 1.e-30;
+        // above the temperature cut or inside the horizon: no matter to speak of, as
+        // in GetNelFloor
+        if (pmcb->tgas(k,j,i) > tcut || InsideHorizonCell(pmcb,k,j,i)) rho = 1.e-30;
         Real nh = rho / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
         // species(1) is the ion density read by the free-free opacity and emission in
@@ -906,50 +900,6 @@ void GetNel(MonteCarloBlock *pmcb) {
   }
 }
 
-void UserGetDensity(MonteCarloBlock *pmcb) {
-
-  Real l_cgs = pmcb->l_cgs;
-  Real rho_cgs = pmcb->rho_cgs;
-  Real kappa_s = 0.39/(rho_cgs*l_cgs);
-  Real dfloor_op = 1.e-14;
-  Real tau_trunc = 1.e-4;
-  Real dtrunc_max = 1.e-5;
-  Real sigmoid_res = 1.e-2;
-  Real dfloor = 1.e-8;
-  for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
-    for (int j=pmcb->js; j<=pmcb->je; ++j) {
-      for (int i=pmcb->is; i<=pmcb->ie; ++i) {
-	Real wdn = pmcb->pmy_block->phydro->u(IDN,k,j,i);
-
-	Real sigma_cold = 0.;
-	// Match Lizhong's scattering reduction
-	Real wdn_opacity = fmax(wdn-dfloor, dfloor_op);
-	
-	Real dx1 = pmcb->pmy_block->pcoord->dx1f(i);
-	Real dx2 = pmcb->pmy_block->pcoord->dx2f(j);
-	Real dx3 = pmcb->pmy_block->pcoord->dx3f(k);
-	Real delta_l = fmax(fmax(dx1, dx2), dx3);
-	Real dtrunc = fmax(0.0, sigma_cold)*tau_trunc / (kappa_s*delta_l);
-	dtrunc = fmin(dtrunc_max, fmax(dfloor, dtrunc)); // dfloor <= dtrunc <= dtrunc_max
-	Real fac_trunc = dtrunc / dfloor;
-	Real wid_trunc = 0.5*std::log10(fac_trunc) / log(1./sigmoid_res - 1.);
-	Real wdn_real = fmax(wdn-dfloor, dfloor_op);
-	Real del_reduce = std::log10(dfloor) - std::log10(dfloor_op);
-
-	Real fac_inv = 1.0;
-	if (fabs(fac_trunc-1) > 1e-12) {
-	  fac_inv = 1.0 + exp( -1./wid_trunc * (std::log10(wdn_real) - (std::log10(dfloor) + 0.5*std::log10(fac_trunc)) ) );
-	}
-
-	Real lg_rho_op = std::log10(wdn_real) - (1.-1./fac_inv) * del_reduce;
-	wdn_opacity = pow(10.0, lg_rho_op);
-
-	pmcb->rho(k,j,i) = wdn_opacity;
-      }
-    }
-  }
-}
-
 //----------------------------------------------------------------------------------------
 // Function for defining Cartesian Kerr-Schild metric
 // Inputs:
@@ -965,6 +915,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
 
   // Extract inputs
   Real a = pin->GetReal("coord", "a");
+  Real m = pin->GetReal("coord", "m");
 
   // Calculate scalar quantities
   Real a2 = SQR(a);
@@ -973,7 +924,7 @@ void CartesianKerrSchild(Real x, Real y, Real z, ParameterInput *pin,
   Real r2 = 0.5 * (rr2 - a2 + std::sqrt(SQR(rr2 - a2) + 4.0 * a2 * z2));
   Real r4 = SQR(r2);
   Real r = std::sqrt(r2);
-  Real f = 2.0 * r * r2 / (r4 + a2 * z2);
+  Real f = 2.0 * m * r * r2 / (r4 + a2 * z2);
 
   // Calculate vector quantities
   Real l_0 = 1.0;

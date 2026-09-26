@@ -599,6 +599,9 @@ public:
   bool varystep_flag; // use variable (true) or constant (false) step
 
   Real rho_cgs, vel_cgs, tgas_cgs, tfloor_cgs, tceiling_cgs, l_cgs, time_cgs;
+  // Helium abund and derived gas constant
+  Real heabund, rgas;
+  static Real GasConstant(Real heabund);
   Real betamax;
   Real stepsize;
   Real minweight;

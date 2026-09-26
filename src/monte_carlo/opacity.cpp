@@ -317,9 +317,12 @@ Real ComptonCrossSection(Real energy, Real theta) {
 
 Real Maxwell(Real theta, Real gamma)
 {
+  // K_2(z) e^z for z = 1/theta.  Below theta = 0.01 use the large-argument expansion
+  // K_2(z) e^z = sqrt(pi/2z) [1 + 15/(8z) + 105/(128 z^2) + ...], accurate to 1e-5 at
+  // the switch.
   Real K2exp;
   if (theta < 0.01)
-    K2exp = sqrt(0.5 * PI * theta);// * (1. + 1.875 * theta);
+    K2exp = sqrt(0.5 * PI * theta) * (1. + 1.875 * theta + 0.8203125 * SQR(theta));
   else
     K2exp = BessK(2,1. / theta) * exp(1. / theta);
 
