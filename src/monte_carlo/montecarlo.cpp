@@ -916,7 +916,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
     ntype = pin->GetInteger("montecarlo","ntype"); // must be set for multi
   }
   nsamptype = new int64_t[ntype];
-  emission_eqwt = new bool[ntype];
+  weight_scheme = new WeightScheme[ntype];
   initialize_comoving = new bool[ntype];
   std::string abs_def = pin->GetOrAddString("montecarlo","abs_method","weight");
   absorption_method = new AbsorptionMethodFlag[ntype];
@@ -927,7 +927,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   if (emission_flag == EMISNONE) {
     GetEmission[0] = nullptr; // left unset
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
-    emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
+    weight_scheme[0] = GetWeightScheme(pin);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
     emission_geometry[0] = GetEmissionGeometry(pin->GetOrAddString("montecarlo","emission_geometry","none"));
@@ -935,7 +935,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   } else if (emission_flag ==  EMISUSER) {
     GetEmission[0] = nullptr; // must be set in InitUserMonteCarloData
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
-    emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
+    weight_scheme[0] = GetWeightScheme(pin);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
     emission_geometry[0] = GetEmissionGeometry(pin->GetOrAddString("montecarlo","emission_geometry","volume"));
@@ -945,7 +945,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   } else if (emission_flag ==  EMISFF) {
     GetEmission[0] = GetEmissionFreeFree;
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
-    emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
+    weight_scheme[0] = GetWeightScheme(pin);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
     emission_geometry[0] = EMISVOL; // Must be volumetric
@@ -953,7 +953,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   } else if (emission_flag ==  EMISBB) {
     GetEmission[0] = GetEmissionBlackbody;
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
-    emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
+    weight_scheme[0] = GetWeightScheme(pin);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
     emission_geometry[0] = EMISAREA; // Must be areal
@@ -1001,7 +1001,7 @@ void MonteCarlo::DistributeSamples(int etype) {
         << std::endl;
     ATHENA_ERROR(msg);
   }
-  bool equal_weight = emission_eqwt[etype];
+  bool equal_weight = (weight_scheme[etype] == WEIGHTS_EQUAL);
   
   // compute emission properties over all blocks on this process
   Real em_min = SQR(HUGE_NUMBER), em_max = -HUGE_NUMBER, em_tot = 0.;
@@ -2579,4 +2579,29 @@ void MCRandom::SampleMultinomial(int n, int m, Real *prob, int *counts) {
   }
   counts[m-1] = remain;
   
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn enum WeightScheme GetWeightScheme(ParameterInput *pin)
+//! \brief read <montecarlo>/weights, the sample allocation and weighting scheme
+//
+// The former boolean equal_weight is refused rather than ignored, so a deck that still
+// carries it cannot silently fall back to emission weighting.
+
+enum WeightScheme GetWeightScheme(ParameterInput *pin) {
+  if (pin->DoesParameterExist("montecarlo","equal_weight")) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
+        << "<montecarlo>/equal_weight has been replaced by weights = equal | emission"
+        << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  std::string s = pin->GetOrAddString("montecarlo","weights","emission");
+  if (s == "emission") return WEIGHTS_EMISSION;
+  if (s == "equal") return WEIGHTS_EQUAL;
+  std::stringstream msg;
+  msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
+      << "<montecarlo>/weights = " << s << " is not one of emission, equal" << std::endl;
+  ATHENA_ERROR(msg);
+  return WEIGHTS_EMISSION;
 }

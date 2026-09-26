@@ -80,6 +80,13 @@ enum EmissionFlag {EMISUSER = 0, EMISNONE = 1, EMISFF = 2, EMISBB = 3, MULTI = 4
 enum EmissionGeometry {EMISVOL = 0, EMISAREA = 1, EMISGNONE = 2};
 enum AbsorptionOpacityFlag {ABSUSER = 0, ABSNONE = 1, ABSFF = 2, ABSDUST =3};
 enum AbsorptionMethodFlag {ABSWEIGHT = 0, ABSPROB = 1, ABSTAU = 2};
+// How samples are allocated to cells and weighted, <montecarlo>/weights:
+//   emission  cells are drawn uniformly and the cell's emission goes into the weight
+//   equal     cells are drawn in proportion to their emission and every sample carries
+//             the same weight em_tot/nphot
+// A "biased" scheme, drawing in proportion to emission times an escape estimate and
+// compensating in the weight, is planned as the next member.
+enum WeightScheme {WEIGHTS_EMISSION = 0, WEIGHTS_EQUAL = 1};
 enum ScatteringFlag {SCATUSER = 0, SCATNONE =1, SCATISO = 2, SCATTHOM = 3, SCATCOMP =4,
                      SCATRES = 5, SCATDUST = 6};
 enum MCBoundaryFlag {MC_PERIODIC_BNDRY = 0, MC_ESCAPE_BNDRY = 1, MC_ABSORB_BNDRY = 2,
@@ -173,6 +180,7 @@ void GetZonePositionCartesianFace(Photon *pphot, MCRandom *pran, MCCoord *pcoord
 //---------------------- prototypes for setting flags ------------------------------------
 enum MCBoundaryFlag GetMCBoundaryFlag(std::string input_string);
 enum EmissionFlag GetEmissionFlag(std::string input_string);
+enum WeightScheme GetWeightScheme(ParameterInput *pin);
 enum EmissionGeometry GetEmissionGeometry(std::string input_string);
 enum BoundaryFace SetEmissionSurface(std::string input_face);
 enum AbsorptionOpacityFlag GetAbsorptionOpacityFlag(std::string input_string);
@@ -269,7 +277,7 @@ public:
   bool using_bfield; // set magnetic fields
   bool tetrads; // convert from coordinate frame
   bool emission_array;  // Compute and save cell emissivities
-  bool *emission_eqwt; // Set initial weights equal
+  WeightScheme *weight_scheme; // sample allocation and weighting, per emission type
   bool *initialize_comoving; // Transform from comoving frame for emission
   enum AbsorptionMethodFlag *absorption_method; // absorption method for each emission type
 

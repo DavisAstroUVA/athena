@@ -7,7 +7,7 @@ only in how they are refined: uniform, one level refined above the mid-plane, an
 level refined below it.  The medium has no gradient, so the escaping fraction cannot
 depend on the mesh, and the three runs must agree to within Poisson noise.
 
-The run uses <montecarlo>/equal_weight = true, and that is not incidental.  With the
+The run uses <montecarlo>/weights = equal, and that is not incidental.  With the
 default variable-weight sampling every block emits the same number of photons whatever
 its volume, so a refined block emits as many photons as a coarse one while carrying an
 eighth of the energy.  The emitted energy per block is still correct -- the per-cell
@@ -71,7 +71,7 @@ def write_input(build_dir, workdir, name, region, tau):
     text = text.replace("<problem>", "<problem>\nconstdens = true\ntau       = %s"
                         % tau, 1)
     # see the module docstring: photon counts only track energy at equal weight
-    text = text.replace("<montecarlo>", "<montecarlo>\nequal_weight = true", 1)
+    text = text.replace("<montecarlo>", "<montecarlo>\nweights = equal", 1)
     if region is not None:
         block = ("refinement = static\n\n<refinement1>\n"
                  "x1min = -5.0e10\nx1max =  5.0e10\n"

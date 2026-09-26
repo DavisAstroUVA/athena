@@ -451,7 +451,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     }
   }
   if (pmy_mc->emission_array) emission.NewAthenaArray(ncells3,ncells2,ncells1);
-  if (pmy_mc->emission_eqwt[0]) emit_count_.NewAthenaArray(ncells3,ncells2,ncells1);
+  if ((pmy_mc->weight_scheme[0] == WEIGHTS_EQUAL)) emit_count_.NewAthenaArray(ncells3,ncells2,ncells1);
   if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
     planck_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
     planck_inv_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
@@ -496,7 +496,7 @@ MonteCarloBlock::~MonteCarloBlock() {
   if (pmy_mc->nuser_mom > 0) moments_user.DeleteAthenaArray();
   if (call_srcterms) sourceterms.DeleteAthenaArray();
   if (pmy_mc->emission_array) emission.DeleteAthenaArray();
-  if (pmy_mc->emission_eqwt[0]) emit_count_.DeleteAthenaArray();
+  if ((pmy_mc->weight_scheme[0] == WEIGHTS_EQUAL)) emit_count_.DeleteAthenaArray();
   if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
     planck_opacity.DeleteAthenaArray();
     planck_inv_opacity.DeleteAthenaArray();
@@ -1902,7 +1902,7 @@ void MonteCarloBlock::ComputeEmissionSampleArray() {
 
 void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
 
-  if (pmy_mc->emission_eqwt[0]) {
+  if ((pmy_mc->weight_scheme[0] == WEIGHTS_EQUAL)) {
     // Set intial cell based on probability within cell
 
     for (int ip=ips; ip<=ipe; ip++) {
@@ -1960,7 +1960,7 @@ void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
 void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face, int ips,
                                                 int ipe) {
 
-  if (pmy_mc->emission_eqwt[0]) {
+  if ((pmy_mc->weight_scheme[0] == WEIGHTS_EQUAL)) {
     // Set intial cell based on probability within cell
     for (int ip=ips; ip<=ipe; ip++) {
       bool i1flag = true;
