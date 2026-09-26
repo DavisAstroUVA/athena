@@ -1241,8 +1241,9 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         if (pmc->dynamic) {
           pspec->dt = pin->GetReal(pib->block_name,"dt");
         } else {
-          // input should be in code units
-          pspec->dt = pin->GetOrAddReal("montecarlo","tint",1.);
+          // tint is given in code units but the static run's clock advances by
+          // MonteCarlo::tint, which Initialize has multiplied by time_cgs.
+          pspec->dt = pin->GetOrAddReal("montecarlo","tint",1.) * time_cgs;
         }
         pspec->last_time = pmy_mc->pmy_mesh->time;
         // Generate file name
@@ -1321,8 +1322,8 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         if (pmc->dynamic) {
           pphlist->dt = pin->GetReal(pib->block_name,"dt");
         } else {
-          // input should be in code units
-          pphlist->dt = pin->GetOrAddReal("montecarlo","tint",1.);
+          // converted as for the spectrum above, and for the same reason
+          pphlist->dt = pin->GetOrAddReal("montecarlo","tint",1.) * time_cgs;
         }
         pphlist->last_time = pmy_mc->pmy_mesh->time;
         pphlist->nsrun = 0;
@@ -1567,8 +1568,9 @@ void MCOutput::OutputSpectrum(bool wtflag) {
   Real tstart = pmy_mc->pmy_mesh->start_time;
   Real tlim = pmy_mc->pmy_mesh->tlim;
   while (pspect != nullptr) {
-    if ( (time >= pspect->last_time+pspect->dt) || (time == tstart) || (time >= tlim)
-         || wtflag ) {
+    // every cycle of a static run is one interval; see OutputPhotonList
+    bool due = !pmy_mc->dynamic || (time >= pspect->last_time+pspect->dt);
+    if ( due || (time == tstart) || (time >= tlim) || wtflag ) {
       if (Globals::my_rank == 0) {
         pspecout = new Spectrum(pspect);
       }
@@ -1722,15 +1724,23 @@ void MCOutput::OutputPhotonList(bool wtflag) {
   Real time = pmy_mc->pmy_mesh->time;
   Real tstart = pmy_mc->pmy_mesh->start_time;
   Real tlim = pmy_mc->pmy_mesh->tlim;
-  if ( (time >= pphlist->last_time+pphlist->dt) || (time == tstart) || (time >= tlim)
-       || wtflag ) {
+  // A static run transports one tint per cycle and is called here once per cycle, so
+  // every call is an output.  Testing last_time + dt against a time formed as
+  // start_time + n*tint can miss by an ulp and slip a cycle; the cadence test is for
+  // dynamic runs, whose cycles are hydro steps.
+  bool due = !pmy_mc->dynamic || (time >= pphlist->last_time+pphlist->dt);
+  if ( due || (time == tstart) || (time >= tlim) || wtflag ) {
     // Filename() rather than a second copy of this logic: the spill path opens the file
     // before this point and the two names have to agree.
     std::string filename = pphlist->Filename();
-    // compute integration time in cgs
+    // The integration time the list covers, in seconds.  A static run's clock is
+    // already in seconds (its dt is MonteCarlo::tint), so the elapsed time is used as
+    // it is. The fallback covers a write with nothing elapsed.
     Real tint_out;
     if (pmy_mc->dynamic) {
       tint_out = (time - pphlist->last_time) * time_cgs;
+    } else if (time > pphlist->last_time) {
+      tint_out = time - pphlist->last_time;
     } else {
       tint_out = pmy_mc->tint;
     }

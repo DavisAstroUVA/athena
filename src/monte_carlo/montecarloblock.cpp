@@ -142,10 +142,18 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   rho_cgs = pin->GetOrAddReal("problem","rho_cgs",1.);
   vel_cgs = pin->GetOrAddReal("problem","vel_cgs",1.);
   tgas_cgs = pin->GetOrAddReal("problem","tgas_cgs",-1.);
+  heabund = pin->GetOrAddReal("problem","heabund",0.09);
+  rgas = GasConstant(heabund);
   tfloor_cgs = pin->GetOrAddReal("problem","tfloor_cgs",0.);
   tceiling_cgs = pin->GetOrAddReal("problem","tceiling_cgs",HUGE_NUMBER);
   l_cgs = pin->GetOrAddReal("problem","l_cgs",1.);
   time_cgs = l_cgs/vel_cgs;
+  // betamax caps v/c only where the velocity is momentum over density from a
+  // non-relativistic hydro run. Not used with GR runs
+  if (GENERAL_RELATIVITY && Globals::my_rank == 0 && pmb->lid == 0
+      && pin->DoesParameterExist("problem","betamax"))
+    std::cout << "Monte Carlo: <problem>/betamax is ignored in general relativity"
+              << std::endl;
   betamax = pin->GetOrAddReal("problem","betamax",0.999);
 
   // SWD:  stepsize control needs to be modified
@@ -1116,8 +1124,12 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
       e_scat = pphot->ep[ip] * shift;
       weight_scat = wp * e_scat * dl * shift / c_cgs;
     } else {
+      // Without boosts the lab (normal-observer) frame is the comoving frame, so both
+      // the bin and the weight take the lab energy.  In flat spacetime sl.e is ep; in
+      // GR it is alpha k^t, and binning on ep put the source term 1/alpha too high in
+      // energy.
       const PhotonFrameState &sl = frames.Get(MCFRAME_LAB);
-      e_scat = pphot->ep[ip];
+      e_scat = sl.e;
       weight_scat = wp * sl.e * sl.dl / c_cgs;
     }
 
@@ -2223,12 +2235,11 @@ void MonteCarloBlock::GetNumberDensity() {
     return;
   }
 
-  // For all other cases, the default assumes a compostion of hydrogen
-  // and helium with a given abundance and fully ionized. We
-  // compute the electron and ion number desnities. This is used
-  // for electron scattering and free-free emission/absorption.
+  // For all other cases, the default assumes a composition of hydrogen and helium with
+  // <problem>/heabund helium nuclei per hydrogen nucleus, fully ionized, and computes
+  // the electron and ion number densities.  This is used for electron scattering and
+  // free-free emission/absorption.  species(1) carries sum(Z^2 n_ion).
 
-  Real heabund = 0.09; //hardcode for now (should be parameter)
   Real mp = 1.67262192369e-24;
 
   int il, iu, jl, ju, kl, ku;
@@ -2392,6 +2403,19 @@ void MonteCarloBlock::GetBField() {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::GasConstant(Real heabund)
+//! \brief k_B/(mu m_p) for fully ionized hydrogen and helium with heabund helium nuclei
+//! per hydrogen nucleus: mu = (1 + 4 Y)/(2 + 3 Y), so p = GasConstant(Y) rho T in cgs.
+//! Static so a problem generator can call it before any MonteCarloBlock exists.
+//! Y = 0 gives 1.651e8 (mu = 0.5); the default Y = 0.09 gives 1.378e8 (mu = 0.599).
+
+Real MonteCarloBlock::GasConstant(Real heabund) {
+  const Real kb = 1.380649e-16;
+  const Real mp = 1.67262192369e-24;
+  return kb * (2. + 3.*heabund) / ((1. + 4.*heabund) * mp);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetTemperature()
 //! \brief default function for computing temperature if no user function provided.
 //  Assumes EOS of the form P=RTd.
@@ -2403,12 +2427,15 @@ void MonteCarloBlock::GetTemperature() {
     return;
   }
 
-  Real rideal = 8.314e7;
   Hydro* phydro = pmy_block->phydro;
 
+  // Without tgas_cgs the pressure and density are taken as cgs and inverted with the
+  // gas constant of the default composition (see rgas), the same mixture the default
+  // GetNumberDensity turns into electron and ion densities.  tgas_cgs, when given, is
+  // the caller's own p/rho to T conversion and is used as is.
   Real tconv;
   if (tgas_cgs <= 0.)
-    tconv = 1. / rideal;
+    tconv = 1. / rgas;
   else
     tconv = tgas_cgs;
 
@@ -2651,6 +2678,9 @@ void MonteCarloBlock::TransformToCoordinate(Photon *pphot, int ips, int ipe) {
 
   if (GENERAL_RELATIVITY) {
     for(int ip=ips; ip<=ipe; ip++) {
+      // A sample a problem generator removed at emission has nothing to transform, and
+      // building its tetrad (inside a horizon, say) can return NaN.
+      if (pphot->statp[ip] != EVOLVING) continue;
       // The same frame TransformToComoving projected into; see ComovingFrame.
       Real econ[4][4], ecov[4][4];
       ComovingFrame(this, pphot, ip, econ, ecov);
@@ -2672,6 +2702,7 @@ void MonteCarloBlock::TransformToCoordinate(Photon *pphot, int ips, int ipe) {
     }
   } else {
     for(int ip=ips; ip<=ipe; ip++) {
+      if (pphot->statp[ip] != EVOLVING) continue;
       int i1 = pphot->i1p[ip];
       int i2 = pphot->i2p[ip];
       int i3 = pphot->i3p[ip];

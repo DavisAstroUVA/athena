@@ -447,7 +447,15 @@ void GeneralPusher::RK4Step(Photon *pphot, Real step, int ip) {
     b += 2. * gcov[0][i] * kcon[0] * kcon[i];
   Real c = gcov[0][0] * kcon[0] * kcon[0];
   Real d = std::sqrt(SQR(b) - 4.*a*c);
-  Real factor = b < 0. ? (d-b) / (2.*a) : -2.*c / (b+d);
+  // Both roots of a f^2 + b f + c = 0.  Outside the ergosphere c < 0 and exactly one
+  // root is positive.  Inside it g_00 > 0, so both are: one near unity, which is this
+  // photon's projection, and one equal to c/a, which belongs to the photon with the
+  // opposite sign of k_t.  Always taking the larger root, as this once did, flipped the
+  // energy at infinity of every negative-energy photon on every step.  The larger root
+  // is formed without cancellation; the other follows from the sum of the roots.
+  Real f1 = b < 0. ? (d-b) / (2.*a) : -2.*c / (b+d);
+  Real f2 = -b/a - f1;
+  Real factor = std::abs(f1-1.) <= std::abs(f2-1.) ? f1 : f2;
 
   // Update photon parameters
   pphot->x0p[ip] = x[IMC0];

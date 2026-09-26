@@ -138,7 +138,9 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real rho_amb = ambient * rho_base;
 
   // Assume constant temperature and ideal gas
-  Real rideal = 8.314e7;
+  // Gas constant of the default hydrogen-helium mixture, so the temperature the
+  // Monte Carlo inverts from this pressure is the one written here.
+  Real rideal = MonteCarloBlock::GasConstant(pin->GetOrAddReal("problem","heabund",0.09));
   Real tgas = pin->GetReal("problem","temp");
 
   // GetTemperature() recovers T as tconv * w(IPR)/w(IDN), so the pressure has to be

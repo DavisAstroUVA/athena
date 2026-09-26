@@ -917,11 +917,11 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
         num_vars_ += 9;
       }
     }
-    // monte carlo scattering sourcterms 
+    // monte carlo scattering sourcterms
     if (output_params.variable.compare("mcscat") == 0){
       for (int n = 0; n < pmcb->nf_scat; ++n) {
         char name[16];
-        std::snprintf(name, sizeof(name), "sscat%d", n);
+        std::snprintf(name, sizeof(name), "Jnu%d", n);
         pod = new OutputData;
         pod->type = "SCALARS";
         pod->name = name;
@@ -933,7 +933,7 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
     if (output_params.variable.compare("mcscat") == 0){
       for (int n = 0; n < pmcb->nf_scat; ++n) {
         char name[16];
-        std::snprintf(name, sizeof(name), "sscat_err%d", n);
+        std::snprintf(name, sizeof(name), "Jnu%d_err", n);
         pod = new OutputData;
         pod->type = "SCALARS";
         pod->name = name;
