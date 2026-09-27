@@ -451,7 +451,14 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     }
   }
   if (pmy_mc->emission_array) emission.NewAthenaArray(ncells3,ncells2,ncells1);
-  if ((pmy_mc->weight_scheme[0] == WEIGHTS_EQUAL)) emit_count_.NewAthenaArray(ncells3,ncells2,ncells1);
+  if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION)
+    emit_count_.NewAthenaArray(ncells3,ncells2,ncells1);
+  if (pmy_mc->weight_scheme[0] == WEIGHTS_BIASED) {
+    importance.NewAthenaArray(ncells3,ncells2,ncells1);
+    for (int n=0; n<importance.GetSize(); ++n) importance(n) = 1.;
+    if (pmy_mc->nescape > 0) escape_prob.NewAthenaArray(nx3,nx2,nx1,pmy_mc->nescape);
+  }
+  wesc_sum = wesc_sq = 0.;
   if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
     planck_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
     planck_inv_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
@@ -496,7 +503,9 @@ MonteCarloBlock::~MonteCarloBlock() {
   if (pmy_mc->nuser_mom > 0) moments_user.DeleteAthenaArray();
   if (call_srcterms) sourceterms.DeleteAthenaArray();
   if (pmy_mc->emission_array) emission.DeleteAthenaArray();
-  if ((pmy_mc->weight_scheme[0] == WEIGHTS_EQUAL)) emit_count_.DeleteAthenaArray();
+  if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) emit_count_.DeleteAthenaArray();
+  if (importance.GetSize() > 0) importance.DeleteAthenaArray();
+  if (escape_prob.GetSize() > 0) escape_prob.DeleteAthenaArray();
   if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
     planck_opacity.DeleteAthenaArray();
     planck_inv_opacity.DeleteAthenaArray();
@@ -592,6 +601,10 @@ void MonteCarloBlock::PackForTransfer(std::vector<int> &ib, std::vector<Real> &r
   rb.push_back(minweight);
   rb.push_back(emiss_to_weight);
   rb.push_back(lb_time);
+  rb.push_back(wesc_sum);
+  rb.push_back(wesc_sq);
+  PackArray(rb, importance);
+  PackArray(rb, escape_prob);
   PackArray(rb, moments);
   PackArray(rb, moments_com);
   PackArray(rb, moments_coord);
@@ -646,6 +659,10 @@ void MonteCarloBlock::UnpackFromTransfer(const std::vector<int> &ib,
   minweight = rb.at(pr++);
   emiss_to_weight = rb.at(pr++);
   lb_time = rb.at(pr++);
+  wesc_sum = rb.at(pr++);
+  wesc_sq = rb.at(pr++);
+  UnpackArray(rb, pr, importance, "importance");
+  UnpackArray(rb, pr, escape_prob, "escape_prob");
   UnpackArray(rb, pr, moments, "moments");
   UnpackArray(rb, pr, moments_com, "moments_com");
   UnpackArray(rb, pr, moments_coord, "moments_coord");
@@ -724,6 +741,8 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
           pphlist->AddPhoton(pphot,ip);
         }
         nesc++;
+        wesc_sum += pphot->wp[ip];
+        wesc_sq += SQR(pphot->wp[ip]);
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
@@ -913,6 +932,8 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
           pphlist->AddPhoton(pphot,ip);
         }
         nesc++;
+        wesc_sum += pphot->wp[ip];
+        wesc_sq += SQR(pphot->wp[ip]);
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
@@ -1841,6 +1862,25 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::SampleDensity(int k, int j, int i) const
+//! \brief the density samples are drawn on: emission, times importance when biased
+
+Real MonteCarloBlock::SampleDensity(int k, int j, int i) const {
+  if (pmy_mc->weight_scheme[0] == WEIGHTS_BIASED)
+    return emission(k,j,i) * importance(k,j,i);
+  return emission(k,j,i);
+}
+
+Real MonteCarloBlock::SampleDensityTotal() const {
+  Real tot = 0.;
+  for (int k=ks; k<=ke; ++k)
+    for (int j=js; j<=je; ++j)
+      for (int i=is; i<=ie; ++i)
+        tot += SampleDensity(k,j,i);
+  return tot;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::ComputeEmissionSampleArray()
 //! \brief compute emission array for equal weight scheme
 
@@ -1856,8 +1896,8 @@ void MonteCarloBlock::ComputeEmissionSampleArray() {
     for (int j=js; j<=je; ++j) {
       for (int i=is; i<=ie; ++i) {
         int n = (k-ks)*nx2*nx1 + (j-js)*nx1 + i-is;
-        prob[n] = emission(k,j,i);
-        total_emission += emission(k,j,i);
+        prob[n] = SampleDensity(k,j,i);
+        total_emission += prob[n];
       }
     }
   }
@@ -1902,7 +1942,7 @@ void MonteCarloBlock::ComputeEmissionSampleArray() {
 
 void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
 
-  if ((pmy_mc->weight_scheme[0] == WEIGHTS_EQUAL)) {
+  if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) {
     // Set intial cell based on probability within cell
 
     for (int ip=ips; ip<=ipe; ip++) {
@@ -1935,6 +1975,8 @@ void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
       } // end while (!this_zone)
       // Set weight to constant value for all photons
       pphot->wp[ip] = emiss_to_weight;
+      if (pmy_mc->weight_scheme[0] == WEIGHTS_BIASED)
+        pphot->wp[ip] /= importance(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
 
     } // end loop over ip
   } else {
@@ -1960,7 +2002,7 @@ void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
 void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face, int ips,
                                                 int ipe) {
 
-  if ((pmy_mc->weight_scheme[0] == WEIGHTS_EQUAL)) {
+  if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) {
     // Set intial cell based on probability within cell
     for (int ip=ips; ip<=ipe; ip++) {
       bool i1flag = true;
@@ -2043,6 +2085,8 @@ void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face
       } // end while (!this_zone)
       // Set weight to constant value for all photons
       pphot->wp[ip] = emiss_to_weight;
+      if (pmy_mc->weight_scheme[0] == WEIGHTS_BIASED)
+        pphot->wp[ip] /= importance(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
 
     } // end loop over ip
   } else {

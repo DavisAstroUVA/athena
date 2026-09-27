@@ -84,9 +84,11 @@ enum AbsorptionMethodFlag {ABSWEIGHT = 0, ABSPROB = 1, ABSTAU = 2};
 //   emission  cells are drawn uniformly and the cell's emission goes into the weight
 //   equal     cells are drawn in proportion to their emission and every sample carries
 //             the same weight em_tot/nphot
-// A "biased" scheme, drawing in proportion to emission times an escape estimate and
-// compensating in the weight, is planned as the next member.
-enum WeightScheme {WEIGHTS_EMISSION = 0, WEIGHTS_EQUAL = 1};
+//   biased    cells are drawn in proportion to emission times a per-cell importance
+//             (an escape estimate the problem generator supplies) and the weight is
+//             divided by the importance; with an escape table the energy is drawn
+//             the same way within the cell.  Unbiased for any positive importance.
+enum WeightScheme {WEIGHTS_EMISSION = 0, WEIGHTS_EQUAL = 1, WEIGHTS_BIASED = 2};
 enum ScatteringFlag {SCATUSER = 0, SCATNONE =1, SCATISO = 2, SCATTHOM = 3, SCATCOMP =4,
                      SCATRES = 5, SCATDUST = 6};
 enum MCBoundaryFlag {MC_PERIODIC_BNDRY = 0, MC_ESCAPE_BNDRY = 1, MC_ABSORB_BNDRY = 2,
@@ -277,6 +279,11 @@ public:
   bool using_bfield; // set magnetic fields
   bool tetrads; // convert from coordinate frame
   bool emission_array;  // Compute and save cell emissivities
+  // Escape table for weights = biased: nescape energy groups with edges escape_lne in
+  // ln(energy/erg), set by the problem generator in InitUserMonteCarloData; 0 means the
+  // energy draw is not biased.
+  int nescape;
+  AthenaArray<Real> escape_lne;
   WeightScheme *weight_scheme; // sample allocation and weighting, per emission type
   bool *initialize_comoving; // Transform from comoving frame for emission
   enum AbsorptionMethodFlag *absorption_method; // absorption method for each emission type
@@ -551,6 +558,7 @@ public:
   void UnpackFromTransfer(const std::vector<int> &ib, const std::vector<Real> &rb,
                           const std::vector<char> &sb);
   int64_t nabs, nesc, ndes, nscat, nrem; // counters
+  Real wesc_sum, wesc_sq; // escaped weight and its square, for the effective count
   int loop_max_size;
   int nx1,nx2,nx3;
   int is,ie,js,je,ks,ke;
@@ -617,6 +625,10 @@ public:
   Real emin_scat, emax_scat, dloge_scat; // min/max energy for scattering moments
 
   AthenaArray<Real> emission;
+  // weights = biased: per-cell importance (ghost-inclusive, 1 where not set) and the
+  // escape probability per energy group on active cells, (k-ks, j-js, i-is, l)
+  AthenaArray<Real> importance;
+  AthenaArray<Real> escape_prob;
   AthenaArray<Real> moments;
   AthenaArray<Real> moments_com;
   AthenaArray<Real> moments_coord;
@@ -678,6 +690,9 @@ public:
   // Functions for handling distributed emission over cells
   void ComputeEmissionArray(int etype, Real &emm_min, Real &emm_max, Real &emm_tot);
   void ComputeEmissionSampleArray();
+  // emission times importance when biased, emission otherwise: what samples are drawn on
+  Real SampleDensity(int k, int j, int i) const;
+  Real SampleDensityTotal() const;
   //void ComputeEmissionSampleArray(BoundaryFace face);
   void SetEmissionCellWeight(Photon *pphot, int ips, int ipe);
   void SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face, int ips, int ipe);

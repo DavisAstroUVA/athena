@@ -55,6 +55,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   UserWorkInMove=nullptr;
   GetEmission=nullptr;
   UserGetDensity=nullptr;
+  nescape = 0;
   UserGetTemperature=nullptr;
   UserGetNumberDensity=nullptr;
   UserScattering=nullptr;
@@ -677,6 +678,7 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
 
     // initialize counters to zero
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
+    pmcb->wesc_sum = pmcb->wesc_sq = 0.;
     pmcb->loop_max_size = loop_max;
 
     // Call problem generators for Monte Carlo
@@ -1001,7 +1003,9 @@ void MonteCarlo::DistributeSamples(int etype) {
         << std::endl;
     ATHENA_ERROR(msg);
   }
-  bool equal_weight = (weight_scheme[etype] == WEIGHTS_EQUAL);
+  const bool biased = (weight_scheme[etype] == WEIGHTS_BIASED);
+  // equal and biased share the allocation machinery; biased draws on a different density
+  const bool equal_weight = (weight_scheme[etype] == WEIGHTS_EQUAL) || biased;
   
   // compute emission properties over all blocks on this process
   Real em_min = SQR(HUGE_NUMBER), em_max = -HUGE_NUMBER, em_tot = 0.;
@@ -1024,8 +1028,23 @@ void MonteCarlo::DistributeSamples(int etype) {
   MPI_Allreduce(MPI_IN_PLACE,&em_tot,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
 #endif
 
+  // The density samples are allocated on: the emission, or emission times importance
+  // when biased.  em_tot stays the physical emission for the report below.
+  Real s_tot = em_tot;
+  if (biased) {
+    em_proc = 0.;
+    for (int nb=0; nb<nblocal; nb++) {
+      tot_block[nb] = my_blocks(nb)->SampleDensityTotal();
+      em_proc += tot_block[nb];
+    }
+    s_tot = em_proc;
+#ifdef MPI_PARALLEL
+    MPI_Allreduce(MPI_IN_PLACE,&s_tot,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+#endif
+  }
+
   if (equal_weight) {
-    // emmision weights are all equal 
+    // emmision weights are all equal
 
     // First, each process sends its its own block totals to rank 0
     std::vector<Real> emiss_proc(Globals::nranks, 0.0);
@@ -1040,7 +1059,7 @@ void MonteCarlo::DistributeSamples(int etype) {
     if (Globals::my_rank == 0) {
       std::vector<Real> prob(Globals::nranks);
       for (int irank=0; irank<Globals::nranks; irank++)
-        prob[irank] = emiss_proc[irank]/em_tot;
+        prob[irank] = emiss_proc[irank]/s_tot;
       my_blocks(0)->pran->SampleMultinomial(ntot,Globals::nranks,prob.data(),count.data());
     }
     int64_t my_count;
@@ -1055,7 +1074,7 @@ void MonteCarlo::DistributeSamples(int etype) {
     for (int nb=0; nb<nblocal; nb++)
       prob_b[nb] = tot_block[nb]/em_proc;
     my_blocks(0)->pran->SampleMultinomial(my_count,nblocal,prob_b.data(),count_b.data());
-    Real ave_weight = em_tot/static_cast<Real>(ntot);
+    Real ave_weight = s_tot/static_cast<Real>(ntot);
 
 
     for (int nb=0; nb<nblocal; nb++) {
@@ -1131,6 +1150,9 @@ void MonteCarlo::DistributeSamples(int etype) {
   if (Globals::my_rank == 0) {
     std::cout << "Emission array range (min, max), total: " << em_min << " "
               << em_max << " " << em_tot << std::endl;
+    if (biased)
+      std::cout << "Sample density total (emission x importance): " << s_tot
+                << std::endl;
     std::cout << "Minimum weight: " << my_blocks(0)->minweight << std::endl;
   }
   delete[] tot_block;
@@ -1274,8 +1296,11 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // bytes past it.
     int64_t ntot = 0;
     int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0;
+    Real wesc_sum = 0., wesc_sq = 0.;
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
+      wesc_sum += pmcb->wesc_sum;
+      wesc_sq += pmcb->wesc_sq;
       nesc += pmcb->nesc;
       nabs += pmcb->nabs;
       ndes += pmcb->ndes;
@@ -1293,6 +1318,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&nscat,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&ntot,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&wesc_sum,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&wesc_sq,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
   #endif
     // Global totals for the whole run, for the end-of-run cost report.  These are the
     // reduced values, so every rank holds the same number and rank 0 can print it.
@@ -1310,6 +1337,11 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   << static_cast<Real>(nscat)/static_cast<Real>(ntot) << std::endl;
       else
           std::cout << std::endl;
+      // (sum w)^2 / sum w^2 over the escaped samples: the number of equal-weight
+      // samples with the same variance
+      if (wesc_sq > 0.)
+        std::cout << "escaped weight: " << wesc_sum << " effective samples: "
+                  << wesc_sum*wesc_sum/wesc_sq << std::endl;
     }
 
     lb_transport_wall = std::chrono::duration<double>(
@@ -2584,24 +2616,23 @@ void MCRandom::SampleMultinomial(int n, int m, Real *prob, int *counts) {
 //----------------------------------------------------------------------------------------
 //! \fn enum WeightScheme GetWeightScheme(ParameterInput *pin)
 //! \brief read <montecarlo>/weights, the sample allocation and weighting scheme
-//
-// The former boolean equal_weight is refused rather than ignored, so a deck that still
-// carries it cannot silently fall back to emission weighting.
 
 enum WeightScheme GetWeightScheme(ParameterInput *pin) {
   if (pin->DoesParameterExist("montecarlo","equal_weight")) {
     std::stringstream msg;
     msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
-        << "<montecarlo>/equal_weight has been replaced by weights = equal | emission"
-        << std::endl;
+        << "<montecarlo>/equal_weight is not an option; use weights = emission | equal"
+        << " | biased" << std::endl;
     ATHENA_ERROR(msg);
   }
   std::string s = pin->GetOrAddString("montecarlo","weights","emission");
   if (s == "emission") return WEIGHTS_EMISSION;
   if (s == "equal") return WEIGHTS_EQUAL;
+  if (s == "biased") return WEIGHTS_BIASED;
   std::stringstream msg;
   msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
-      << "<montecarlo>/weights = " << s << " is not one of emission, equal" << std::endl;
+      << "<montecarlo>/weights = " << s << " is not one of emission, equal, biased"
+      << std::endl;
   ATHENA_ERROR(msg);
   return WEIGHTS_EMISSION;
 }
