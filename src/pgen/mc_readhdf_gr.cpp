@@ -30,6 +30,10 @@
 #include "../monte_carlo/montecarlo.hpp"
 #include "../monte_carlo/photon.hpp"
 #include "../monte_carlo/mcutils.hpp"
+#include "../inputs/hdf5_reader.hpp"  // HDF5ReadRealArray()
+#ifdef HDF5OUTPUT
+#include <hdf5.h>
+#endif
 
 namespace {
   // Global variables
@@ -40,6 +44,7 @@ namespace {
   Real tcut = 1.e20;    // Kelvin
   Real heabund = 0.09; // helium abundance by number
   bool biased = false;   // weights = biased
+  std::string escape_file;  // <problem>/escape_file, from escape_table.py; empty = local
   // Floor on the sampled escape probability.  It bounds the largest weight at
   // ave/pesc_min
   Real pesc_min = 1.e-10;
@@ -81,6 +86,9 @@ namespace {
   void GetNel(MonteCarloBlock *pmcb);
   void GetNelFloor(MonteCarloBlock *pmcb);
   void BuildEscapeTables(MonteCarloBlock *pmcb);
+  void FillEscapeLocal(MonteCarloBlock *pmcb);
+  void ReadEscapeFile(MonteCarloBlock *pmcb);
+  void ComputeImportance(MonteCarloBlock *pmcb);
 
   //! \fn void CheckActiveCell(MonteCarloBlock *pmcb, int i3, int i2, int i1)
   //! \brief debug-only guard on the assumption opact/emis_tot/emis_cum are built around
@@ -122,7 +130,10 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   tcut = pin->GetOrAddReal("problem", "tcut", tcut);
   heabund = pin->GetOrAddReal("problem", "heabund", heabund);
   biased = (pin->GetOrAddString("montecarlo","weights","emission") == "biased");
-  if (biased) pesc_min = pin->GetOrAddReal("problem", "pesc_min", pesc_min);
+  if (biased) {
+    pesc_min = pin->GetOrAddReal("problem", "pesc_min", pesc_min);
+    escape_file = pin->GetOrAddString("problem", "escape_file", "");
+  }
 
   emission_type = pin->GetOrAddString("montecarlo","emission","none");
   // The opacity and emission tables of the table path are file-scope arrays indexed by
@@ -869,13 +880,14 @@ Real FreeFreeOpacity(Real tgas, Real rho, Real energy) {
   return opac;
 }
 
-// Escape probability per active cell and energy group, and the cell importance, for
-// weights = biased.  The effective extinction sqrt(3 alpha_a (alpha_a + alpha_s)), the
-// inverse of the thermalization length of a diffusing photon, is summed
-// from the cell to the edge of its block along the six axis directions and the smallest
-// column is used. The importance is the cell's escape probability averaged over its
-// emission spectrum.
-void BuildEscapeTables(MonteCarloBlock *pmcb) {
+// Escape probability per active cell and energy group from block-local columns, for
+// weights = biased without an escape file.  The effective extinction
+// sqrt(3 alpha_a (alpha_a + alpha_s)), the inverse of the thermalization length of a
+// diffusing photon, is summed from the cell to the edge of its block along the six axis
+// directions and the smallest column is used.  A cell in the face layer of a block sees
+// no column past the face, so on a mesh where the disk spans many blocks this
+// overestimates escape there; escape_table.py integrates through the whole mesh.
+void FillEscapeLocal(MonteCarloBlock *pmcb) {
   MonteCarlo *pmc = pmcb->pmy_mc;
   const int ng = pmc->nescape;
   if (ng <= 0) return;
@@ -960,11 +972,97 @@ void BuildEscapeTables(MonteCarloBlock *pmcb) {
   }
   kap.DeleteAthenaArray();
 
-  // escape probability, floored, and the emission-weighted importance
-  for (int k=ks; k<=ke; ++k) {
-    for (int j=js; j<=je; ++j) {
-      for (int i=is; i<=ie; ++i) {
-        const int kt = k-ks, jt = j-js, it = i-is;
+  for (int kt=0; kt<nx3; ++kt)
+    for (int jt=0; jt<nx2; ++jt)
+      for (int it=0; it<nx1; ++it)
+        for (int l=0; l<ng; ++l)
+          pmcb->escape_prob(kt,jt,it,l) = std::max(std::exp(-tau(kt,jt,it,l)), pesc_min);
+  tau.DeleteAthenaArray();
+}
+
+// Escape probabilities from the file escape_table.py wrote: one variable per energy
+// band on the snapshot's block structure, plus the band edges.  Each escape-table group
+// takes the band holding its centre, clamped at the ends.  The file's block order is the
+// snapshot's, so the grid file's index map applies.
+void ReadEscapeFile(MonteCarloBlock *pmcb) {
+#ifdef HDF5OUTPUT
+  MonteCarlo *pmc = pmcb->pmy_mc;
+  const int ng = pmc->nescape;
+  if (ng <= 0) return;
+  MeshBlock *pmb = pmcb->pmy_block;
+  const int nx1 = pmb->block_size.nx1, nx2 = pmb->block_size.nx2;
+  const int nx3 = pmb->block_size.nx3;
+
+  // band edges, read once
+  static AthenaArray<Real> edges;
+  static int nband = 0;
+  if (nband == 0) {
+    hid_t file = H5Fopen(escape_file.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+    if (file < 0) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in ReadEscapeFile" << std::endl
+          << "cannot open <problem>/escape_file = " << escape_file << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    hid_t dset = H5Dopen(file, "pesc_edges", H5P_DEFAULT);
+    hid_t space = H5Dget_space(dset);
+    hsize_t dims[1];
+    H5Sget_simple_extent_dims(space, dims, nullptr);
+    nband = static_cast<int>(dims[0]) - 1;
+    edges.NewAthenaArray(nband+1);
+    H5Dread(dset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, edges.data());
+    H5Sclose(space);
+    H5Dclose(dset);
+    H5Fclose(file);
+    if (Globals::my_rank == 0)
+      std::cout << "Escape probabilities from " << escape_file << ": " << nband
+                << " bands, " << edges(0)/1.602176634e-12 << " to "
+                << edges(nband)/1.602176634e-12 << " eV" << std::endl;
+  }
+
+  const int file_block = (MCGridFile::Loaded() != nullptr)
+                         ? MCGridFile::Loaded()->FileIndex(pmb->gid) : pmb->gid;
+  AthenaArray<Real> pesc;
+  pesc.NewAthenaArray(nband,nx3,nx2,nx1);
+  int start_file[5] = {0, file_block, 0, 0, 0};
+  int count_file[5] = {nband, 1, nx3, nx2, nx1};
+  int start_mem[4] = {0, 0, 0, 0};
+  int count_mem[4] = {nband, nx3, nx2, nx1};
+  HDF5ReadRealArray(escape_file.c_str(), "pesc", 5, start_file, count_file, 4,
+                    start_mem, count_mem, pesc);
+
+  // group -> band by the group's centre energy
+  std::vector<int> band(ng);
+  for (int l=0; l<ng; ++l) {
+    const Real ec = std::exp(0.5*(pmc->escape_lne(l) + pmc->escape_lne(l+1)));
+    int b = 0;
+    while (b < nband-1 && ec >= edges(b+1)) ++b;
+    band[l] = b;
+  }
+  for (int kt=0; kt<nx3; ++kt)
+    for (int jt=0; jt<nx2; ++jt)
+      for (int it=0; it<nx1; ++it)
+        for (int l=0; l<ng; ++l)
+          pmcb->escape_prob(kt,jt,it,l) = std::max(pesc(band[l],kt,jt,it), pesc_min);
+#else
+  (void)pmcb;
+#endif
+}
+
+// The cell importance: its escape probability averaged over its emission spectrum, the
+// free-free sampler's e^{-x} over the cell's energy range or the table's photon shares.
+void ComputeImportance(MonteCarloBlock *pmcb) {
+  MonteCarlo *pmc = pmcb->pmy_mc;
+  const int ng = pmc->nescape;
+  if (ng <= 0) return;
+  const int lid = pmcb->pmy_block->lid;
+  const Real kb = 1.380649e-16;
+  const bool table = (emission_type != "freefree");
+  const AthenaArray<Real> &lne = pmc->escape_lne;
+  for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
+    for (int j=pmcb->js; j<=pmcb->je; ++j) {
+      for (int i=pmcb->is; i<=pmcb->ie; ++i) {
+        const int kt = k-pmcb->ks, jt = j-pmcb->js, it = i-pmcb->is;
         Real wsum = 0., psum = 0.;
         const Real temp = pmcb->tgas(k,j,i);
         // the free-free sampler's range for this cell, in ln(energy/erg)
@@ -972,8 +1070,7 @@ void BuildEscapeTables(MonteCarloBlock *pmcb) {
         const Real hi_c = logemax + (tnorm ? std::log(temp) : 0.);
         const Real *cumv = table ? &(emis_cum(lid,kt,jt,it,0)) : nullptr;
         for (int l=0; l<ng; ++l) {
-          const Real p = std::max(std::exp(-tau(kt,jt,it,l)), pesc_min);
-          pmcb->escape_prob(kt,jt,it,l) = p;
+          const Real p = pmcb->escape_prob(kt,jt,it,l);
           Real w;
           if (table) {
             w = cumv[l+1] - cumv[l];
@@ -988,7 +1085,14 @@ void BuildEscapeTables(MonteCarloBlock *pmcb) {
       }
     }
   }
-  tau.DeleteAthenaArray();
+}
+
+void BuildEscapeTables(MonteCarloBlock *pmcb) {
+  if (escape_file.empty())
+    FillEscapeLocal(pmcb);
+  else
+    ReadEscapeFile(pmcb);
+  ComputeImportance(pmcb);
 }
 
 void GetNelFloor(MonteCarloBlock *pmcb) {
