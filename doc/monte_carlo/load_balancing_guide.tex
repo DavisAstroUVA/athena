@@ -1,0 +1,181 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\newcommand{\key}[1]{\texttt{#1}}
+
+\title{Setting the load-balancing parameters of the Monte Carlo module}
+\author{Athena++ Monte Carlo radiation transport}
+\date{}
+
+\begin{document}
+\sloppy
+\maketitle
+
+\section{What is balanced}
+
+Every block records the wall time its transport sweeps take, and the module adds that
+time to the mesh's per-block cost. The mesh's balancer then redistributes blocks across
+ranks so that the predicted cost of the busiest rank is as small as possible, and the
+module moves the photons resident on a block, its moment arrays and its random-number
+state along with it. Costs are measured, not modelled, so the first transport of a run
+starts with whatever layout the mesh built, and every later decision uses what the
+previous transport actually cost.
+
+Two things follow. The layout can only improve once a transport has been timed, so a
+run of a single output interval gains nothing unless a cost file from an earlier run or
+the photon-count guess described below is supplied. And costs are only comparable when
+the work per photon is stationary, which holds for a static run over its output
+intervals and for the repeated transports of a dynamic run.
+
+\section{The two cadences}
+
+Redistribution can happen at two points, controlled by keys in two blocks of the deck.
+
+\paragraph{Between output intervals.}
+The mesh's own machinery, with keys in \key{<loadbalancing>}. At the start of each
+\key{RunMonteCarlo} call the mesh compares the most expensive rank against the mean, and
+if \key{interval} transports have passed since the last check and the busiest rank costs
+more than $(1+\key{tolerance})$ times the average, it repartitions. In a static run each
+output interval is one transport, so \key{interval = 1} considers a redistribution at
+every interval with the costs of the interval just finished. The first interval of a
+static run is unbalanced unless \key{cost\_file} or \key{lb\_initial} provides costs.
+
+\paragraph{Mid-transport.}
+Enabled by \key{<montecarlo>/lb\_check\_interval} $> 0$. Which transport loop is running
+decides what a check means:
+\begin{itemize}
+  \item In the synchronous loop (one rank, or the asynchronous termination switched
+    off), a check happens every \key{lb\_check\_interval} completed rounds, and at
+    least \key{lb\_min\_window} rounds after the last redistribution.
+  \item In the asynchronous loop, the production MPI case, a check happens each time
+    \key{lb\_check\_fraction} of the interval's photons have finished since the last
+    check. \key{lb\_check\_interval} only has to be nonzero to enable it; its value is
+    not used as a count.
+\end{itemize}
+In both loops a check gathers the block costs, and every rank evaluates the same
+partition. A redistribution is taken only if the predicted busiest rank improves by at
+least \key{lb\_min\_gain}, and at most \key{lb\_max\_per\_transport} redistributions are
+made in one transport. In the asynchronous loop the ranks first drain: they stop
+transporting, finish delivering photons in flight, and make the blocking balance call
+only when every rank reports the same sent and received totals twice in a row.
+
+\paragraph{With \key{nout} $> 1$.}
+All the mid-transport counters are local to one transport, and the fraction is taken of
+that interval's \key{nphot}, not of \key{nout} $\times$ \key{nphot}. A run with
+\key{nout = 3} and \key{lb\_check\_fraction = 0.1} checks after every ten per cent of
+each interval's photons, up to \key{lb\_max\_per\_transport} times in each interval, and
+additionally considers a between-interval balance at the top of the second and third
+intervals. What persists across intervals is the cost information and the layout.
+
+\section{The keys}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{3.4cm}p{7.4cm}@{}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\multicolumn{3}{@{}l}{\key{<loadbalancing>}} \\
+\key{balancer} & \key{default} & \key{automatic} balances on measured cost;
+  \key{manual} uses the cost list the module sets. \key{default} turns balancing off. \\
+\key{tolerance} & 0.5 & A between-interval redistribution needs the busiest rank
+  above $(1+\key{tolerance})$ times the mean. \\
+\key{interval} & 10 & Transports between between-interval checks. Set 1 for a static
+  run with several outputs. \\
+\key{cost\_file} & none & Read block costs from this file before the first transport and
+  write them after each transport, so a rerun starts balanced. \\
+\midrule
+\multicolumn{3}{@{}l}{\key{<montecarlo>}} \\
+\key{lb\_initial} & \key{none} & \key{photons}: with no costs on hand, balance the
+  first transport on each block's share of the photons to emit. Useful with
+  \key{weights = equal} or \key{biased}, where that share follows the emission; with
+  \key{weights = emission} every block gets the same count and it does nothing. \\
+\key{lb\_check\_interval} & 0 & Enables mid-transport checks; in the synchronous loop,
+  the number of rounds between them. \\
+\key{lb\_check\_fraction} & 0.1 & Asynchronous loop: fraction of the interval's photons
+  finished between checks. \\
+\key{lb\_max\_per\_transport} & 4 & Cap on redistributions within one transport. \\
+\key{lb\_min\_window} & \key{lb\_check\_interval} & Synchronous loop: rounds that must
+  pass after a redistribution before the next check. \\
+\key{lb\_min\_gain} & 0.05 & Required fractional improvement of the predicted busiest
+  rank for a redistribution to be taken, between intervals and mid-transport. \\
+\key{lb\_partition} & \key{optimal} & Contiguous partition of the block list:
+  \key{optimal} minimises the busiest rank exactly; \key{greedy} is the mesh's
+  cheaper heuristic. \\
+\key{lb\_cost\_decay} & 1.0 & After a check that keeps the layout, multiply the
+  accumulated costs by this. Below 1 it forgets old cost so a change in where the work
+  is shows up sooner. \\
+\key{lb\_report} & \key{false} & Print the per-rank and per-block cost report after each
+  transport and the wall cost of each redistribution. \\
+\key{lb\_test\_repack} \newline \key{lb\_test\_costs} & \key{none} \newline \key{measured} & Test
+  knobs that force moves or substitute costs. Leave at their defaults in production. \\
+\bottomrule
+\end{tabular}
+\normalsize
+\end{center}
+
+\section{Recommended settings}
+
+\paragraph{Static run, several output intervals.}
+\begin{verbatim}
+<loadbalancing>
+balancer  = automatic
+tolerance = 0.2
+interval  = 1
+cost_file = costs.dat
+
+<montecarlo>
+lb_initial        = photons
+lb_check_interval = 1
+lb_check_fraction = 0.1
+lb_report         = true
+\end{verbatim}
+The first interval runs on the photon-count guess, or on the cost file if one exists from
+an earlier run of the same snapshot; the mid-transport checks catch the imbalance
+within that interval; every later interval starts from the measured costs. Keep
+\key{lb\_report} on until the report shows the busiest rank within a few tens of per cent
+of the fair share, then turn it off. \key{tolerance} at 0.5 is the hydro default and is
+loose for a transport whose cost is dominated by a few blocks; 0.2 makes the
+between-interval check act on the imbalance the report typically shows.
+
+\paragraph{Single output interval.}
+Between-interval balancing never fires. Use \key{cost\_file} from a previous run of the
+same snapshot if there is one, otherwise \key{lb\_initial = photons} together with the
+mid-transport checks. Raise \key{lb\_max\_per\_transport} only if the report shows the
+cap being reached while the busiest rank is still far above the fair share.
+
+\paragraph{Dynamic run.}
+Each cycle is a transport, so \key{interval} counts cycles, and the costs accumulate
+from cycle to cycle unless \key{lb\_cost\_decay} is below 1. The mid-transport
+machinery is not used in dynamic runs; the between-interval keys are what matter.
+
+\section{What to expect and what to watch}
+
+\begin{itemize}
+  \item Redistribution moves a block's random-number state with it, so a balanced run
+    is not bitwise equal to an unbalanced one; spectra agree within the Poisson noise,
+    and photon counts are conserved exactly. The report prints the sent and received
+    totals of each move.
+  \item A move costs a collective and the transfer of every resident photon on the
+    blocks that move. The prediction guard exists so that a move is not made for a
+    gain smaller than its cost; if the report shows moves with small gains,
+    raise \key{lb\_min\_gain}.
+  \item The partition is contiguous in the block list, so a single very expensive block
+    cannot be split; the best achievable busiest rank is at least that block's cost.
+    The per-block part of the report shows whether the imbalance is one block or many.
+  \item The \key{mc\_readhdf} and \key{mc\_readhdf\_gr} generators refuse balancing
+    unless \key{emission = freefree}, because their per-block opacity tables are not
+    rebuilt when a block moves. The free-free path rebuilds its number densities on
+    arrival and is safe.
+  \item With \key{weights = biased} the importance and escape tables travel with the
+    block, so balancing is safe in that scheme too.
+\end{itemize}
+
+\end{document}
