@@ -40,7 +40,9 @@ namespace {
   Real tcut = 1.e20;    // Kelvin
   Real heabund = 0.09; // helium abundance by number
   bool biased = false;   // weights = biased
-  Real pesc_min = 1.e-4; // floor on the sampled escape probability; bounds the weights
+  // Floor on the sampled escape probability.  It bounds the largest weight at
+  // ave/pesc_min
+  Real pesc_min = 1.e-10;
   constexpr Real CUT_VALUE = 1.e-20;
   std::string emission_type;
   // frequency table parameters
@@ -868,11 +870,11 @@ Real FreeFreeOpacity(Real tgas, Real rho, Real energy) {
 }
 
 // Escape probability per active cell and energy group, and the cell importance, for
-// weights = biased.  The effective extinction sqrt(alpha_a (alpha_a + alpha_s)) is summed
+// weights = biased.  The effective extinction sqrt(3 alpha_a (alpha_a + alpha_s)), the
+// inverse of the thermalization length of a diffusing photon, is summed
 // from the cell to the edge of its block along the six axis directions and the smallest
-// column is used, so the probability is an upper bound: the sampling is unbiased for any
-// positive value, and a high estimate only costs efficiency.  The importance is the
-// cell's escape probability averaged over its emission spectrum.
+// column is used. The importance is the cell's escape probability averaged over its
+// emission spectrum.
 void BuildEscapeTables(MonteCarloBlock *pmcb) {
   MonteCarlo *pmc = pmcb->pmy_mc;
   const int ng = pmc->nescape;
@@ -903,7 +905,7 @@ void BuildEscapeTables(MonteCarloBlock *pmcb) {
           else
             alpha_a = FreeFreeOpacity(temp, rhoc, std::exp(0.5*(lne(l)+lne(l+1))));
           const Real alpha_s = sigma_t*ne;
-          kap(kt,jt,it,l) = std::sqrt(alpha_a*(alpha_a+alpha_s)) * l_cgs;
+          kap(kt,jt,it,l) = std::sqrt(3.*alpha_a*(alpha_a+alpha_s)) * l_cgs;
           tau(kt,jt,it,l) = HUGE_NUMBER;
         }
       }
