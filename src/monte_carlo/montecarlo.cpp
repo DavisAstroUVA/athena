@@ -56,6 +56,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   GetEmission=nullptr;
   UserGetDensity=nullptr;
   nescape = 0;
+  bias_energy = pin->GetOrAddBoolean("montecarlo","bias_energy",true);
   UserGetTemperature=nullptr;
   UserGetNumberDensity=nullptr;
   UserScattering=nullptr;

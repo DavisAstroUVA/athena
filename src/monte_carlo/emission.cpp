@@ -46,15 +46,14 @@ void PhotonEmitFreeFree(MonteCarloBlock *pmcb, Photon *pphot, Real lemin, Real l
   MCRandom *pran = pmcb->pran;
 
   // The energy is drawn in ln E and the weight carries e^{-x} times the ln E measure
-  // the draw was spread over.  With an escape table (weights = biased) the group is
-  // drawn in proportion to its escape probability times its overlap with
-  // [lemin, lemax], and the measure is divided by that probability, so samples
-  // concentrate at energies that can leave the gas while the expected weight is
-  // unchanged.
+  // With an escape table (weights = biased, bias_energy) the group is drawn in
+  // proportion to its escape probability times its overlap with [lemin, lemax], and the
+  // measure is divided by that probability, so samples concentrate at energies that can
+  // leave the gas while the expected weight is unchanged.
   Real y, measure = lemax - lemin;
   const int ng = pmcb->pmy_mc->nescape;
   bool drawn = false;
-  if (ng > 0 && pmcb->escape_prob.GetSize() > 0) {
+  if (ng > 0 && pmcb->pmy_mc->bias_energy && pmcb->escape_prob.GetSize() > 0) {
     const AthenaArray<Real> &lne = pmcb->pmy_mc->escape_lne;
     const int kt = pphot->i3p[ip]-pmcb->ks, jt = pphot->i2p[ip]-pmcb->js,
               it = pphot->i1p[ip]-pmcb->is;

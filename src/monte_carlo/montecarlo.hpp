@@ -284,6 +284,7 @@ public:
   // energy draw is not biased.
   int nescape;
   AthenaArray<Real> escape_lne;
+  bool bias_energy; // biased version of PhotonEmitFreeFree
   WeightScheme *weight_scheme; // sample allocation and weighting, per emission type
   bool *initialize_comoving; // Transform from comoving frame for emission
   enum AbsorptionMethodFlag *absorption_method; // absorption method for each emission type

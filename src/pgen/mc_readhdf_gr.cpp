@@ -815,7 +815,7 @@ Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   // to sample, and the photon carries zero weight, so return the lowest tabulated energy
   // rather than dividing by a zero bin width.
   if (prob[nfre-1] <= 0.) return fre_grid(0);
-  if (biased && pmcb->pmy_mc->nescape > 0) {
+  if (biased && pmcb->pmy_mc->nescape > 0 && pmcb->pmy_mc->bias_energy) {
     // Draw the interval in proportion to its photon share times its escape probability
     // and divide the weight by that probability.
     Real *pe = &(pmcb->escape_prob(i3-pmcb->ks,i2-pmcb->js,i1-pmcb->is,0));
