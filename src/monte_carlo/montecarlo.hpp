@@ -248,6 +248,7 @@ public:
   Real tint;   // Monte Carlo timestep
   Real tmax;   // Maximum evolution time
   Real weightratio; // used for setting minimum weight for absorption
+  Real roulette; // determines if low weight samples are absorbed or survive
 
   int ntype; // number of emission types
   int64_t nsamp;  // total number of photons to integrate per timestep/output
@@ -694,6 +695,7 @@ public:
   void ComputeEmissionSampleArray();
   // emission times importance when biased, emission otherwise: what samples are drawn on
   Real SampleDensity(int k, int j, int i) const;
+  void RouletteOrAbsorb(Photon *pphot, int ip);
   Real SampleDensityTotal() const;
   //void ComputeEmissionSampleArray(BoundaryFace face);
   void SetEmissionCellWeight(Photon *pphot, int ips, int ipe);

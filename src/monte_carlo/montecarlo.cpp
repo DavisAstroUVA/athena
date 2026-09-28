@@ -127,6 +127,13 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 
   // Set mininmum weight if using weighting for absorption
   weightratio = pin->GetOrAddReal("montecarlo","minweight",1.0e-20);
+  roulette = pin->GetOrAddReal("montecarlo","roulette",0.1);
+  if (roulette < 0. || roulette >= 1.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/roulette = " << roulette << "; use 0 <= roulette < 1" << std::endl;
+    ATHENA_ERROR(msg);
+  }
 
   // Number of outputs for static monte carlo
   nout = pin->GetOrAddInteger("montecarlo","nout",1);
@@ -1039,6 +1046,7 @@ void MonteCarlo::DistributeSamples(int etype) {
   // The density samples are allocated on: the emission, or emission times importance
   // when biased.  em_tot stays the physical emission for the report below.
   Real s_tot = em_tot;
+  Real weight_ref = em_tot/static_cast<Real>(ntot);
   if (biased) {
     em_proc = 0.;
     for (int nb=0; nb<nblocal; nb++) {
@@ -1051,6 +1059,8 @@ void MonteCarlo::DistributeSamples(int etype) {
 #endif
     if (Globals::my_rank == 0)
       std::cout << "Importance: emission-weighted mean " << s_tot/em_tot << std::endl;
+    // The minimum weight is no longer average weight if biased sampling used
+    weight_ref = s_tot/static_cast<Real>(ntot);
     // Composite biasing: replace the importance I by (1 - xi) + xi I E/S, so the
     // allocation density becomes (1 - xi) emission/E + xi emission I/S and no weight
     // exceeds 1/(1 - xi) times the equal weight.
@@ -1112,7 +1122,7 @@ void MonteCarlo::DistributeSamples(int etype) {
     for (int nb=0; nb<nblocal; nb++) {
       my_blocks(nb)->nphremain = count_b[nb];
       my_blocks(nb)->nphrun = 0;
-      my_blocks(nb)->minweight = weightratio * ave_weight;
+      my_blocks(nb)->minweight = weightratio * weight_ref;
       my_blocks(nb)->emiss_to_weight = ave_weight;
       // distribute photons within each block
       my_blocks(nb)->ComputeEmissionSampleArray();

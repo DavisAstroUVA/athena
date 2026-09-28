@@ -841,17 +841,13 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
     if (pphot->statp[ip] == EVOLVING) {
       if (absorption_meth == ABSWEIGHT) {
         pphot->wp[ip] *= (pphot->scp[ip]/(pphot->scp[ip]+pphot->acp[ip]));
-        if(pphot->wp[ip] <= minweight) {
-          pphot->statp[ip] = ABSORBED;
-        }
+        if (pphot->wp[ip] <= minweight) RouletteOrAbsorb(pphot, ip);
       } else if (absorption_meth == ABSPROB) {
         if (pran->uniform() > (pphot->scp[ip]/(pphot->scp[ip]+pphot->acp[ip])) )
           pphot->wp[ip] = 0.;
         pphot->statp[ip] = ABSORBED;
       } else if (absorption_meth == ABSTAU) {
-        if(pphot->wp[ip] <= minweight) {
-          pphot->statp[ip] = ABSORBED;
-        }
+        if (pphot->wp[ip] <= minweight) RouletteOrAbsorb(pphot, ip);
       }
     } // status == evolving
 
@@ -1859,6 +1855,19 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
   // if using equal weight scheme, intialize variables for SetEmissionCellWeight
   i1_ = -1; i2_= -1; i3_ = -1;
 
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip)
+//! \brief a sample below the minimum weight survives with probability roulette and
+//! carries 1/roulette times its weight, or is absorbed; the expected weight is unchanged
+
+void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip) {
+  const Real p = pmy_mc->roulette;
+  if (p > 0. && pran->uniform() < p)
+    pphot->wp[ip] /= p;
+  else
+    pphot->statp[ip] = ABSORBED;
 }
 
 //----------------------------------------------------------------------------------------
