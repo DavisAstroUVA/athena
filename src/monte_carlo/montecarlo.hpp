@@ -289,6 +289,13 @@ public:
   AthenaArray<Real> escape_lne;
   bool bias_energy; // biased version of PhotonEmitFreeFree
   Real bias_mix; // xi parameter for composite biasing
+  Real bias_scale; // xi E/S, the factor on the escape probability in the mixed importance
+  // Weight window (weights = biased): at each interaction a sample heavier than wwin_top
+  // times the cell's window centre is split into up to wwin_max_split copies, one lighter
+  // than wwin_bottom times it survives roulette at the centre or is absorbed.  The centre
+  // is the weight the biased emission gives that cell at that energy.  0 disables a side.
+  Real wwin_top, wwin_bottom;
+  int wwin_max_split;
   WeightScheme *weight_scheme; // sample allocation and weighting, per emission type
   bool *initialize_comoving; // Transform from comoving frame for emission
   enum AbsorptionMethodFlag *absorption_method; // absorption method for each emission type
@@ -563,6 +570,7 @@ public:
   void UnpackFromTransfer(const std::vector<int> &ib, const std::vector<Real> &rb,
                           const std::vector<char> &sb);
   int64_t nabs, nesc, ndes, nscat, nrem; // counters
+  int64_t nsplit, nroul; // copies made and samples rouletted by the weight window
   Real wesc_sum, wesc_sq; // escaped weight and its square, for the effective count
   int loop_max_size;
   int nx1,nx2,nx3;
@@ -698,6 +706,10 @@ public:
   // emission times importance when biased, emission otherwise: what samples are drawn on
   Real SampleDensity(int k, int j, int i) const;
   void RouletteOrAbsorb(Photon *pphot, int ip);
+  //! the weight the biased emission gives the sample's cell at its energy
+  Real WindowCenter(Photon *pphot, int ip) const;
+  //! split or roulette a sample outside the weight window; copies are appended
+  void WeightWindow(Photon *pphot, int ip);
   Real SampleDensityTotal() const;
   //void ComputeEmissionSampleArray(BoundaryFace face);
   void SetEmissionCellWeight(Photon *pphot, int ips, int ipe);

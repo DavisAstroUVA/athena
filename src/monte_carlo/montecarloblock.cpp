@@ -593,6 +593,8 @@ void MonteCarloBlock::PackForTransfer(std::vector<int> &ib, std::vector<Real> &r
   PackI64(ib, ndes);
   PackI64(ib, nscat);
   PackI64(ib, nrem);
+  PackI64(ib, nsplit);
+  PackI64(ib, nroul);
   PackI64(ib, lb_nstep);
   ib.push_back(i1_);
   ib.push_back(i2_);
@@ -651,6 +653,8 @@ void MonteCarloBlock::UnpackFromTransfer(const std::vector<int> &ib,
   ndes = UnpackI64(ib, pi);
   nscat = UnpackI64(ib, pi);
   nrem = UnpackI64(ib, pi);
+  nsplit = UnpackI64(ib, pi);
+  nroul = UnpackI64(ib, pi);
   lb_nstep = UnpackI64(ib, pi);
   i1_ = ib.at(pi++);
   i2_ = ib.at(pi++);
@@ -782,6 +786,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
 
   int nold = pphot->nphot;
   const int64_t navail = static_cast<int64_t>(nold) + nphremain;
+  const bool window = (pmy_mc->wwin_top > 0. || pmy_mc->wwin_bottom > 0.);
 
   // Emit photons to replace those that left meshblock or were terminated
   // limit ntot < loop_max_size unless nold is larger than loop_max_size
@@ -810,6 +815,12 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       }
       TransformToCoordinate(pphot,nold,pphot->nphot-1);
     }
+    if (window) {
+      for (int ip = nold; ip < pphot->nphot; ip++) {
+        const Real c = WindowCenter(pphot,ip);
+        pphot->wrefp[ip] = (c > 0.) ? pphot->wp[ip] / c : 0.;
+      }
+    }
 
     // Update the absorption and scattering extinction coefficients
     if (call_srcterms) {
@@ -832,8 +843,10 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
   //  pphot->PrintPhoton("after",0);
   //}
   //printf("%d done\n",pmy_block->gid);
-  // perform all absorption and scattering related tasks for all samples
+  // perform all absorption and scattering related tasks for all samples; copies the
+  // weight window appends are reached by the same loop
   for (int ip=0; ip<pphot->nphot; ip++) {
+    if (window && pphot->statp[ip] == EVOLVING) WeightWindow(pphot,ip);
     // record initial weight and direction
     Real weight0 = pphot->wp[ip];
     Real e_pre_scat = pphot->ep[ip];
@@ -1859,6 +1872,61 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
   // if using equal weight scheme, intialize variables for SetEmissionCellWeight
   i1_ = -1; i2_= -1; i3_ = -1;
 
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const
+//! \brief the weight the biased emission gives the sample's cell at its energy: the
+//! average sample weight over the mixed importance, taken at the escape-table group of
+//! the energy when there is a table
+
+Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const {
+  const int k = pphot->i3p[ip], j = pphot->i2p[ip], i = pphot->i1p[ip];
+  Real imp;
+  const int ng = pmy_mc->nescape;
+  if (ng > 0 && escape_prob.GetSize() > 0) {
+    const Real lne = std::log(pphot->ep[ip]);
+    const AthenaArray<Real> &edges = pmy_mc->escape_lne;
+    int l = 0;
+    while (l < ng-1 && lne >= edges(l+1)) ++l;
+    imp = (1. - pmy_mc->bias_mix) + pmy_mc->bias_scale * escape_prob(k-ks,j-js,i-is,l);
+  } else {
+    imp = importance(k,j,i);
+  }
+  return (imp > 0.) ? emiss_to_weight / imp : 0.;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::WeightWindow(Photon *pphot, int ip)
+//! \brief the window is set for each sample by its weight over the centre at emission,
+//! so it acts only on the change since then.  A sample above it is split into
+//! equal-weight copies at the same state, one below it survives at the window's
+//! reference with probability weight/reference or is absorbed carrying no weight.  The
+//! expected weight is unchanged either way.
+
+void MonteCarloBlock::WeightWindow(Photon *pphot, int ip) {
+  const Real ref = WindowCenter(pphot,ip) * pphot->wrefp[ip];
+  if (ref <= 0.) return;
+  const Real w = pphot->wp[ip];
+  if (pmy_mc->wwin_top > 0. && w > pmy_mc->wwin_top * ref) {
+    int m = static_cast<int>(std::ceil(w / ref));
+    m = std::min(m, pmy_mc->wwin_max_split);
+    if (m > 1) {
+      const int nold = pphot->nphot;
+      pphot->AllocatePhotons(nold + m - 1);
+      pphot->wp[ip] = w / m;
+      for (int n = 0; n < m-1; ++n) pphot->CopyPhoton(ip, nold + n);
+      nsplit += m - 1;
+    }
+  } else if (pmy_mc->wwin_bottom > 0. && w < pmy_mc->wwin_bottom * ref) {
+    if (pran->uniform() < w / ref) {
+      pphot->wp[ip] = ref;
+    } else {
+      pphot->wp[ip] = 0.;
+      pphot->statp[ip] = ABSORBED;
+    }
+    nroul++;
+  }
 }
 
 //----------------------------------------------------------------------------------------

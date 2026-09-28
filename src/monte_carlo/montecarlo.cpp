@@ -64,6 +64,20 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
         << "<montecarlo>/bias_mix = " << bias_mix << "; use 0 < bias_mix <= 1" << std::endl;
     ATHENA_ERROR(msg);
   }
+  bias_scale = 1.;
+  wwin_top = pin->GetOrAddReal("montecarlo","wwin_top",0.);
+  wwin_bottom = pin->GetOrAddReal("montecarlo","wwin_bottom",0.);
+  wwin_max_split = pin->GetOrAddInteger("montecarlo","wwin_max_split",8);
+  if ((wwin_top != 0. && wwin_top < 1.) || wwin_bottom < 0. || wwin_bottom > 1. ||
+      wwin_max_split < 2) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/wwin_top = " << wwin_top << ", wwin_bottom = " << wwin_bottom
+        << ", wwin_max_split = " << wwin_max_split
+        << "; use wwin_top >= 1 or 0, 0 <= wwin_bottom <= 1, wwin_max_split >= 2"
+        << std::endl;
+    ATHENA_ERROR(msg);
+  }
   UserGetTemperature=nullptr;
   UserGetNumberDensity=nullptr;
   UserScattering=nullptr;
@@ -705,6 +719,7 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
 
     // initialize counters to zero
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
+    pmcb->nsplit = pmcb->nroul = 0;
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
     pmcb->loop_max_size = loop_max;
 
@@ -1059,6 +1074,12 @@ void MonteCarlo::DistributeSamples(int etype) {
   // when biased.  em_tot stays the physical emission for the report below.
   Real s_tot = em_tot;
   Real weight_ref = em_tot/static_cast<Real>(ntot);
+  if ((wwin_top > 0. || wwin_bottom > 0.) && !biased) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo::Initialize" << std::endl
+        << "the weight window needs weights = biased for its importance" << std::endl;
+    ATHENA_ERROR(msg);
+  }
   if (biased) {
     em_proc = 0.;
     for (int nb=0; nb<nblocal; nb++) {
@@ -1078,6 +1099,7 @@ void MonteCarlo::DistributeSamples(int etype) {
     // exceeds 1/(1 - xi) times the equal weight.
     if (bias_mix < 1. && s_tot > 0.) {
       const Real scale = bias_mix * em_tot / s_tot;
+      bias_scale = scale;
       em_proc = 0.;
       for (int nb=0; nb<nblocal; nb++) {
         MonteCarloBlock *pmcb = my_blocks(nb);
@@ -1208,6 +1230,10 @@ void MonteCarlo::DistributeSamples(int etype) {
       std::cout << "Sample density total (emission x importance): " << s_tot
                 << std::endl;
     std::cout << "Minimum weight: " << my_blocks(0)->minweight << std::endl;
+    if (wwin_top > 0. || wwin_bottom > 0.)
+      std::cout << "Weight window: split above " << wwin_top << " x centre into at most "
+                << wwin_max_split << ", roulette below " << wwin_bottom << " x centre"
+                << std::endl;
     if (stretch != 1.) {
       std::cout << "Path stretching: extinction x " << stretch
                 << ", weight factor per flight bounded at " << stretch_bound;
@@ -1261,6 +1287,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     pmcb->pphot->ClearBoundary();
     // reset counters
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb-> nrem = 0;
+    pmcb->nsplit = pmcb->nroul = 0;
   }
 
   // Reset the moments and source terms for this transport, in both modes.  Every output
@@ -1279,6 +1306,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     for (int nb=0; nb<nblocal; nb++) {
       MonteCarloBlock *pmcb = my_blocks(nb);
       pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = 0;
+      pmcb->nsplit = pmcb->nroul = 0;
       pmcb->lb_time = 0.0;
       pmcb->lb_nstep = 0;
       pmcb->lb_pending = 0.0;
@@ -1356,10 +1384,12 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // below, so all six have to be 64 bits wide: reducing into a 32-bit ntot writes four
     // bytes past it.
     int64_t ntot = 0;
-    int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0;
+    int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0, nsplit = 0, nroul = 0;
     Real wesc_sum = 0., wesc_sq = 0.;
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
+      nsplit += pmcb->nsplit;
+      nroul += pmcb->nroul;
       wesc_sum += pmcb->wesc_sum;
       wesc_sq += pmcb->wesc_sq;
       nesc += pmcb->nesc;
@@ -1379,6 +1409,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&nscat,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&ntot,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nsplit,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nroul,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sum,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sq,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
   #endif
@@ -1398,6 +1430,9 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   << static_cast<Real>(nscat)/static_cast<Real>(ntot) << std::endl;
       else
           std::cout << std::endl;
+      if (wwin_top > 0. || wwin_bottom > 0.)
+        std::cout << "weight window: " << nsplit << " copies made, " << nroul
+                  << " samples rouletted" << std::endl;
       // (sum w)^2 / sum w^2 over the escaped samples: the number of equal-weight
       // samples with the same variance
       if (wesc_sq > 0.)
@@ -1814,6 +1849,7 @@ MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
   MonteCarloBlock *pmcb = new MonteCarloBlock(pmb, nullptr, this, pin);
   SetupBlockFromFluid(pmcb);
   pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
+  pmcb->nsplit = pmcb->nroul = 0;
   pmcb->loop_max_size = ComputeLoopMax();
   // The problem generator runs before the payload is unpacked, exactly as at startup:
   // it supplies per-block state that is neither fluid-derived nor carried (photon

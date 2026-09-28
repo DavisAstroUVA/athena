@@ -41,7 +41,7 @@ int Photon::ik0p = -1, Photon::ik1p = -1, Photon::ik2p = -1, Photon::ik3p = -1;
 int Photon::idk0p = -1, Photon::idk1p = -1, Photon::idk2p = -1, Photon::idk3p = -1;
 std::vector<Real> Photon::dk_scratch_;
 int Photon::iep = -1, Photon::iwp = -1, Photon::iscp = -1, Photon::iacp = -1;
-int Photon::istrp = -1, Photon::itaup = -1;
+int Photon::istrp = -1, Photon::itaup = -1, Photon::iwrefp = -1;
 int Photon::isip = -1, Photon::isqp = -1, Photon::isup = -1, Photon::isvp = -1;
 int Photon::iuserp = -1, Photon::ipolp = -1, Photon::idtp = -1;
 
@@ -75,7 +75,7 @@ Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
     dk0p(dk_scratch_), dk1p(dk_scratch_), dk2p(dk_scratch_), dk3p(dk_scratch_),
 #endif
     ep(rp[iep]), wp(rp[iwp]), scp(rp[iscp]), acp(rp[iacp]), strp(rp[istrp]),
-    taup(rp[itaup]),
+    taup(rp[itaup]), wrefp(rp[iwrefp]),
     sip(rp[isip]), sqp(rp[isqp]), sup(rp[isup]), svp(rp[isvp]),
     dtp(rp[idtp]) {
 
@@ -280,7 +280,19 @@ void Photon::AllocatePhotons(int nphot) {
     nmvp[ip] = 0;
     strp[ip] = 0.;
     taup[ip] = -1.;
+    wrefp[ip] = 0.;
   }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Photon::CopyPhoton(int src, int dst)
+//! \brief copy every property of photon src into slot dst
+
+void Photon::CopyPhoton(int src, int dst) {
+  for (int j = 0; j < nint; ++j) intprop[j][dst] = intprop[j][src];
+  for (int j = 0; j < nreal; ++j) rp[j][dst] = rp[j][src];
+  for (int j = 0; j < naux; ++j) aux[j][dst] = aux[j][src];
+  for (int j = 0; j < ncplx; ++j) cplxprop[j][dst] = cplxprop[j][src];
 }
 
 //----------------------------------------------------------------------------------------
@@ -434,6 +446,7 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
   iacp = AddRealProperty("acp");
   istrp = AddRealProperty("strp");
   itaup = AddRealProperty("taup");
+  iwrefp = AddRealProperty("wrefp");
 
   // Add time remaining parameter
   idtp = AddRealProperty("dtp");
