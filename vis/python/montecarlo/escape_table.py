@@ -89,6 +89,8 @@ def parse_args(argv=None):
     p.add_argument('--emax', type=float, default=1.e5, help='highest band edge, eV')
     p.add_argument('--pesc-min', type=float, default=1.e-10,
                    help='floor on the escape probability')
+    p.add_argument('--nproc', type=int, default=1,
+                   help='worker processes; both passes are parallel over blocks')
     return p.parse_args(argv)
 
 
@@ -105,8 +107,9 @@ class Snapshot:
     """Block-by-block access to what the tables need."""
 
     def __init__(self, path, prm, ecen):
-        self.f = h5py.File(path, 'r')
-        f = self.f
+        self.path = path
+        self.f = None
+        f = h5py.File(path, 'r')
         self.prm = prm
         self.ecen = ecen
         names = [n.decode() for n in f.attrs['VariableNames']]
@@ -127,16 +130,31 @@ class Snapshot:
         self.x3f = f['x3f'][:].astype(np.float64)
         self.nblk = self.x1f.shape[0]
         self.nx = (self.x3f.shape[1] - 1, self.x2f.shape[1] - 1, self.x1f.shape[1] - 1)
+        self.attrs = {k: v for k, v in f.attrs.items()
+                      if k not in ('DatasetNames', 'NumVariables', 'VariableNames')}
+        self.mesh = {name: f[name][:] for name in ('Levels', 'LogicalLocations', 'x1f',
+                                                    'x1v', 'x2f', 'x2v', 'x3f', 'x3v')}
+        self.lo_b = np.stack([self.x1f[:, 0], self.x2f[:, 0], self.x3f[:, 0]], axis=1)
+        self.hi_b = np.stack([self.x1f[:, -1], self.x2f[:, -1], self.x3f[:, -1]], axis=1)
+        f.close()
+
+    def data(self):
+        """The file handle, opened in the calling process (an HDF5 handle must not be
+        shared across a fork)."""
+        if self.f is None:
+            self.f = h5py.File(self.path, 'r')
+        return self.f
 
     def block(self, b):
         """Effective extinction per code length (nb, nz, ny, nx), photon number emission
         rate per cell, and the band shares of that emission."""
         prm = self.prm
-        rho_code = self.f[self.irho[0]][self.irho[1], b].astype(np.float64)
+        f = self.data()
+        rho_code = f[self.irho[0]][self.irho[1], b].astype(np.float64)
         if self.ipress is not None:
-            press = self.f[self.ipress[0]][self.ipress[1], b].astype(np.float64)
+            press = f[self.ipress[0]][self.ipress[1], b].astype(np.float64)
         else:
-            press = (prm['gamma'] - 1.) * self.f[self.ieint[0]][self.ieint[1], b].astype(np.float64)
+            press = (prm['gamma'] - 1.) * f[self.ieint[0]][self.ieint[1], b].astype(np.float64)
         rho = rho_code * prm['rho_cgs']
         with np.errstate(divide='ignore', invalid='ignore'):
             temp = np.where(rho_code > 0., prm['tgas_cgs'] * press / rho_code, prm['tfloor'])
@@ -256,68 +274,65 @@ def main(argv=None):
     nb = args.nbands
     edges = np.logspace(np.log10(args.emin), np.log10(args.emax), nb + 1) * EVERG
     ecen = np.sqrt(edges[1:] * edges[:-1])
-    snap = Snapshot(args.snapshot, prm, ecen)
-    snap.edges = edges
-    snap.lo_b = np.stack([snap.x1f[:, 0], snap.x2f[:, 0], snap.x3f[:, 0]], axis=1)
-    snap.hi_b = np.stack([snap.x1f[:, -1], snap.x2f[:, -1], snap.x3f[:, -1]], axis=1)
+    global _SNAP, _THROUGH, _PESC_MIN
+    _SNAP = Snapshot(args.snapshot, prm, ecen)
+    _SNAP.edges = edges
+    _PESC_MIN = args.pesc_min
+    snap = _SNAP
     nblk = snap.nblk
     nx3, nx2, nx1 = snap.nx
+    nproc = max(1, args.nproc)
+
+    def run(func, label):
+        """Apply func to every block, in a pool when asked, yielding results as they come."""
+        if nproc == 1:
+            for b in range(nblk):
+                if b % 500 == 0:
+                    print('  %s block %d' % (label, b))
+                yield func(b)
+        else:
+            import multiprocessing as mp
+            with mp.get_context('fork').Pool(nproc) as pool:
+                for n, res in enumerate(pool.imap_unordered(func, range(nblk), chunksize=4)):
+                    if n % 500 == 0:
+                        print('  %s block %d' % (label, n))
+                    yield res
 
     # Pass 1: the through-column of every block on each of its faces.  This is all that
-    # is kept across blocks.
-    print('pass 1: through-columns of %d blocks, %d bands' % (nblk, nb))
-    through = {'z': np.zeros((nblk, nb, nx2, nx1), dtype=np.float32),
-               'y': np.zeros((nblk, nb, nx3, nx1), dtype=np.float32),
-               'x': np.zeros((nblk, nb, nx3, nx2), dtype=np.float32)}
-    for b in range(nblk):
-        kap, widths, _, _ = snap.block(b)
-        _, tot = block_sums(kap, widths)
-        for a in 'xyz':
-            through[a][b] = tot[a]
-        if b % 500 == 0:
-            print('  block %d' % b)
+    # is kept across blocks; the workers of pass 2 inherit it through the fork.
+    print('pass 1: through-columns of %d blocks, %d bands, %d process(es)' % (nblk, nb, nproc))
+    _THROUGH = {'z': np.zeros((nblk, nb, nx2, nx1), dtype=np.float32),
+                'y': np.zeros((nblk, nb, nx3, nx1), dtype=np.float32),
+                'x': np.zeros((nblk, nb, nx3, nx2), dtype=np.float32)}
+    for b, tx, ty, tz in run(_pass1, 'pass 1'):
+        _THROUGH['x'][b] = tx
+        _THROUGH['y'][b] = ty
+        _THROUGH['z'][b] = tz
 
-    # Pass 2: each block's cells, finished and written in turn
+    # Pass 2: each block's cells, finished by a worker and written by this process
     print('pass 2: cells, written block by block')
     out = h5py.File(args.outfile, 'w')
-    for key, val in snap.f.attrs.items():
-        if key in ('DatasetNames', 'NumVariables', 'VariableNames'):
-            continue
+    for key, val in snap.attrs.items():
         out.attrs[key] = val
     out.attrs['DatasetNames'] = np.array([b'pesc'], dtype='S16')
     out.attrs['NumVariables'] = np.array([nb], dtype=np.int32)
     out.attrs['VariableNames'] = np.array([('pesc%d' % i).encode() for i in range(nb)],
                                           dtype='S16')
-    for name in ('Levels', 'LogicalLocations', 'x1f', 'x1v', 'x2f', 'x2v', 'x3f', 'x3v'):
-        out.create_dataset(name, data=snap.f[name][:])
+    for name, val in snap.mesh.items():
+        out.create_dataset(name, data=val)
     dset = out.create_dataset('pesc', shape=(nb, nblk, nx3, nx2, nx1), dtype=np.float32,
                               chunks=(nb, 1, nx3, nx2, nx1))
     out.create_dataset('pesc_edges', data=edges)
 
-    etot = 0.
-    s_local = s_global = 0.
+    etot = s_local = s_global = 0.
     share = {'local': np.zeros(3), 'global': np.zeros(3)}
-    for b in range(nblk):
-        kap, widths, emis, wband = snap.block(b)
-        within, _ = block_sums(kap, widths)
-        beyond = face_columns(snap, through, b, nb)
-        tau_local = np.minimum.reduce([within[d] for d in DIRS])
-        tau_global = np.minimum.reduce([within[d] + beyond[d] for d in DIRS])
-        p_local = np.maximum(np.exp(-tau_local), args.pesc_min)
-        p_global = np.maximum(np.exp(-tau_global), args.pesc_min).astype(np.float32)
+    for b, p_global, stats in run(_pass2, 'pass 2'):
         dset[:, b] = p_global
-        wsum = wband.sum(axis=0)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            imp_l = np.where(wsum > 0., (wband * p_local).sum(axis=0) / wsum, 1.)
-            imp_g = np.where(wsum > 0., (wband * p_global).sum(axis=0) / wsum, 1.)
-        etot += emis.sum()
-        s_local += (emis * imp_l).sum()
-        s_global += (emis * imp_g).sum()
-        for label, imp in (('local', imp_l), ('global', imp_g)):
-            s = emis * imp
-            share[label] += [s[imp > 0.1].sum(), s[imp > 0.01].sum(), s[imp < 1.e-6].sum()]
-        if b % 500 == 0:
-            print('  block %d' % b)
+        etot += stats[0]
+        s_local += stats[1]
+        s_global += stats[2]
+        share['local'] += stats[3]
+        share['global'] += stats[4]
     out.close()
 
     print('emission-weighted mean importance: block-local %.3e, global columns %.3e'
@@ -328,6 +343,39 @@ def main(argv=None):
               ' < 1e-6: %.3f' % (label, sh[0], sh[1], sh[2]))
     print('wrote %s: %d bands, edges %s eV'
           % (args.outfile, nb, np.array2string(edges / EVERG, precision=3)))
+
+
+# Worker state: set by main before the pools are created and inherited through the fork
+_SNAP = None
+_THROUGH = None
+_PESC_MIN = 1.e-10
+
+
+def _pass1(b):
+    kap, widths, _, _ = _SNAP.block(b)
+    _, tot = block_sums(kap, widths)
+    return b, tot['x'].astype(np.float32), tot['y'].astype(np.float32), tot['z'].astype(np.float32)
+
+
+def _pass2(b):
+    snap = _SNAP
+    nb = len(snap.ecen)
+    kap, widths, emis, wband = snap.block(b)
+    within, _ = block_sums(kap, widths)
+    beyond = face_columns(snap, _THROUGH, b, nb)
+    tau_local = np.minimum.reduce([within[d] for d in DIRS])
+    tau_global = np.minimum.reduce([within[d] + beyond[d] for d in DIRS])
+    p_local = np.maximum(np.exp(-tau_local), _PESC_MIN)
+    p_global = np.maximum(np.exp(-tau_global), _PESC_MIN).astype(np.float32)
+    wsum = wband.sum(axis=0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        imp_l = np.where(wsum > 0., (wband * p_local).sum(axis=0) / wsum, 1.)
+        imp_g = np.where(wsum > 0., (wband * p_global).sum(axis=0) / wsum, 1.)
+    stats = [emis.sum(), (emis * imp_l).sum(), (emis * imp_g).sum()]
+    for imp in (imp_l, imp_g):
+        s = emis * imp
+        stats.append(np.array([s[imp > 0.1].sum(), s[imp > 0.01].sum(), s[imp < 1.e-6].sum()]))
+    return b, p_global, stats
 
 
 if __name__ == '__main__':

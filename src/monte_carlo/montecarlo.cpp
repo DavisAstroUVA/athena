@@ -57,6 +57,13 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   UserGetDensity=nullptr;
   nescape = 0;
   bias_energy = pin->GetOrAddBoolean("montecarlo","bias_energy",true);
+  bias_mix = pin->GetOrAddReal("montecarlo","bias_mix",0.99);
+  if (bias_mix <= 0. || bias_mix > 1.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/bias_mix = " << bias_mix << "; use 0 < bias_mix <= 1" << std::endl;
+    ATHENA_ERROR(msg);
+  }
   UserGetTemperature=nullptr;
   UserGetNumberDensity=nullptr;
   UserScattering=nullptr;
@@ -1042,6 +1049,30 @@ void MonteCarlo::DistributeSamples(int etype) {
 #ifdef MPI_PARALLEL
     MPI_Allreduce(MPI_IN_PLACE,&s_tot,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
 #endif
+    if (Globals::my_rank == 0)
+      std::cout << "Importance: emission-weighted mean " << s_tot/em_tot << std::endl;
+    // Composite biasing: replace the importance I by (1 - xi) + xi I E/S, so the
+    // allocation density becomes (1 - xi) emission/E + xi emission I/S and no weight
+    // exceeds 1/(1 - xi) times the equal weight.
+    if (bias_mix < 1. && s_tot > 0.) {
+      const Real scale = bias_mix * em_tot / s_tot;
+      em_proc = 0.;
+      for (int nb=0; nb<nblocal; nb++) {
+        MonteCarloBlock *pmcb = my_blocks(nb);
+        for (int n=0; n<pmcb->importance.GetSize(); ++n)
+          pmcb->importance(n) = (1. - bias_mix) + scale * pmcb->importance(n);
+        tot_block[nb] = pmcb->SampleDensityTotal();
+        em_proc += tot_block[nb];
+      }
+      s_tot = em_proc;
+#ifdef MPI_PARALLEL
+      MPI_Allreduce(MPI_IN_PLACE,&s_tot,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+#endif
+      if (Globals::my_rank == 0)
+        std::cout << "Composite biasing: bias_mix = " << bias_mix
+                  << ", weights bounded at " << 1./(1. - bias_mix)
+                  << " times the equal weight" << std::endl;
+    }
   }
 
   if (equal_weight) {
