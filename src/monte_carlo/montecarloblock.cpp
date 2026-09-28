@@ -8,6 +8,7 @@
 
 // C++ headers
 #include <algorithm>  // min
+#include <cmath>
 #include <cstdint>    // int64_t
 #include <cstring>   // strcmp
 #include <limits>     // numeric_limits
@@ -1881,7 +1882,11 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
 //! the energy when there is a table
 
 Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const {
-  const int k = pphot->i3p[ip], j = pphot->i2p[ip], i = pphot->i1p[ip];
+  // a flight carried from a neighbouring block can end in a ghost cell; the table
+  // covers active cells only, so use the nearest one
+  const int k = std::min(std::max(pphot->i3p[ip], ks), ke);
+  const int j = std::min(std::max(pphot->i2p[ip], js), je);
+  const int i = std::min(std::max(pphot->i1p[ip], is), ie);
   Real imp;
   const int ng = pmy_mc->nescape;
   if (ng > 0 && escape_prob.GetSize() > 0) {
@@ -1893,7 +1898,8 @@ Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const {
   } else {
     imp = importance(k,j,i);
   }
-  return (imp > 0.) ? emiss_to_weight / imp : 0.;
+  if (!(imp > 0.) || !std::isfinite(imp)) return 0.;
+  return emiss_to_weight / imp;
 }
 
 //----------------------------------------------------------------------------------------
@@ -1906,7 +1912,7 @@ Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const {
 
 void MonteCarloBlock::WeightWindow(Photon *pphot, int ip) {
   const Real ref = WindowCenter(pphot,ip) * pphot->wrefp[ip];
-  if (ref <= 0.) return;
+  if (!(ref > 0.) || !std::isfinite(ref)) return;
   const Real w = pphot->wp[ip];
   if (pmy_mc->wwin_top > 0. && w > pmy_mc->wwin_top * ref) {
     int m = static_cast<int>(std::ceil(w / ref));

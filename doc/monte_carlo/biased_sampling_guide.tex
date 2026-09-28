@@ -274,6 +274,15 @@ and when active the window's copy and roulette counts and the stretching setting
   scattering count) tells where the heavy samples come from, which decides which tool
   applies: mixing for deep-cell outliers, the window for climbers, stretching for
   crossers.
+\item The error $\sqrt{\sum w^2}$ is itself a sample estimate, and with heavy-tailed
+  weights it is biased low: the samples that would dominate it are the ones the run
+  did not draw. On a cool, dense sphere five seeds of the same biased-window run
+  scattered by 1.5\% while each quoted 0.3\%, and the hundred heaviest escaping
+  photons carried 20--50\% of $\sum w^2$; the equal-weight run quoted 0.24\% and
+  scattered by 0.2\%. A quoted error is trustworthy only when no small group of
+  photons dominates $\sum w^2$. When one does, run with \key{nout > 1} and take the
+  scatter between the outputs' spectra as the error, which assumes nothing about the
+  weights; \key{combine\_spectra.py -m time} averages them afterwards.
 \end{itemize}
 
 \section{Settings for an X-ray binary run}
