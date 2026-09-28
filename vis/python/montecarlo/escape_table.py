@@ -4,7 +4,7 @@ Per-cell escape probabilities for weights = biased, integrated through the whole
 
     escape_table.py SNAPSHOT OUTFILE [options]
 
-Reads the athdf snapshot a mc_readhdf_gr run starts from and the run's input deck,
+Reads the athdf snapshot a mc_readhdf_gr run starts from and the run's athinput file,
 builds the effective extinction sqrt(3 alpha_a (alpha_a + alpha_s)) of every cell in a
 few energy bands, integrates it from each cell to the domain boundary along the six axis
 directions through every block in the way, and writes exp(-tau) of the smallest column,
@@ -25,10 +25,10 @@ emitting cell's own depth enters as the skin fraction (1 - e^-tau)/tau.
 Bands are log-spaced between --emin and --emax (eV).  The problem generator maps each of
 its escape-table groups to the band containing the group's centre, and clamps outside.
 
-Run it on the file the deck names in <montecarlo>/grid_from_file, not on a dump the
+Run it on the file the athinput file names in <montecarlo>/grid_from_file, not on a dump the
 Monte Carlo run wrote: the output keeps the input's block order, and the problem
 generator addresses it with the grid file's block index map.  An AthenaK dump (dens,
-eint) is converted with the deck's <hydro>/gamma, as the problem generator does.
+eint) is converted with the athinput file's <hydro>/gamma, as the problem generator does.
 
 Memory: only the through-columns of every block face are held across blocks (a few
 hundred kilobytes per block); each block's cells are finished and written in turn.
@@ -49,9 +49,9 @@ EVERG = 1.602176634e-12
 DIRS = ['-x', '+x', '-y', '+y', '-z', '+z']
 
 
-def read_deck(path):
+def read_athinput(path):
     """<section> key = value pairs, values as strings."""
-    deck = {}
+    params = {}
     section = None
     with open(path) as f:
         for line in f:
@@ -60,18 +60,18 @@ def read_deck(path):
                 continue
             if line.startswith('<'):
                 section = line.strip('<>').strip()
-                deck.setdefault(section, {})
+                params.setdefault(section, {})
             elif '=' in line and section is not None:
                 key, val = line.split('=', 1)
-                deck[section][key.strip()] = val.strip()
-    return deck
+                params[section][key.strip()] = val.strip()
+    return params
 
 
-def get(deck, section, key, default=None, cast=float):
-    val = deck.get(section, {}).get(key)
+def get(params, section, key, default=None, cast=float):
+    val = params.get(section, {}).get(key)
     if val is None:
         if default is None:
-            sys.exit('deck lacks <%s>/%s' % (section, key))
+            sys.exit('athinput file lacks <%s>/%s' % (section, key))
         return default
     if cast is bool:
         return val.lower() == 'true'
@@ -82,7 +82,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('snapshot')
-    p.add_argument('deck')
+    p.add_argument('athinput')
     p.add_argument('outfile')
     p.add_argument('--nbands', type=int, default=8, help='energy bands (default 8)')
     p.add_argument('--emin', type=float, default=10., help='lowest band edge, eV')
@@ -254,22 +254,22 @@ def face_columns(snap, through, b, nb):
 
 def main(argv=None):
     args = parse_args(argv)
-    deck = read_deck(args.deck)
+    params = read_athinput(args.athinput)
     prm = {
-        'rho_cgs': get(deck, 'problem', 'rho_cgs'),
-        'tgas_cgs': get(deck, 'problem', 'tgas_cgs'),
-        'l_cgs': get(deck, 'problem', 'l_cgs'),
-        'heabund': get(deck, 'problem', 'heabund', 0.09),
-        'tfloor': max(get(deck, 'problem', 'tfloor_cgs', 0.), 1.),
-        'tceiling': get(deck, 'problem', 'tceiling_cgs', 1.e300),
-        'dcut': get(deck, 'problem', 'dcut', 1.e-20),
-        'tcut': get(deck, 'problem', 'tcut', 1.e20),
-        'tnorm': get(deck, 'problem', 'tnorm', False, bool),
-        'emin': get(deck, 'problem', 'emin'),
-        'emax': get(deck, 'problem', 'emax'),
-        'spin': get(deck, 'coord', 'a', 0.),
-        'mass': get(deck, 'coord', 'm', 1.),
-        'gamma': get(deck, 'hydro', 'gamma', 5. / 3.),
+        'rho_cgs': get(params, 'problem', 'rho_cgs'),
+        'tgas_cgs': get(params, 'problem', 'tgas_cgs'),
+        'l_cgs': get(params, 'problem', 'l_cgs'),
+        'heabund': get(params, 'problem', 'heabund', 0.09),
+        'tfloor': max(get(params, 'problem', 'tfloor_cgs', 0.), 1.),
+        'tceiling': get(params, 'problem', 'tceiling_cgs', 1.e300),
+        'dcut': get(params, 'problem', 'dcut', 1.e-20),
+        'tcut': get(params, 'problem', 'tcut', 1.e20),
+        'tnorm': get(params, 'problem', 'tnorm', False, bool),
+        'emin': get(params, 'problem', 'emin'),
+        'emax': get(params, 'problem', 'emax'),
+        'spin': get(params, 'coord', 'a', 0.),
+        'mass': get(params, 'coord', 'm', 1.),
+        'gamma': get(params, 'hydro', 'gamma', 5. / 3.),
     }
     nb = args.nbands
     edges = np.logspace(np.log10(args.emin), np.log10(args.emax), nb + 1) * EVERG

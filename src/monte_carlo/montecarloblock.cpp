@@ -1142,9 +1142,8 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
       weight_scat = wp * e_scat * dl * shift / c_cgs;
     } else {
       // Without boosts the lab (normal-observer) frame is the comoving frame, so both
-      // the bin and the weight take the lab energy.  In flat spacetime sl.e is ep; in
-      // GR it is alpha k^t, and binning on ep put the source term 1/alpha too high in
-      // energy.
+      // the bin and the weight take the lab energy: ep in flat spacetime, alpha k^t
+      // in GR.
       const PhotonFrameState &sl = frames.Get(MCFRAME_LAB);
       e_scat = sl.e;
       weight_scat = wp * sl.e * sl.dl / c_cgs;

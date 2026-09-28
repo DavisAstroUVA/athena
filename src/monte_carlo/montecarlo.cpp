@@ -1798,7 +1798,7 @@ MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
   pmcb->loop_max_size = ComputeLoopMax();
   // The problem generator runs before the payload is unpacked, exactly as at startup:
   // it supplies per-block state that is neither fluid-derived nor carried (photon
-  // budgets of emission = none decks, image geometry, per-block tables), and whatever
+  // budgets of emission = none athinput files, image geometry, per-block tables), and whatever
   // it sets that the payload also carries is then overwritten by the block's real
   // state.  The contract for a generator is therefore that this hook is repeatable for
   // a block and touches no state shared across blocks or indexed by lid; one that does

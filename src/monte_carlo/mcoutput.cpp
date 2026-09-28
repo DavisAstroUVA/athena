@@ -1499,11 +1499,7 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
   Real fac1 = norms*static_cast<Real>(nmu)*static_cast<Real>(nphi)/2./PI;
   // One normalization for every plane, intensity and Stokes alike, which is what
   // make_spectrum in athena_mc.py does: it builds a single factor and applies it to the
-  // whole intensity array.  The Stokes planes used to be scaled in a separate loop that
-  // omitted tint_out, so Q/U/V came out larger than I by the integration time and Q/I
-  // read off a .spec was not the polarization fraction.  Invisible whenever tint_out
-  // happens to be one, which it is in every test deck here.  Sharing one fac2 makes
-  // the two impossible to get out of step again.
+  // whole intensity array.
   for (int k = 0; k < nphi; ++k) {
     for (int j = 0; j < nmu; ++j) {
       Real mumid = (static_cast<Real>(j)+0.5)/static_cast<Real>(nmu);
