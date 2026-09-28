@@ -135,6 +135,18 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     ATHENA_ERROR(msg);
   }
 
+  stretch = pin->GetOrAddReal("montecarlo","stretch",1.0);
+  stretch_bound = pin->GetOrAddReal("montecarlo","stretch_bound",10.0);
+  stretch_taucell = pin->GetOrAddReal("montecarlo","stretch_taucell",HUGE_NUMBER);
+  if (stretch <= 0. || stretch_bound < 1. || stretch_taucell <= 0.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/stretch = " << stretch << ", stretch_bound = " << stretch_bound
+        << ", stretch_taucell = " << stretch_taucell
+        << "; use stretch > 0, stretch_bound >= 1, stretch_taucell > 0" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+
   // Number of outputs for static monte carlo
   nout = pin->GetOrAddInteger("montecarlo","nout",1);
 
@@ -1196,6 +1208,13 @@ void MonteCarlo::DistributeSamples(int etype) {
       std::cout << "Sample density total (emission x importance): " << s_tot
                 << std::endl;
     std::cout << "Minimum weight: " << my_blocks(0)->minweight << std::endl;
+    if (stretch != 1.) {
+      std::cout << "Path stretching: extinction x " << stretch
+                << ", weight factor per flight bounded at " << stretch_bound;
+      if (stretch_taucell < HUGE_NUMBER)
+        std::cout << ", in cells with tau_cell < " << stretch_taucell;
+      std::cout << std::endl;
+    }
   }
   delete[] tot_block;
 

@@ -49,8 +49,8 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
 
   for (int ip=ips; ip<=ipe; ip++) {
 
-    // get number of mean free paths photon will travel
-    Real tauremaining = GetOpticalDepth(pran);
+    // budget of mean free paths for this flight, carried across blocks
+    Real tauremaining = (pphot->taup[ip] >= 0.) ? pphot->taup[ip] : GetOpticalDepth(pran);
     // References for momentum vectors
     Real& kr  = pphot->k1p[ip];
     Real& kth = pphot->k2p[ip];
@@ -311,9 +311,11 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
 #endif
       // set total extinction coefficient
       Real chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
+      const Real alpha = StretchFactor(pphot,ip,chi,dl);
+      const Real chi_str = alpha * chi;
 
       bool test = false;
-      if ((chi > 0.) && (dl * l_cgs > tauremaining / chi)) { // Photon remains in cell
+      if ((chi > 0.) && (dl * l_cgs > tauremaining / chi_str)) { // Photon remains in cell
         bool accel_success = false;
         if (acceleration) {
           Real dist = pco->dmin(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
@@ -334,8 +336,8 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
           if (pphot->statp[ip] != EVOLVING)
             break; // break out of while loop
           // compute distance remaining in cell
-          dl = tauremaining / chi / l_cgs;
-          pphot->dtp[ip] -= dl / c_code;;
+          dl = tauremaining / chi_str / l_cgs;
+          pphot->dtp[ip] -= dl / c_code;
           // Update moments
           if (pmcb->call_moments) {
             Real dl_cgs = dl * l_cgs;
@@ -347,6 +349,9 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
               pmcb->UpdateMoments(pphot,dl_cgs,ip);
             }
           }
+          ApplyStretch(pphot,ip,alpha,chi*l_cgs*dl);
+          pphot->wp[ip] /= alpha;
+          tauremaining = 0.;
           // Update postions
           pphot->x1p[ip] = sqrt(SQR(r0) + 2. * dl * kr * r0 + SQR(dl));
           pphot->x2p[ip] = acos((z0 + kz * dl) / pphot->x1p[ip]);
@@ -392,7 +397,8 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
           // advance over a path length dl is just dl (in units where c = 1).
           pphot->x0p[ip] += dl;
 
-        tauremaining -= chi * l_cgs * dl;
+        tauremaining -= chi_str * l_cgs * dl;
+        ApplyStretch(pphot,ip,alpha,chi*l_cgs*dl);
         // move photon to next cell and update angular positions
         MovePhotonToNextZone(pphot,pco,pmcb,face,ascend,ip);
         if ((face == 1) || (face == 3) || (face == 4) || (face == 6))
@@ -421,6 +427,7 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
     // first step there.  Any other status is already terminal, REMOVED included, so this
     // cannot fire twice.
     pphot->nmvp[ip] = nmv0 + iter;
+    pphot->taup[ip] = tauremaining;
     pmy_mcb->lb_nstep += iter;
     // This photon is done with whatever cell it was in, so the scattering-moment
     // contribution held back for it becomes one squared term in the error.
@@ -431,4 +438,18 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
 
   } // loop over ip
 
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real SphericalPolarPusher::CellWidth(Photon *pphot, int ip)
+//! \brief smallest physical width of the photon's cell
+
+Real SphericalPolarPusher::CellWidth(Photon *pphot, int ip) {
+  const int i = pphot->i1p[ip], j = pphot->i2p[ip], k = pphot->i3p[ip];
+  const Real r = 0.5 * (pcoord->x1f(i) + pcoord->x1f(i+1));
+  const Real th = 0.5 * (pcoord->x2f(j) + pcoord->x2f(j+1));
+  const Real dr = pcoord->x1f(i+1) - pcoord->x1f(i);
+  const Real dth = r * (pcoord->x2f(j+1) - pcoord->x2f(j));
+  const Real dph = r * std::sin(th) * (pcoord->x3f(k+1) - pcoord->x3f(k));
+  return std::min(dr, std::min(dth, dph));
 }

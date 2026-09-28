@@ -249,6 +249,8 @@ public:
   Real tmax;   // Maximum evolution time
   Real weightratio; // used for setting minimum weight for absorption
   Real roulette; // determines if low weight samples are absorbed or survive
+  // Path stretching paramters
+  Real stretch, stretch_bound, stretch_taucell;
 
   int ntype; // number of emission types
   int64_t nsamp;  // total number of photons to integrate per timestep/output

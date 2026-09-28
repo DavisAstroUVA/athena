@@ -128,6 +128,7 @@ public:
   static int ik0p, ik1p, ik2p, ik3p;
   static int idk0p, idk1p, idk2p, idk3p;
   static int iep, iwp, iscp, iacp;
+  static int istrp, itaup;
   static int isip, isqp, isup, isvp;
   static int iuserp;
   static int ipolp;
@@ -148,6 +149,10 @@ public:
   static std::vector<Real> dk_scratch_;
   void EnsureScratch();
   std::vector<Real> &ep, &wp, &scp, &acp;
+  //! ln of path stretching factor
+  std::vector<Real> &strp;
+  //! optical depth left in the current flight
+  std::vector<Real> &taup;
   std::vector<Real> &sip, &sqp, &sup, &svp;
   std::vector<Real> &dtp;
   std::vector<Real> *user;     //!>   user variable arrays

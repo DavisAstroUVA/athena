@@ -717,7 +717,10 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
   ppusher->Move(pphot,0,pphot->nphot-1);
 
   for (int ip=pphot->nphot-1; ip >= 0; ip--) {
-    if (pphot->statp[ip] != EVOLVING) {
+    if (pphot->statp[ip] == EVOLVING) {
+      // rays do not interact, so an exhausted flight is simply redrawn
+      pphot->taup[ip] = -1.;
+    } else {
 
       if (pphot->statp[ip] != BUFFERED) {
         // Bring the Stokes parameters up to date with the transported coherency tensor
@@ -873,8 +876,10 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         FromScatteringBasis(this, pphot, ip);
       nscat++;
       pphot->nscp[ip]++;
-      // Scattering starts a new free flight, so the capmove counter resets
+      // Scattering starts a new free flight
       pphot->nmvp[ip] = 0;
+      pphot->strp[ip] = 0.;
+      pphot->taup[ip] = -1.;
       if (pphot->nscp[ip] % pmy_mc->checkscat == 0) {
         //pphot->PrintPhoton("check scat",ip);
         // Check for possible infinite loop due to NaN in photon
