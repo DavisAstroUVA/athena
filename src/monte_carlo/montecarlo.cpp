@@ -65,6 +65,8 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     ATHENA_ERROR(msg);
   }
   bias_scale = 1.;
+  bias_mixed_ = false;
+  weight_ref_bias_ = 0.;
   wwin_top = pin->GetOrAddReal("montecarlo","wwin_top",0.);
   wwin_bottom = pin->GetOrAddReal("montecarlo","wwin_bottom",0.);
   wwin_max_split = pin->GetOrAddInteger("montecarlo","wwin_max_split",8);
@@ -1090,14 +1092,18 @@ void MonteCarlo::DistributeSamples(int etype) {
 #ifdef MPI_PARALLEL
     MPI_Allreduce(MPI_IN_PLACE,&s_tot,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
 #endif
-    if (Globals::my_rank == 0)
-      std::cout << "Importance: emission-weighted mean " << s_tot/em_tot << std::endl;
-    // The minimum weight is no longer average weight if biased sampling used
-    weight_ref = s_tot/static_cast<Real>(ntot);
+    if (!bias_mixed_) {
+      if (Globals::my_rank == 0)
+        std::cout << "Importance: emission-weighted mean " << s_tot/em_tot << std::endl;
+      // The minimum weight is referenced to the importance-only average, not the
+      // equal weight
+      weight_ref_bias_ = s_tot/static_cast<Real>(ntot);
+    }
+    weight_ref = weight_ref_bias_;
     // Composite biasing: replace the importance I by (1 - xi) + xi I E/S, so the
     // allocation density becomes (1 - xi) emission/E + xi emission I/S and no weight
-    // exceeds 1/(1 - xi) times the equal weight.
-    if (bias_mix < 1. && s_tot > 0.) {
+    // exceeds 1/(1 - xi) times the equal weight.  Applied once; the array stays mixed.
+    if (!bias_mixed_ && bias_mix < 1. && s_tot > 0.) {
       const Real scale = bias_mix * em_tot / s_tot;
       bias_scale = scale;
       em_proc = 0.;
@@ -1117,6 +1123,7 @@ void MonteCarlo::DistributeSamples(int etype) {
                   << ", weights bounded at " << 1./(1. - bias_mix)
                   << " times the equal weight" << std::endl;
     }
+    bias_mixed_ = true;
   }
 
   if (equal_weight) {
@@ -1288,6 +1295,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // reset counters
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb-> nrem = 0;
     pmcb->nsplit = pmcb->nroul = 0;
+    pmcb->wesc_sum = pmcb->wesc_sq = 0.;
   }
 
   // Reset the moments and source terms for this transport, in both modes.  Every output
@@ -1307,6 +1315,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       MonteCarloBlock *pmcb = my_blocks(nb);
       pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = 0;
       pmcb->nsplit = pmcb->nroul = 0;
+      pmcb->wesc_sum = pmcb->wesc_sq = 0.;
       pmcb->lb_time = 0.0;
       pmcb->lb_nstep = 0;
       pmcb->lb_pending = 0.0;

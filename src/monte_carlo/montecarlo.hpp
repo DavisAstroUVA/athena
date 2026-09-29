@@ -290,6 +290,10 @@ public:
   bool bias_energy; // biased version of PhotonEmitFreeFree
   Real bias_mix; // xi parameter for composite biasing
   Real bias_scale; // xi E/S, the factor on the escape probability in the mixed importance
+  // The importance is mixed in place once, at the first initialization; later outputs
+  // reuse the mixed array and the importance-only reference weight recorded then
+  bool bias_mixed_;
+  Real weight_ref_bias_;
   // Weight window (weights = biased): at each interaction a sample heavier than wwin_top
   // times the cell's window centre is split into up to wwin_max_split copies, one lighter
   // than wwin_bottom times it survives roulette at the centre or is absorbed.  The centre

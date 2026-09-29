@@ -147,9 +147,10 @@ weight of any cell is
   w_c = \frac{E/N}{(1-\xi) + \xi\, I_c E/S} \le \frac{1}{1-\xi}\,\frac{E}{N}.
 \end{equation}
 \key{<montecarlo> bias\_mix} is $\xi$; the default $0.99$ bounds every weight at 100
-equal weights; $1$ is pure importance sampling. The code applies the mix by replacing
-the stored importance with $(1-\xi) + \xi I E/S$, so everything downstream (window
-centres included) sees the mixed value.
+equal weights; $1$ is pure importance sampling. The code applies the mix once, at the
+first initialization, by replacing the stored importance with $(1-\xi) + \xi I E/S$,
+so everything downstream (window centres included) sees the mixed value; later outputs
+of a \key{nout > 1} run reuse the mixed array and the reference weight recorded then.
 
 \paragraph{What it does and does not fix.} The bound acts on samples from cells whose
 $I E/S$ is below $1-\xi$: in the X-ray binary that is $I < 1.6\times10^{-7}$ at
