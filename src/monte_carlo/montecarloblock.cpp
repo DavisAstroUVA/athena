@@ -860,9 +860,10 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         pphot->wp[ip] *= (pphot->scp[ip]/(pphot->scp[ip]+pphot->acp[ip]));
         if (pphot->wp[ip] <= minweight) RouletteOrAbsorb(pphot, ip);
       } else if (absorption_meth == ABSPROB) {
-        if (pran->uniform() > (pphot->scp[ip]/(pphot->scp[ip]+pphot->acp[ip])) )
+        if (pran->uniform() > (pphot->scp[ip]/(pphot->scp[ip]+pphot->acp[ip])) ) {
           pphot->wp[ip] = 0.;
-        pphot->statp[ip] = ABSORBED;
+          pphot->statp[ip] = ABSORBED;
+        }
       } else if (absorption_meth == ABSTAU) {
         if (pphot->wp[ip] <= minweight) RouletteOrAbsorb(pphot, ip);
       }
