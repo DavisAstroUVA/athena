@@ -300,6 +300,8 @@ public:
   // is the weight the biased emission gives that cell at that energy.  0 disables a side.
   Real wwin_top, wwin_bottom;
   int wwin_max_split;
+  bool wwin_energy; // take the centre from the escape table at the sample's energy group
+  bool wwin_interp; // interpolate the table between cell centres to the sample's position
   WeightScheme *weight_scheme; // sample allocation and weighting, per emission type
   bool *initialize_comoving; // Transform from comoving frame for emission
   enum AbsorptionMethodFlag *absorption_method; // absorption method for each emission type

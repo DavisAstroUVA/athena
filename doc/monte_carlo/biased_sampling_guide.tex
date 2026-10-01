@@ -211,15 +211,42 @@ interaction. Referenced to each sample's birth ratio, the window acts only on th
 since emission, migration between cells and energy groups and absorption decay, and
 leaves the emission's choices alone.
 
-\paragraph{Choosing the bounds.} A narrow window (\key{wwin\_top = 2},
-\key{wwin\_bottom = 0.5}) gave 60\% more effective samples at 5\% less CPU on a thick
-absorbing sphere, with 55k copies and 88k roulettes per 200k samples; a wide one
-(4, 0.25) gave 20\% for a tenth of the events. Copy counts in the tens of millions on a
-$10^7$-sample run mean the window is churning, which happens when neighbouring cells
-differ in importance by large factors so that a random walk crosses the bounds at every
-step; widen the window or raise \key{wwin\_max\_split} only if the split is what is
-churning. The window is inert in a problem where samples do not migrate in importance:
-a thin medium, or one where the importance is nearly uniform.
+\paragraph{Where the reference is taken.} The centre is taken at the sample's
+current energy group (\key{wwin\_energy}, default true): per cell, a hard photon
+entering a cooler cell is split although its own escape prospects did not change, and
+on a Compton sphere that made fifty times the copies. It is interpolated in $\ln p$
+between cell centres to the sample's position (\key{wwin\_interp}, default true): a
+cell-centred reference jumps by the neighbouring cells' importance ratio at every face,
+15 in the X-ray binary disk, while a random walker moves a fiftieth of a cell per
+scattering, so it is split and rouletted at every crossing, a fifth of all interactions.
+Interpolation halved the events on the sphere.
+
+\paragraph{Copies are correlated.} The copies of one birth photon share its history to
+the split, so the photon-level effective count and the quoted errors of a window run
+overstate the statistics badly: on one X-ray binary output a single birth photon's 2941
+escaping copies carried 27\% of the luminosity and 64\% of the 1--3~keV band, 22,745
+effective photons but 13 effective families. \key{family\_stats.py} groups the
+escaping photons by birth photon through the emission temperature and emitted energy
+columns and prints both counts, and \key{make\_spectrum.py --family-cols 0 1} writes
+family-level errors, the root of the sum of squared family totals per bin, which is the
+correct estimator with copies and reduces to the usual one without them; on the output
+above it raised the 1--3~keV error from 4\% to 34\%. The scatter between outputs of a
+\key{nout > 1} run is the error that needs neither.
+
+\paragraph{The floor amplifies importance errors.} A sample the table rates unlikely to
+escape is rouletted as it walks inward and its survivor carries $1/\key{wwin\_bottom}$
+per round; if the table is wrong and such samples do escape, a family that survived $n$
+rounds comes out with $4^n$ times the weight. Since the minimum-column escape
+probability underestimates diffusive and oblique escape by orders of magnitude, this is
+the origin of the giant families. On the cool Compton sphere the split alone reached
+26\% of the equal-weight figure of merit, both sides 11--13\%, and the biased scheme
+without a window 0.7\%. Start with \key{wwin\_top = 4}, \key{wwin\_bottom = 0}, and
+turn the floor on only against a measured importance.
+
+\paragraph{Choosing the bounds.} Copy counts approaching the number of interactions
+mean the window is churning; widen it or raise \key{wwin\_max\_split} only if the split
+is what is churning. The window is inert in a problem where samples do not migrate in
+importance: a thin medium, or one where the importance is nearly uniform.
 
 \section{Path stretching: \key{stretch}, \key{stretch\_taucell}, \key{stretch\_bound}}
 
@@ -298,7 +325,7 @@ key & value & why \\
 \key{bias\_energy} & \key{true} & free-free absorption is strongly energy dependent \\
 \key{bias\_mix} & 0.9--0.99 & 0.9 helps the 1--3~keV band; nothing below 0.5 \\
 \key{minweight}, \key{roulette} & $10^{-4}$, 0.1 & harmless with the window; the only floor without it \\
-\key{wwin\_top}, \key{wwin\_bottom} & 2, 0.5 & corrects the $1/I$ spread of hard-band climbers \\
+\key{wwin\_top}, \key{wwin\_bottom} & 4, 0 & splits climbers; the floor amplifies table errors \\
 \key{wwin\_max\_split} & 8 & default \\
 \key{stretch} & 1 & no thin corona to cross \\
 \bottomrule

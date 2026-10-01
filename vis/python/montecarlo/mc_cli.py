@@ -227,14 +227,17 @@ def argv_from(positional, options):
     return argv
 
 
-def bin_outputs(args, script, bin_chunk, add, write, screen_function=None):
+def bin_outputs(args, script, bin_chunk, add, write, screen_function=None,
+                finish=None):
     """
     The main loop of a binning script: one result per output written to args.outnames,
     or with args.combine all outputs averaged in time into args.outnames[0].  script
     is the caller's name, for messages; bin_chunk and add are as for bin_list, and
     write(filename, result) writes one result.  args.screen names the screen function
     in the user's screen.py unless one is passed in directly, as a notebook does, and
-    args.calclum asks for the luminosity of each output to be printed.
+    args.calclum asks for the luminosity of each output to be printed.  finish, if
+    given, is applied to each output's result once all its ranks are summed, before it
+    is written or combined.
     """
 
     if screen_function is None:
@@ -248,6 +251,8 @@ def bin_outputs(args, script, bin_chunk, add, write, screen_function=None):
         label = out.base if out.output is None else f"{out.base} output {out.output}"
         print(f"{label}: {len(out.files)} file(s)")
         result, luminosity = bin_output(out, bin_chunk, add, screen_function, calclum)
+        if finish is not None:
+            result = finish(result)
         if calclum:
             print(f"  luminosity: {luminosity:e}")
             lum_dt += luminosity*result['dt']

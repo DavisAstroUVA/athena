@@ -937,7 +937,15 @@ def _combine_binned(bin1, bin2, method, kind, has_errors):
         out['intensity'] = bin1['intensity'] + bin2['intensity']
         if has_errors:
             out['errors'] = np.sqrt(bin1['errors']**2 + bin2['errors']**2)
+        if 'family_sums' in bin1 and 'family_sums' in bin2:
+            out['family_sums'] = _merge_family_sums(bin1['family_sums'],
+                                                    bin2['family_sums'])
     else:
+        # outputs are independent, so their family errors are finalized first and then
+        # combine like any others
+        bin1 = finalize_family_errors(dict(bin1))
+        bin2 = finalize_family_errors(dict(bin2))
+        out = bin1.copy()
         total_dt = bin1['dt'] + bin2['dt']
         w1 = bin1['dt']/total_dt
         w2 = bin2['dt']/total_dt
@@ -1844,11 +1852,55 @@ def get_angle_bins_hybrid(photons, nmu, mufaces, nphi, phifaces):
 
     return mubins,phibins
 
+def family_key(user, tcol, ecol):
+    """
+    One integer per photon identifying its birth photon, from the emission temperature
+    and emitted energy user columns the mc_readhdf* generators write.  The copies a
+    weight window makes share both, so they share the key; two independent photons
+    share it only if both values agree to a part in a million.
+    """
+    return (np.round(np.log(np.maximum(user[:, ecol], 1e-300))*1e6).astype(np.int64)
+            * 1000003
+            + np.round(np.log(np.maximum(user[:, tcol], 1.))*1e6).astype(np.int64))
+
+
+def finalize_family_errors(spectrum):
+    """
+    Replace the errors of a spectrum made with family keys by the family-level ones:
+    the weight of each family in each bin is summed, and the error is the root of the
+    sum of the squares of those totals.  Copies of one birth photon are correlated, so
+    the photon-level sum of squares overstates the statistics of a weight-window run;
+    families are independent, so this is the estimator the photon-level one is for
+    analog samples.  The raw sums are dropped; a spectrum without them is returned as
+    it is, so the call is safe after any combination.
+    """
+    fam = spectrum.pop('family_sums', None)
+    scale = spectrum.pop('error_scale', None)
+    if fam is None or spectrum.get('yerror') != 'true':
+        return spectrum
+    keys, sums = fam
+    nbins = spectrum['errors'].size
+    bins = (keys % nbins).astype(np.int64)
+    sq = np.bincount(bins, weights=sums**2, minlength=nbins)
+    spectrum['errors'] = np.sqrt(sq.reshape(spectrum['errors'].shape)) * scale
+    return spectrum
+
+
+def _merge_family_sums(fam1, fam2):
+    keys = np.concatenate([fam1[0], fam2[0]])
+    sums = np.concatenate([fam1[1], fam2[1]])
+    uniq, inv = np.unique(keys, return_inverse=True)
+    return uniq, np.bincount(inv, weights=sums)
+
+
 def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1.,
                   nphi=1,phimin=0,phimax=2.*np.pi,yerror=True,mask=None,
-                  xfunc=None,anglebin='cartesian',**kwargs):
+                  xfunc=None,anglebin='cartesian',family=None,**kwargs):
     """
-    Makes spectrum (dict) from photon object
+    Makes spectrum (dict) from photon object.  With family, an integer key per photon
+    (see family_key), the spectrum also carries the per-family, per-bin weight sums
+    that finalize_family_errors turns into family-level errors once every chunk and
+    rank of the output has been added in.
     """
 
     # Store spectrum as a dictionary
@@ -1955,6 +2007,22 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
         intensity[m] = sum_into_bins(shape, bins, w)
         if yerror:
             errors[m] = sum_into_bins(shape, bins, w**2)
+    if family is not None and yerror:
+        # one composite key per (family, plane, bin); the bin index is recovered from it
+        # by finalize_family_errors, so the family key is multiplied by the bin count
+        nbins = nintens * nphi * nmu * nx
+        fkey = family[valid_phots].astype(np.int64)
+        if fkey.size and np.abs(fkey).max() > np.iinfo(np.int64).max // (2*nbins):
+            raise OverflowError('family keys too large for the number of spectrum bins')
+        flat = (valid_phi * nmu + valid_mu) * nx + valid_x
+        keys = []
+        sums = []
+        for m, w in enumerate(plane_weights):
+            composite = fkey * nbins + (m * nphi * nmu * nx + flat)
+            uniq, inv = np.unique(composite, return_inverse=True)
+            keys.append(uniq)
+            sums.append(np.bincount(inv, weights=w))
+        spectrum['family_sums'] = (np.concatenate(keys), np.concatenate(sums))
 
     # Compute frequency width and mean energy (in erg) of bins
     h = 6.62607015e-27
@@ -1992,6 +2060,8 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
 
     if yerror:
         errors *= fac**2
+        if family is not None:
+            spectrum['error_scale'] = np.broadcast_to(fac, intensity.shape).copy()
 
     spectrum['intensity'] = intensity
 

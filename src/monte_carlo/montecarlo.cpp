@@ -70,6 +70,8 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   wwin_top = pin->GetOrAddReal("montecarlo","wwin_top",0.);
   wwin_bottom = pin->GetOrAddReal("montecarlo","wwin_bottom",0.);
   wwin_max_split = pin->GetOrAddInteger("montecarlo","wwin_max_split",8);
+  wwin_energy = pin->GetOrAddBoolean("montecarlo","wwin_energy",true);
+  wwin_interp = pin->GetOrAddBoolean("montecarlo","wwin_interp",true);
   if ((wwin_top != 0. && wwin_top < 1.) || wwin_bottom < 0. || wwin_bottom > 1. ||
       wwin_max_split < 2) {
     std::stringstream msg;
@@ -1239,8 +1241,9 @@ void MonteCarlo::DistributeSamples(int etype) {
     std::cout << "Minimum weight: " << my_blocks(0)->minweight << std::endl;
     if (wwin_top > 0. || wwin_bottom > 0.)
       std::cout << "Weight window: split above " << wwin_top << " x centre into at most "
-                << wwin_max_split << ", roulette below " << wwin_bottom << " x centre"
-                << std::endl;
+                << wwin_max_split << ", roulette below " << wwin_bottom << " x centre, "
+                << (wwin_energy ? "centre per energy group" : "centre per cell")
+                << (wwin_interp ? ", interpolated" : "") << std::endl;
     if (stretch != 1.) {
       std::cout << "Path stretching: extinction x " << stretch
                 << ", weight factor per flight bounded at " << stretch_bound;

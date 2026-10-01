@@ -1876,10 +1876,28 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void InterpCell(Real x, Real xl, Real xr, int i, int is, int ie, int &i0, Real &t)
+//! \brief the lower cell of the pair of centres bracketing x in cell i (faces xl, xr)
+//! and the weight of the upper one; both clamped to the active range
+
+static void InterpCell(Real x, Real xl, Real xr, int i, int is, int ie, int &i0,
+                       Real &t) {
+  const Real f = (x - 0.5*(xl+xr)) / (xr - xl);  // -0.5 .. 0.5 about the centre
+  if (f < 0.) {
+    i0 = i - 1; t = f + 1.;
+  } else {
+    i0 = i; t = f;
+  }
+  if (i0 < is) { i0 = is; t = 0.; }
+  if (i0 >= ie) { i0 = ie; t = 0.; }
+  t = std::min(std::max(t, 0.), 1.);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const
-//! \brief the weight the biased emission gives the sample's cell at its energy: the
-//! average sample weight over the mixed importance, taken at the escape-table group of
-//! the energy when there is a table
+//! \brief the weight the biased emission gives the sample's cell: the average sample
+//! weight over the mixed importance, taken at the escape-table group of the sample's
+//! energy when wwin_energy is set and per cell otherwise
 
 Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const {
   // a flight carried from a neighbouring block can end in a ghost cell; the table
@@ -1889,12 +1907,34 @@ Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const {
   const int i = std::min(std::max(pphot->i1p[ip], is), ie);
   Real imp;
   const int ng = pmy_mc->nescape;
-  if (ng > 0 && escape_prob.GetSize() > 0) {
+  if (pmy_mc->wwin_energy && ng > 0 && escape_prob.GetSize() > 0) {
     const Real lne = std::log(pphot->ep[ip]);
     const AthenaArray<Real> &edges = pmy_mc->escape_lne;
     int l = 0;
     while (l < ng-1 && lne >= edges(l+1)) ++l;
-    imp = (1. - pmy_mc->bias_mix) + pmy_mc->bias_scale * escape_prob(k-ks,j-js,i-is,l);
+    Real p;
+    if (pmy_mc->wwin_interp) {
+      // trilinear in ln p between cell centres, so the reference is continuous across
+      // cell faces; constant beyond the block's outermost centres
+      int i0, j0, k0;
+      Real tx, ty, tz;
+      InterpCell(pphot->x1p[ip], pcoord->x1f(i), pcoord->x1f(i+1), i, is, ie, i0, tx);
+      InterpCell(pphot->x2p[ip], pcoord->x2f(j), pcoord->x2f(j+1), j, js, je, j0, ty);
+      InterpCell(pphot->x3p[ip], pcoord->x3f(k), pcoord->x3f(k+1), k, ks, ke, k0, tz);
+      const int i1 = std::min(i0+1, ie), j1 = std::min(j0+1, je), k1 = std::min(k0+1, ke);
+      auto lp = [&](int kk, int jj, int ii) {
+        return std::log(escape_prob(kk-ks,jj-js,ii-is,l));
+      };
+      const Real c00 = (1.-tx)*lp(k0,j0,i0) + tx*lp(k0,j0,i1);
+      const Real c01 = (1.-tx)*lp(k0,j1,i0) + tx*lp(k0,j1,i1);
+      const Real c10 = (1.-tx)*lp(k1,j0,i0) + tx*lp(k1,j0,i1);
+      const Real c11 = (1.-tx)*lp(k1,j1,i0) + tx*lp(k1,j1,i1);
+      const Real c0 = (1.-ty)*c00 + ty*c01, c1 = (1.-ty)*c10 + ty*c11;
+      p = std::exp((1.-tz)*c0 + tz*c1);
+    } else {
+      p = escape_prob(k-ks,j-js,i-is,l);
+    }
+    imp = (1. - pmy_mc->bias_mix) + pmy_mc->bias_scale * p;
   } else {
     imp = importance(k,j,i);
   }
