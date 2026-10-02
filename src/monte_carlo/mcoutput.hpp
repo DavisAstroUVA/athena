@@ -57,6 +57,7 @@ public:
   Real x1min,x1max,x2min,x2max,x3min,x3max;
   Real dt; // targe integration time for this spectrum
   Real last_time;
+  Real last_ttransport; // MonteCarlo::ttransport at the last output
 
   AthenaArray<Real> energies;
   AthenaArray<Real> intensity;
@@ -109,6 +110,7 @@ public:
   MCPolarization polarized;
   Real dt; // targe integration time for this spectrum
   Real last_time;
+  Real last_ttransport; // MonteCarlo::ttransport at the last output
   AthenaArray<Real> photons;  // array of photon properies
 
   //functions

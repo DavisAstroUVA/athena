@@ -104,6 +104,7 @@ Spectrum::Spectrum(Spectrum *pspec) {
   x2max = pspec->x2max;
   x3max = pspec->x3max;
   last_time = pspec->last_time;
+  last_ttransport = pspec->last_ttransport;
   dt = pspec->dt;
 
   nsrun = 0; // arrays are uninitialized
@@ -1246,6 +1247,7 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
           pspec->dt = pin->GetOrAddReal("montecarlo","tint",1.) * time_cgs;
         }
         pspec->last_time = pmy_mc->pmy_mesh->time;
+        pspec->last_ttransport = pmc->ttransport;
         // Generate file name
         std::string outn = pib->block_name.substr(6); // 6 because counting starts at 0!
         int outid = atoi(outn.c_str());
@@ -1326,6 +1328,7 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
           pphlist->dt = pin->GetOrAddReal("montecarlo","tint",1.) * time_cgs;
         }
         pphlist->last_time = pmy_mc->pmy_mesh->time;
+        pphlist->last_ttransport = pmc->ttransport;
         pphlist->nsrun = 0;
         pphlist->length = 0;
         pphlist->output_number = 0;
@@ -1599,7 +1602,10 @@ void MCOutput::OutputSpectrum(bool wtflag) {
         filename.append(".spec");
         // compute integration time in cgs
         Real tint_out;
-        if (pmy_mc->dynamic) {
+        if (pmy_mc->dynamic && pmy_mc->cadence > 1) {
+          // photons were emitted only on the cycles the transport ran
+          tint_out = (pmy_mc->ttransport - pspect->last_ttransport) * time_cgs;
+        } else if (pmy_mc->dynamic) {
           tint_out = (time - pspect->last_time) * time_cgs;
         } else {
           tint_out = pmy_mc->tint;
@@ -1613,6 +1619,7 @@ void MCOutput::OutputSpectrum(bool wtflag) {
       pspect->ResetSpectrum();
       if (pmy_mc->dynamic) {
         pspect->last_time = time;
+        pspect->last_ttransport = pmy_mc->ttransport;
       }
     }
     pspect = pspect->next;
@@ -1737,7 +1744,10 @@ void MCOutput::OutputPhotonList(bool wtflag) {
     // already in seconds (its dt is MonteCarlo::tint), so the elapsed time is used as
     // it is. The fallback covers a write with nothing elapsed.
     Real tint_out;
-    if (pmy_mc->dynamic) {
+    if (pmy_mc->dynamic && pmy_mc->cadence > 1) {
+      // photons were emitted only on the cycles the transport ran
+      tint_out = (pmy_mc->ttransport - pphlist->last_ttransport) * time_cgs;
+    } else if (pmy_mc->dynamic) {
       tint_out = (time - pphlist->last_time) * time_cgs;
     } else if (time > pphlist->last_time) {
       tint_out = time - pphlist->last_time;
@@ -1749,6 +1759,7 @@ void MCOutput::OutputPhotonList(bool wtflag) {
     // Reset list length and ntot to 0
     // List outputs are not cumulative
     pphlist->last_time = time;
+    pphlist->last_ttransport = pmy_mc->ttransport;
     // Photon lists are always reset to zero upon output
     pphlist->ResetList();
   }

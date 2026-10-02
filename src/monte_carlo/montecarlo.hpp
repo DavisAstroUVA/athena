@@ -237,6 +237,11 @@ public:
 
   Real tint;   // Monte Carlo timestep
   Real tmax;   // Maximum evolution time
+  int cadence; // cycle cadence MC called in dynamic runs
+  Real cadence_frac; // energy fraction threshold for cadence > 1
+  int last_transport_cycle; // -1 until the first transport
+  Real last_transport_time; // mesh time at the start of the last transport's step
+  Real ttransport; // simulation time the transport has covered, in code units
   Real weightratio; // used for setting minimum weight for absorption
 
   int ntype; // number of emission types
@@ -320,6 +325,8 @@ public:
   // functions
   // SWD: some of these functions could/should be private
   void RunMonteCarlo(Outputs *pouts, Mesh *pmesh, ParameterInput *pinput);
+  //! whether a dynamic run transports this cycle (see cadence)
+  bool TransportDue();
   bool CheckAndBroadCastPhotonsRemaining();
   //! move photons between blocks on this rank; true when something landed here
   bool ExchangeLocal();
@@ -646,6 +653,9 @@ public:
   void RayTracePhotonsOnBlock(int etype); // Ray trace photon on this block
   void TransferPhotonsOnBlock(int etype); // Transfer photons on this block
   void CoupleMonteCarloToFluid(Real dt);  // couple monte carlo to mesh
+  //! largest fractional change of internal energy the held energy source term makes
+  //! over elapsed (code time) on this block
+  Real HeldEnergyFraction(Real elapsed);
   void LorentzTransform(Photon *pphot, const Real sign, int ips, int ipe);
   Real LorentzTransformFrequencyShift(Photon *pphot, int ip);
   void InitializePhoton(Photon *pphot, int ips, int ipe, int etype);

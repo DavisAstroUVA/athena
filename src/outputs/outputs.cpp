@@ -1141,8 +1141,9 @@ void Outputs::MakeOutputs(Mesh *pm, MonteCarlo *pmc, ParameterInput *pin, bool w
 
   pmc->NormalizeDomainOutputs(true); // normalize MC outputs
   MakeOutputs(pm,pin,wtflag);
-  if (!pmc->dynamic)
-    pmc->NormalizeDomainOutputs(false); // un-normalize
+  // also in a dynamic run: with cadence > 1 the arrays are held into the next cycles,
+  // whose coupling normalizes them itself
+  pmc->NormalizeDomainOutputs(false); // un-normalize
   pmc->pmcout->MakeOutputs(wtflag);
 }
 

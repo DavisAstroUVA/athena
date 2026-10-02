@@ -27,6 +27,7 @@
 #include "../parameter_input.hpp"
 #include "../mesh/mesh.hpp"
 #include "../hydro/hydro.hpp"
+#include "../eos/eos.hpp"
 #include "../globals.hpp"
 #include "../scalars/scalars.hpp"
 
@@ -958,6 +959,32 @@ void MonteCarloBlock::CoupleMonteCarloToFluid(Real dt) {
       }
   }
   NormalizeSourceTerms(false);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::HeldEnergyFraction(Real elapsed)
+//! \brief max over cells of |held energy source| x elapsed / internal energy, with the
+//! source normalized as CoupleMonteCarloToFluid applies it
+
+Real MonteCarloBlock::HeldEnergyFraction(Real elapsed) {
+  if (!coupled) return 0.;
+  const Real edot_cgs_inv = time_cgs / (rho_cgs * SQR(vel_cgs));
+  const Real norm = elapsed * edot_cgs_inv / pmy_mc->tint;
+  const Real gm1 = pmy_block->peos->GetGamma() - 1.;
+  MeshBlock *pmb = pmy_block;
+  Real frac = 0.;
+  for (int k=pmb->ks; k<=pmb->ke; ++k) {
+    for (int j=pmb->js; j<=pmb->je; ++j) {
+      for (int i=pmb->is; i<=pmb->ie; ++i) {
+        const Real eint = pmb->phydro->w(IPR,k,j,i) / gm1;
+        if (eint > 0.) {
+          const Real de = norm * std::abs(sourceterms(MCRS0,k,j,i)) / pcoord->vol(k,j,i);
+          frac = std::max(frac, de / eint);
+        }
+      }
+    }
+  }
+  return frac;
 }
 
 //----------------------------------------------------------------------------------------
