@@ -44,6 +44,7 @@ public:
   MonteCarlo *pmy_mc;
   std::int64_t nsrun;  // total number of photons samples run for this spectrum
   std::string base_name;
+  std::string block_name; // its <outputN> block, which keeps file_number
   MomentumRange range;
   MCPolarization polarized;
   bool polar_axis;
@@ -57,6 +58,7 @@ public:
   Real x1min,x1max,x2min,x2max,x3min,x3max;
   Real dt; // targe integration time for this spectrum
   Real last_time;
+  Real last_ttransport; // MonteCarlo::ttransport at the last output
 
   AthenaArray<Real> energies;
   AthenaArray<Real> intensity;
@@ -100,6 +102,7 @@ public:
 
   MonteCarlo *pmy_mc;
   std::string base_name;
+  std::string block_name; // its <outputN> block, which keeps file_number
 
   std::int64_t nsrun;  // total number of photons samples run for this list
   int length; // number of occupied elements
@@ -109,6 +112,7 @@ public:
   MCPolarization polarized;
   Real dt; // targe integration time for this spectrum
   Real last_time;
+  Real last_ttransport; // MonteCarlo::ttransport at the last output
   AthenaArray<Real> photons;  // array of photon properies
 
   //functions
@@ -147,6 +151,7 @@ public:
 
   MonteCarlo *pmy_mc;
   std::string base_name;
+  std::string block_name; // its <outputN> block, which keeps file_number
 
   int length; // number of trajectories
   int maxstep;
@@ -216,6 +221,9 @@ public:
   Spectrum *pspec;
   PhotonList *pphlist;
   PhotonTrajectoryList *ptraj;
+  //! the run's input, where each output's next file number is kept so that a restart
+  //! continues the numbering
+  ParameterInput *pin_;
 
   bool mom_flag_lab;
   bool mom_flag_com;

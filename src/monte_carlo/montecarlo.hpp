@@ -208,6 +208,12 @@ public:
   //! the generator's state as bytes, and back, so a block's stream survives a move
   std::string SaveState() const;
   void RestoreState(const std::string &state);
+  //! bytes each block's generator takes in a restart file: an 8-byte length, then the
+  //! state from SaveState padded with zeros.  The std::mt19937 text form is at most
+  //! about 6900 characters and the GSL state 2504 bytes.
+  static const std::size_t kRestartBytes = 8192;
+  void PackForRestart(char *dst) const;
+  void UnpackFromRestart(const char *src);
 
 private:
 
@@ -237,6 +243,11 @@ public:
 
   Real tint;   // Monte Carlo timestep
   Real tmax;   // Maximum evolution time
+  int cadence; // cycle cadence MC called in dynamic runs
+  Real cadence_frac; // energy fraction threshold for cadence > 1
+  int last_transport_cycle; // -1 until the first transport
+  Real last_transport_time; // mesh time at the start of the last transport's step
+  Real ttransport; // simulation time the transport has covered, in code units
   Real weightratio; // used for setting minimum weight for absorption
 
   int ntype; // number of emission types
@@ -320,6 +331,8 @@ public:
   // functions
   // SWD: some of these functions could/should be private
   void RunMonteCarlo(Outputs *pouts, Mesh *pmesh, ParameterInput *pinput);
+  //! whether a dynamic run transports this cycle (see cadence)
+  bool TransportDue();
   bool CheckAndBroadCastPhotonsRemaining();
   //! move photons between blocks on this rank; true when something landed here
   bool ExchangeLocal();
@@ -622,6 +635,9 @@ public:
   AthenaArray<Real> energy_scat;
   AthenaArray<Real> freq_scat_mid;
   AthenaArray<Real> sourceterms;
+  AthenaArray<Real> sourceterms_error;
+  Real force_pend_sum_[3];
+  int force_pend_i1_, force_pend_i2_, force_pend_i3_;
   AthenaArray<Real> scalars;
   AthenaArray<Real> rho;
   AthenaArray<Real> species;
@@ -646,6 +662,9 @@ public:
   void RayTracePhotonsOnBlock(int etype); // Ray trace photon on this block
   void TransferPhotonsOnBlock(int etype); // Transfer photons on this block
   void CoupleMonteCarloToFluid(Real dt);  // couple monte carlo to mesh
+  //! largest fractional change of internal energy the held energy source term makes
+  //! over elapsed (code time) on this block
+  Real HeldEnergyFraction(Real elapsed);
   void LorentzTransform(Photon *pphot, const Real sign, int ips, int ipe);
   Real LorentzTransformFrequencyShift(Photon *pphot, int ip);
   void InitializePhoton(Photon *pphot, int ips, int ipe, int etype);
@@ -657,6 +676,10 @@ public:
   void NormalizeMoments(bool normalize);
   //! Fold the scattering-moment contribution into moments_scat_error
   void FlushScatError();
+  //! Fold the flux-force contribution into sourceterms_error
+  void FlushForceError();
+  //! Both of the above, at the end of a photon's flight
+  void FlushPendingErrors() { FlushScatError(); FlushForceError(); }
   void AccumulateMoments(AthenaArray<Real> &mom, int type, int i3, int i2, int i1,
                          const PhotonFrameState &s, Real wp);
   void ComovingFrameMatrix(int k, int j, int i, const AthenaArray<Real> &g,
