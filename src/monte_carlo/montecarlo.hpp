@@ -208,6 +208,12 @@ public:
   //! the generator's state as bytes, and back, so a block's stream survives a move
   std::string SaveState() const;
   void RestoreState(const std::string &state);
+  //! bytes each block's generator takes in a restart file: an 8-byte length, then the
+  //! state from SaveState padded with zeros.  The std::mt19937 text form is at most
+  //! about 6900 characters and the GSL state 2504 bytes.
+  static const std::size_t kRestartBytes = 8192;
+  void PackForRestart(char *dst) const;
+  void UnpackFromRestart(const char *src);
 
 private:
 

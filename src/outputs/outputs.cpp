@@ -1139,12 +1139,14 @@ void Outputs::MakeOutputs(Mesh *pm, ParameterInput *pin, bool wtflag) {
 //!        overloaded to includ MonteCarlo outputs
 void Outputs::MakeOutputs(Mesh *pm, MonteCarlo *pmc, ParameterInput *pin, bool wtflag) {
 
+  // Monte Carlo spectra and lists first, so that a restart file written in the same
+  // cycle records their file numbers after this output
+  pmc->pmcout->MakeOutputs(wtflag);
   pmc->NormalizeDomainOutputs(true); // normalize MC outputs
   MakeOutputs(pm,pin,wtflag);
   // also in a dynamic run: with cadence > 1 the arrays are held into the next cycles,
   // whose coupling normalizes them itself
   pmc->NormalizeDomainOutputs(false); // un-normalize
-  pmc->pmcout->MakeOutputs(wtflag);
 }
 
 //----------------------------------------------------------------------------------------

@@ -1176,6 +1176,7 @@ void PhotonTrajectoryList::ResizeList(int new_len_limit, int new_step_limit) {
 MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
 
   pmy_mc = pmc;
+  pin_ = pin;
   std::stringstream msg;
   InputBlock *pib = pin->pfirst_block;
 
@@ -1238,7 +1239,8 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         pspec = new Spectrum(range,polarized,xlog);
         pspec->pmy_mc = pmc;
         pspec->id = id++;
-        pspec->output_number = 0;
+        pspec->block_name = pib->block_name;
+        pspec->output_number = pin->GetOrAddInteger(pib->block_name, "file_number", 0);
         if (pmc->dynamic) {
           pspec->dt = pin->GetReal(pib->block_name,"dt");
         } else {
@@ -1329,9 +1331,10 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         }
         pphlist->last_time = pmy_mc->pmy_mesh->time;
         pphlist->last_ttransport = pmc->ttransport;
+        pphlist->block_name = pib->block_name;
+        pphlist->output_number = pin->GetOrAddInteger(pib->block_name, "file_number", 0);
         pphlist->nsrun = 0;
         pphlist->length = 0;
-        pphlist->output_number = 0;
         // Generate file name
         std::string outn = pib->block_name.substr(6); // 6 because counting starts at 0!
         int outid = atoi(outn.c_str());
@@ -1365,7 +1368,8 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         // Initialize photon list
         ptraj->length = 0;
         ptraj->maxstep = 0;
-        ptraj->output_number = 0;
+        ptraj->block_name = pib->block_name;
+        ptraj->output_number = pin->GetOrAddInteger(pib->block_name, "file_number", 0);
         // Generate file name
         std::string outn = pib->block_name.substr(6); // 6 because counting starts at 0!
         int outid = atoi(outn.c_str());
@@ -1616,6 +1620,7 @@ void MCOutput::OutputSpectrum(bool wtflag) {
       }
       // Update spectra on all blocks
       pspect->output_number++;
+      pin_->SetInteger(pspect->block_name, "file_number", pspect->output_number);
       pspect->ResetSpectrum();
       if (pmy_mc->dynamic) {
         pspect->last_time = time;
@@ -1756,6 +1761,7 @@ void MCOutput::OutputPhotonList(bool wtflag) {
     }
     pphlist->WriteList(filename,tint_out);
     pphlist->output_number++;
+    pin_->SetInteger(pphlist->block_name, "file_number", pphlist->output_number);
     // Reset list length and ntot to 0
     // List outputs are not cumulative
     pphlist->last_time = time;
@@ -1784,6 +1790,7 @@ void MCOutput::OutputTrajectoryList() {
   filename.append(".traj");
   ptraj->WriteList(filename);
   ptraj->output_number++;
+  pin_->SetInteger(ptraj->block_name, "file_number", ptraj->output_number);
   // Reset list length to 0
   ptraj->length = 0;
 

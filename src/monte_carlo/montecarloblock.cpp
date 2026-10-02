@@ -60,6 +60,11 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   int iseed = pmy_mc->iseed+pmy_block->gid*10;  // temporary solution
 
   pran = new MCRandom(iseed);
+  // a block read from a restart file continues the stream it was writing
+  if (!pmb->mc_restart_rng.empty()) {
+    pran->UnpackFromRestart(pmb->mc_restart_rng.data());
+    pmb->mc_restart_rng.clear();
+  }
 
   next=nullptr;
   lb_time = 0.0;

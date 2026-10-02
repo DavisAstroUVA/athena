@@ -18,7 +18,8 @@
 #include <random>
 #include <stdexcept>  // runtime_error
 // C++ headers
-#include <cstring>  // strcmp
+#include <cstdint>  // uint64_t
+#include <cstring>  // strcmp, memcpy, memset
 #include <string>
 #include <vector>
 
@@ -2533,6 +2534,33 @@ std::string MCRandom::SaveState() const {
   os << gen;
   return os.str();
 #endif
+}
+
+void MCRandom::PackForRestart(char *dst) const {
+  const std::string state = SaveState();
+  const std::uint64_t n = state.size();
+  if (n + sizeof(n) > kRestartBytes) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MCRandom::PackForRestart" << std::endl
+        << "generator state of " << n << " bytes does not fit the restart record of "
+        << kRestartBytes << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  std::memset(dst, 0, kRestartBytes);
+  std::memcpy(dst, &n, sizeof(n));
+  std::memcpy(dst + sizeof(n), state.data(), n);
+}
+
+void MCRandom::UnpackFromRestart(const char *src) {
+  std::uint64_t n;
+  std::memcpy(&n, src, sizeof(n));
+  if (n == 0 || n + sizeof(n) > kRestartBytes) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MCRandom::UnpackFromRestart" << std::endl
+        << "restart record holds a generator state of " << n << " bytes" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  RestoreState(std::string(src + sizeof(n), n));
 }
 
 void MCRandom::RestoreState(const std::string &state) {
