@@ -962,6 +962,16 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
       AppendOutputDataNode(pod);
       num_vars_+=3;
     }
+    // its statistical error, one standard error per component
+    if (output_params.variable.compare("mcsrc") == 0 ||
+        output_params.variable.compare("RadforceF_err") == 0) {
+      pod = new OutputData;
+      pod->type = "VECTORS";
+      pod->name = "RadforceF_err";
+      if (pmb != nullptr) pod->data.InitWithShallowSlice(pmcb->sourceterms_error,4,0,3);
+      AppendOutputDataNode(pod);
+      num_vars_+=3;
+    }
     // monte carlo rad force vector calculated with scatterings
     if (output_params.variable.compare("mcsrc") == 0 ||
         output_params.variable.compare("RadforceS") == 0) {

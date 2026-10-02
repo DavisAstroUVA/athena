@@ -635,6 +635,9 @@ public:
   AthenaArray<Real> energy_scat;
   AthenaArray<Real> freq_scat_mid;
   AthenaArray<Real> sourceterms;
+  AthenaArray<Real> sourceterms_error;
+  Real force_pend_sum_[3];
+  int force_pend_i1_, force_pend_i2_, force_pend_i3_;
   AthenaArray<Real> scalars;
   AthenaArray<Real> rho;
   AthenaArray<Real> species;
@@ -673,6 +676,10 @@ public:
   void NormalizeMoments(bool normalize);
   //! Fold the scattering-moment contribution into moments_scat_error
   void FlushScatError();
+  //! Fold the flux-force contribution into sourceterms_error
+  void FlushForceError();
+  //! Both of the above, at the end of a photon's flight
+  void FlushPendingErrors() { FlushScatError(); FlushForceError(); }
   void AccumulateMoments(AthenaArray<Real> &mom, int type, int i3, int i2, int i1,
                          const PhotonFrameState &s, Real wp);
   void ComovingFrameMatrix(int k, int j, int i, const AthenaArray<Real> &g,

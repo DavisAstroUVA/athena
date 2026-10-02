@@ -142,7 +142,7 @@ Planned work is written up rather than carried in anyone's head: see `doc/monte_
 
 **Photon data layout:** Each photon is stored as a struct-of-arrays via `static int` index members (`ix1p`, `ik1p`, etc.) on the `Photon` class. Position is `(x0p,x1p,x2p,x3p)` (covariant coordinates), wavevector is `(k0p,k1p,k2p,k3p)`, and under the general pusher the coherency tensor is stored Hermitian-packed as sixteen real columns (`polten`, accessed only through `Photon::LoadTensor`/`StoreTensor`/`Tensor`). Status flags use `PhotonStatus` enum (`EVOLVING`, `ESCAPED`, `ABSORBED`, `DESTROYED`, `BUFFERED`).
 
-**Monte Carlo radiation moments** are stored in `NMOM=15` arrays indexed by `MCIER`, `MCIFRx`, `MCIPRxy` enums (energy density, flux, pressure tensor).
+**Monte Carlo radiation moments** are stored in `NMOM=15` arrays indexed by `MCIER`, `MCIFRx`, `MCIPRxy` enums (energy density, flux, pressure tensor). The flux radiation force `sourceterms(MCRF1..3)` carries a statistical error, `sourceterms_error`, built like the scattering moments' `Jnu*_err`: each photon's contribution to a cell is held back until it leaves the cell and squared once, so correlated steps of one flight count as one sample; the `mcsrc` output writes it as the `RadforceF_err` vector, and `average_moments.py` combines it like any `_err` variable. On hot Jupiter the pull between two seeds has an rms near 1.
 
 ## Problem generators
 
