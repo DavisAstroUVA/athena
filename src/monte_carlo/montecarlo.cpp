@@ -18,7 +18,8 @@
 #include <random>
 #include <stdexcept>  // runtime_error
 // C++ headers
-#include <cstring>  // strcmp
+#include <cstdint>  // uint64_t
+#include <cstring>  // strcmp, memcpy, memset
 #include <string>
 #include <vector>
 
@@ -109,6 +110,19 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   using_bfield = pin->GetOrAddBoolean("montecarlo","bfields",false);
   dynamic = pin->GetOrAddBoolean("montecarlo","dynamic",false);
   coupled = pin->GetOrAddBoolean("montecarlo","coupled",false);
+  cadence = pin->GetOrAddInteger("montecarlo","cadence",1);
+  cadence_frac = pin->GetOrAddReal("montecarlo","cadence_frac",0.0);
+  if (cadence < 1 || cadence_frac < 0. || (!dynamic && cadence > 1)) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/cadence = " << cadence << ", cadence_frac = " << cadence_frac
+        << "; use cadence >= 1, cadence_frac >= 0, and cadence > 1 only with "
+        << "dynamic = true" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  last_transport_cycle = -1;
+  last_transport_time = 0.;
+  ttransport = 0.;
   boosts = pin->GetOrAddBoolean("montecarlo","boosts",false);
   polarized = GetMCPolarizationFlag(pin->GetOrAddString("montecarlo","polarized","none"));
   acceleration = pin->GetOrAddBoolean("montecarlo","acceleration",false);
@@ -1257,6 +1271,34 @@ void MonteCarlo::DistributeSamples(int etype) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn bool MonteCarlo::TransportDue()
+//! \brief the first cycle of a run or restart, every cadence cycles after the last
+//! transport, and with cadence_frac > 0 any cycle by whose end the held energy source
+//! would have changed a cell's internal energy by more than that fraction
+
+bool MonteCarlo::TransportDue() {
+  const int ncycle = pmy_mesh->ncycle;
+  if (last_transport_cycle < 0 || ncycle - last_transport_cycle >= cadence) return true;
+  if (cadence_frac > 0. && coupled) {
+    const Real elapsed = pmy_mesh->time + pmy_mesh->dt - last_transport_time;
+    Real frac = 0.;
+    for (int nb=0; nb<nblocal; ++nb)
+      frac = std::max(frac, my_blocks(nb)->HeldEnergyFraction(elapsed));
+#ifdef MPI_PARALLEL
+    MPI_Allreduce(MPI_IN_PLACE, &frac, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+    if (frac > cadence_frac) {
+      if (Globals::my_rank == 0)
+        std::cout << "Monte Carlo transport at cycle " << ncycle << ", "
+                  << ncycle - last_transport_cycle << " after the last: held energy "
+                  << "source would change internal energy by " << frac << std::endl;
+      return true;
+    }
+  }
+  return false;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
 //!                                          ParameterInput *pinput)
 //! \brief Finish Initialization of MonteCarloBlocks and run steady-state MC calculation
@@ -1264,7 +1306,13 @@ void MonteCarlo::DistributeSamples(int etype) {
 void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                                      ParameterInput *pinput) {
 
+  // Leave if transport not due
+  if (dynamic && !TransportDue()) return;
+
   if (dynamic) {
+    last_transport_cycle = pmy_mesh->ncycle;
+    last_transport_time = pmy_mesh->time;
+    ttransport += pmy_mesh->dt;
     tmax = pinput->GetOrAddReal("montecarlo","tmax",-1.);
     if (tmax < 0.)
       tmax = pmy_mesh->dt;
@@ -2627,6 +2675,33 @@ std::string MCRandom::SaveState() const {
   os << gen;
   return os.str();
 #endif
+}
+
+void MCRandom::PackForRestart(char *dst) const {
+  const std::string state = SaveState();
+  const std::uint64_t n = state.size();
+  if (n + sizeof(n) > kRestartBytes) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MCRandom::PackForRestart" << std::endl
+        << "generator state of " << n << " bytes does not fit the restart record of "
+        << kRestartBytes << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  std::memset(dst, 0, kRestartBytes);
+  std::memcpy(dst, &n, sizeof(n));
+  std::memcpy(dst + sizeof(n), state.data(), n);
+}
+
+void MCRandom::UnpackFromRestart(const char *src) {
+  std::uint64_t n;
+  std::memcpy(&n, src, sizeof(n));
+  if (n == 0 || n + sizeof(n) > kRestartBytes) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MCRandom::UnpackFromRestart" << std::endl
+        << "restart record holds a generator state of " << n << " bytes" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  RestoreState(std::string(src + sizeof(n), n));
 }
 
 void MCRandom::RestoreState(const std::string &state) {

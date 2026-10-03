@@ -28,6 +28,7 @@
 #include "../parameter_input.hpp"
 #include "../mesh/mesh.hpp"
 #include "../hydro/hydro.hpp"
+#include "../eos/eos.hpp"
 #include "../globals.hpp"
 #include "../scalars/scalars.hpp"
 
@@ -60,6 +61,11 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   int iseed = pmy_mc->iseed+pmy_block->gid*10;  // temporary solution
 
   pran = new MCRandom(iseed);
+  // a block read from a restart file continues the stream it was writing
+  if (!pmb->mc_restart_rng.empty()) {
+    pran->UnpackFromRestart(pmb->mc_restart_rng.data());
+    pmb->mc_restart_rng.clear();
+  }
 
   next=nullptr;
   lb_time = 0.0;
@@ -69,6 +75,8 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   // Initialize scat_pend_* to empty state
   scat_pend_sum_ = 0.0;
   scat_pend_n_ = scat_pend_i1_ = scat_pend_i2_ = scat_pend_i3_ = -1;
+  force_pend_sum_[0] = force_pend_sum_[1] = force_pend_sum_[2] = 0.0;
+  force_pend_i1_ = force_pend_i2_ = force_pend_i3_ = -1;
 
   // SWD: eliminate some or all of these?
   // set local flags based on monte_carlo
@@ -416,7 +424,10 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   if (pmy_mc->nuser_mom > 0)
     moments_user.NewAthenaArray(pmy_mc->nuser_mom,ncells3,ncells2,ncells1);
   nsrc = 10;
-  if (call_srcterms) sourceterms.NewAthenaArray(nsrc,ncells3,ncells2,ncells1);
+  if (call_srcterms) {
+    sourceterms.NewAthenaArray(nsrc,ncells3,ncells2,ncells1);
+    sourceterms_error.NewAthenaArray(3,ncells3,ncells2,ncells1);
+  }
   if (mom_flag_scat) {
     nf_scat = pin->GetInteger("montecarlo","nf_scat");
     Real everg = 1.602176634e-12;
@@ -502,7 +513,10 @@ MonteCarloBlock::~MonteCarloBlock() {
   if (mom_flag_com) moments_com.DeleteAthenaArray();
   if (mom_flag_coord) moments_coord.DeleteAthenaArray();
   if (pmy_mc->nuser_mom > 0) moments_user.DeleteAthenaArray();
-  if (call_srcterms) sourceterms.DeleteAthenaArray();
+  if (call_srcterms) {
+    sourceterms.DeleteAthenaArray();
+    sourceterms_error.DeleteAthenaArray();
+  }
   if (pmy_mc->emission_array) emission.DeleteAthenaArray();
   if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) emit_count_.DeleteAthenaArray();
   if (importance.GetSize() > 0) importance.DeleteAthenaArray();
@@ -615,6 +629,7 @@ void MonteCarloBlock::PackForTransfer(std::vector<int> &ib, std::vector<Real> &r
   PackArray(rb, moments_scat);
   PackArray(rb, moments_scat_error);
   PackArray(rb, sourceterms);
+  PackArray(rb, sourceterms_error);
   PackArray(rb, emission);
   const std::string state = pran->SaveState();
   sb.assign(state.begin(), state.end());
@@ -675,6 +690,7 @@ void MonteCarloBlock::UnpackFromTransfer(const std::vector<int> &ib,
   UnpackArray(rb, pr, moments_scat, "moments_scat");
   UnpackArray(rb, pr, moments_scat_error, "moments_scat_error");
   UnpackArray(rb, pr, sourceterms, "sourceterms");
+  UnpackArray(rb, pr, sourceterms_error, "sourceterms_error");
   UnpackArray(rb, pr, emission, "emission");
   if (pi != ib.size() || pr != rb.size()) {
     std::stringstream msg;
@@ -998,6 +1014,32 @@ void MonteCarloBlock::CoupleMonteCarloToFluid(Real dt) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::HeldEnergyFraction(Real elapsed)
+//! \brief max over cells of |held energy source| x elapsed / internal energy, with the
+//! source normalized as CoupleMonteCarloToFluid applies it
+
+Real MonteCarloBlock::HeldEnergyFraction(Real elapsed) {
+  if (!coupled) return 0.;
+  const Real edot_cgs_inv = time_cgs / (rho_cgs * SQR(vel_cgs));
+  const Real norm = elapsed * edot_cgs_inv / pmy_mc->tint;
+  const Real gm1 = pmy_block->peos->GetGamma() - 1.;
+  MeshBlock *pmb = pmy_block;
+  Real frac = 0.;
+  for (int k=pmb->ks; k<=pmb->ke; ++k) {
+    for (int j=pmb->js; j<=pmb->je; ++j) {
+      for (int i=pmb->is; i<=pmb->ie; ++i) {
+        const Real eint = pmb->phydro->w(IPR,k,j,i) / gm1;
+        if (eint > 0.) {
+          const Real de = norm * std::abs(sourceterms(MCRS0,k,j,i)) / pcoord->vol(k,j,i);
+          frac = std::max(frac, de / eint);
+        }
+      }
+    }
+  }
+  return frac;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::LorentzTransform(Photon *pphot, const Real sign, int ips,
 //!                                            int ipe)
 //! \brief Lorentz transform photon sample
@@ -1222,9 +1264,22 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
     Real sct_coef = pphot->scp[ip];
     // radiative force follows the lab-frame propagation direction
     const Real *nl = frames.Get(MCFRAME_LAB).n;
-    sourceterms(MCRF1,i3,i2,i1) += (sct_coef+abs_coef) * weight * nl[0];
-    sourceterms(MCRF2,i3,i2,i1) += (sct_coef+abs_coef) * weight * nl[1];
-    sourceterms(MCRF3,i3,i2,i1) += (sct_coef+abs_coef) * weight * nl[2];
+    const Real f1 = (sct_coef+abs_coef) * weight * nl[0];
+    const Real f2 = (sct_coef+abs_coef) * weight * nl[1];
+    const Real f3 = (sct_coef+abs_coef) * weight * nl[2];
+    sourceterms(MCRF1,i3,i2,i1) += f1;
+    sourceterms(MCRF2,i3,i2,i1) += f2;
+    sourceterms(MCRF3,i3,i2,i1) += f3;
+    // one squared term per photon and cell, as for the scattering moments
+    if (i1 != force_pend_i1_ || i2 != force_pend_i2_ || i3 != force_pend_i3_) {
+      FlushForceError();
+      force_pend_i1_ = i1;
+      force_pend_i2_ = i2;
+      force_pend_i3_ = i3;
+    }
+    force_pend_sum_[0] += f1;
+    force_pend_sum_[1] += f2;
+    force_pend_sum_[2] += f3;
 
     if (pmy_mc->absorption_method[pphot->type[ip]] == ABSTAU) {
         Real threshold = 3.28808816e+15 * MCConstants::h_cgs;
@@ -1550,6 +1605,20 @@ void MonteCarloBlock::FlushScatError() {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::FlushForceError()
+//! \brief fold the held-back flux-force contribution in as one squared term per component
+
+void MonteCarloBlock::FlushForceError() {
+  if (force_pend_i1_ < 0 || sourceterms_error.GetSize() == 0) return;
+  for (int d=0; d<3; ++d) {
+    sourceterms_error(d, force_pend_i3_, force_pend_i2_, force_pend_i1_)
+        += SQR(force_pend_sum_[d]);
+    force_pend_sum_[d] = 0.0;
+  }
+  force_pend_i1_ = -1;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::UpdateSourceTerms(Photon *pphot, Real energy0,
 //                                              Real weight0, int ip, Real k1p0,
 //                                              Real k2p0, Real k3p0)
@@ -1640,6 +1709,9 @@ void MonteCarloBlock::UpdateSourceTerms(Photon *pphot, Real energy0,
 
 void MonteCarloBlock::NormalizeSourceTerms(bool normalize) {
 
+  // nothing should be pending here; see NormalizeMoments
+  FlushForceError();
+
   // Get integration time
   Real tint = pmy_mc->tint;
 
@@ -1652,6 +1724,20 @@ void MonteCarloBlock::NormalizeSourceTerms(bool normalize) {
             sourceterms(n,k,j,i) /= (tint * pcoord->vol(k,j,i));
           else
             sourceterms(n,k,j,i) *= (tint * pcoord->vol(k,j,i));
+        }
+      }
+    }
+  }
+  // the force errors are kept as sums of squares and presented as standard errors
+  for (int d=0; d<3; ++d) {
+    for (int k=ks; k<=ke; ++k) {
+      for (int j=js; j<=je; ++j) {
+        for (int i=is; i<=ie; ++i) {
+          const Real norm = tint * pcoord->vol(k,j,i);
+          if (normalize)
+            sourceterms_error(d,k,j,i) = std::sqrt(sourceterms_error(d,k,j,i)) / norm;
+          else
+            sourceterms_error(d,k,j,i) = SQR(sourceterms_error(d,k,j,i) * norm);
         }
       }
     }
@@ -1675,6 +1761,17 @@ void MonteCarloBlock::ResetSourceTerms() {
       }
     }
   }
+  for (int d=0; d<3; ++d) {
+    for (int k=ks; k<=ke; ++k) {
+      for (int j=js; j<=je; ++j) {
+        for (int i=is; i<=ie; ++i) {
+          sourceterms_error(d,k,j,i) = 0.;
+        }
+      }
+    }
+    force_pend_sum_[d] = 0.0;
+  }
+  force_pend_i1_ = -1;
 
 }
 

@@ -431,7 +431,7 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
     pmy_mcb->lb_nstep += iter;
     // This photon is done with whatever cell it was in, so the scattering-moment
     // contribution held back for it becomes one squared term in the error.
-    pmy_mcb->FlushScatError();
+    pmy_mcb->FlushPendingErrors();
     if (capmove > 0 && pphot->nmvp[ip] >= capmove &&
         (pphot->statp[ip] == EVOLVING || pphot->statp[ip] == BUFFERED))
       pphot->statp[ip] = REMOVED;

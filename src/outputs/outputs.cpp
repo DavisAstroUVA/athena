@@ -962,6 +962,16 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
       AppendOutputDataNode(pod);
       num_vars_+=3;
     }
+    // its statistical error, one standard error per component
+    if (output_params.variable.compare("mcsrc") == 0 ||
+        output_params.variable.compare("RadforceF_err") == 0) {
+      pod = new OutputData;
+      pod->type = "VECTORS";
+      pod->name = "RadforceF_err";
+      if (pmb != nullptr) pod->data.InitWithShallowSlice(pmcb->sourceterms_error,4,0,3);
+      AppendOutputDataNode(pod);
+      num_vars_+=3;
+    }
     // monte carlo rad force vector calculated with scatterings
     if (output_params.variable.compare("mcsrc") == 0 ||
         output_params.variable.compare("RadforceS") == 0) {
@@ -1139,11 +1149,14 @@ void Outputs::MakeOutputs(Mesh *pm, ParameterInput *pin, bool wtflag) {
 //!        overloaded to includ MonteCarlo outputs
 void Outputs::MakeOutputs(Mesh *pm, MonteCarlo *pmc, ParameterInput *pin, bool wtflag) {
 
+  // Monte Carlo spectra and lists first, so that a restart file written in the same
+  // cycle records their file numbers after this output
+  pmc->pmcout->MakeOutputs(wtflag);
   pmc->NormalizeDomainOutputs(true); // normalize MC outputs
   MakeOutputs(pm,pin,wtflag);
-  if (!pmc->dynamic)
-    pmc->NormalizeDomainOutputs(false); // un-normalize
-  pmc->pmcout->MakeOutputs(wtflag);
+  // also in a dynamic run: with cadence > 1 the arrays are held into the next cycles,
+  // whose coupling normalizes them itself
+  pmc->NormalizeDomainOutputs(false); // un-normalize
 }
 
 //----------------------------------------------------------------------------------------

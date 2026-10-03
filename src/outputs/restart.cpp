@@ -25,6 +25,7 @@
 #include "../globals.hpp"
 #include "../hydro/hydro.hpp"
 #include "../mesh/mesh.hpp"
+#include "../monte_carlo/montecarlo.hpp"
 #include "../parameter_input.hpp"
 #include "../particles/particles.hpp"
 #include "../scalars/scalars.hpp"
@@ -220,6 +221,11 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool force_wr
       std::memcpy(pdata, pmb->ruser_meshblock_data[n].data(),
                   pmb->ruser_meshblock_data[n].GetSizeInBytes());
       pdata += pmb->ruser_meshblock_data[n].GetSizeInBytes();
+    }
+    // Monte Carlo random-number state, so a restarted run continues each block's stream
+    if (MONTE_CARLO_ENABLED) {
+      pmb->pmy_mcb->pran->PackForRestart(pdata);
+      pdata += MCRandom::kRestartBytes;
     }
   }
 
