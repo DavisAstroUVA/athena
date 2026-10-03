@@ -829,21 +829,26 @@ Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   // rather than dividing by a zero bin width.
   if (prob[nfre-1] <= 0.) return fre_grid(0);
   if (biased && pmcb->pmy_mc->nescape > 0 && pmcb->pmy_mc->bias_energy) {
-    // Draw the interval in proportion to its photon share times its escape probability
-    // and divide the weight by that probability.
+    // Draw the interval in proportion to its photon share s_l times
+    // m_l = (1 - xi) + xi p_l/<p>, with p_l the cell's escape probability in the
+    // interval, <p> the share-weighted mean and xi = bias_energy_mix, and divide the
+    // weight by m_l.  The shares sum to one, so the m_l-weighted shares do too, and the
+    // weight factor is bounded at 1/(1 - xi); see PhotonEmitFreeFree.
     Real *pe = &(pmcb->escape_prob(i3-pmcb->ks,i2-pmcb->js,i1-pmcb->is,0));
-    Real norm = 0.;
-    for (int l=0; l<nfre-1; ++l) norm += (prob[l+1]-prob[l])*pe[l];
-    if (norm > 0.) {
-      Real u = dev*norm, cum = 0., q = 0.;
+    const Real xi = pmcb->pmy_mc->bias_energy_mix;
+    Real pmean = 0.;
+    for (int l=0; l<nfre-1; ++l) pmean += (prob[l+1]-prob[l])*pe[l];
+    if (pmean > 0.) {
+      Real cum = 0., q = 0., m = 1.;
       int l = 0;
       for (l=0; l<nfre-1; ++l) {
-        q = (prob[l+1]-prob[l])*pe[l];
-        if (u < cum + q || l == nfre-2) break;
+        m = (1. - xi) + xi*pe[l]/pmean;
+        q = (prob[l+1]-prob[l])*m;
+        if (dev < cum + q || l == nfre-2) break;
         cum += q;
       }
-      Real a = (q > 0.) ? std::min(std::max((u-cum)/q, 0.), 1.) : 0.;
-      pphot->wp[ip] *= norm/pe[l];
+      Real a = (q > 0.) ? std::min(std::max((dev-cum)/q, 0.), 1.) : 0.;
+      pphot->wp[ip] /= m;
       return std::exp(a*std::log(fre_grid(l+1)) + (1.-a)*std::log(fre_grid(l)));
     }
   }

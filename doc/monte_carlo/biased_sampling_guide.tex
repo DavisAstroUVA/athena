@@ -103,7 +103,8 @@ key & default & meaning \\
 \end{tabular}
 \end{center}
 \key{pesc\_min} rarely needs changing. A deep sample with $I = \key{pesc\_min}$ carries
-an enormous weight but almost never escapes; the composite mixing below is the tool that
+an enormous weight but almost never escapes; the composite mixing of the cell draw
+(\key{bias\_mix}) and of the energy draw (\key{bias\_energy\_mix}) is the tool that
 bounds it, not the floor.
 
 \paragraph{What this importance is and is not.} It is the probability of escaping at all,
@@ -116,6 +117,7 @@ The weight window (Section~\ref{sec:window}) is the correction for that; a
 band-specific importance would need a tally from a previous run and is not implemented.
 
 \section{Energy biasing in \key{PhotonEmitFreeFree}: \key{bias\_energy}}
+\label{sec:energy}
 
 The free-free sampler draws $\ln E$ uniformly over the cell's range ($x$ from
 \key{tfloor} to \key{tceiling} in units of $kT$) and puts the spectrum into the weight,
@@ -123,13 +125,40 @@ $w \propto e^{-x}\,\Delta\ln E$. This deliberately oversamples the Wien tail rel
 its share of the emission, by $e^{x}$, so that a hard band has samples at all.
 
 With an escape table and \key{bias\_energy = true} (the default in the biased scheme),
-the group is drawn with probability proportional to $p_l$ times its overlap with the
-cell's range, and the weight measure becomes $\sum_l d_l p_l / p_{l_{\rm sel}}$ instead of
-the flat $\Delta\ln E$. Groups that can escape get more samples, each lighter; the
-expectation is unchanged. This helps where absorption is strongly energy dependent, as
-free-free absorption ($\propto \nu^{-3}$) is: the soft groups of a skin cell are
-absorbed and the hard ones escape, and the biased draw stops spending samples on the
-former.
+group $l$ is drawn with probability proportional to its overlap $d_l$ with the cell's
+range times
+\begin{equation}
+  m_l = (1-\xi_E) + \xi_E\,\frac{p_l}{\langle p\rangle},
+  \qquad \langle p\rangle = \frac{\sum_l d_l p_l}{\sum_l d_l},
+\end{equation}
+and the weight measure becomes $\Delta\ln E / m_l$ instead of the flat $\Delta\ln E$.
+$\xi_E$ is \key{<montecarlo> bias\_energy\_mix}, which follows \key{bias\_mix} unless
+set. Groups that can escape get more samples, each lighter; the expectation is
+unchanged; and no sample's measure exceeds $1/(1-\xi_E)$ times the flat one, which is
+the same bound the composite mixing of the next section puts on the cell weight. The
+table sampler of \key{mc\_readhdf\_gr} does the same with the table's photon shares in
+place of $d_l$. This helps where absorption is strongly energy dependent, as free-free
+absorption ($\propto \nu^{-3}$) is: the soft groups of a skin cell are absorbed and the
+hard ones escape, and the biased draw stops spending samples on the former.
+
+\paragraph{Why the bound is needed.} At $\xi_E = 1$ the measure is
+$\langle p\rangle\Delta\ln E/p_l$, and a group the table holds at the \key{pesc\_min}
+floor is drawn $10^{10}$ times less often than one that escapes freely. The table rates
+a sample by its birth energy in its birth cell and cannot see what scattering does to
+it afterwards. On the X-ray binary that is exactly the class the hard bands are made of:
+photons born at 0.1--0.25~keV in $10^6$~K gas that come out at 0.3--10~keV after
+Compton upscattering, from cells where the table has the 32--100~eV band at the floor
+in 13\% of cases and the 100--316~eV band there in 3\%. In expectation they are still
+counted, but through samples so rare that a run of $10^7$ photons never draws one,
+and when one does arrive it is a giant (the 2941-copy family of
+Section~\ref{sec:window} was one). The biased run was 8--24\% low from 0.3 to 10~keV
+against the emission run for this reason, with no other difference between the inputs
+(Section~\ref{sec:xrb}). With $\xi_E = 0.9$ the suppression is at most tenfold and the
+class is sampled. On an emission-only sphere (no absorption or scattering, so the
+escaping spectrum is the emission spectrum) with a synthetic table whose soft bands sit
+at the floor, $\xi_E = 0.9$ reproduces the equal-weight total and band shares to 0.3\%
+over four outputs of $10^6$ samples, while $\xi_E = 1$ comes out 9\% low with 30--70
+effective samples per output.
 
 Set \key{bias\_energy = false} to keep the cell allocation but draw energies as the
 other schemes do. That is the right choice when the escape probabilities are nearly flat
@@ -324,6 +353,7 @@ and when active the window's copy and roulette counts and the stretching setting
 \end{itemize}
 
 \section{What the X-ray binary runs showed}
+\label{sec:xrb}
 
 The schemes were compared on the high-resolution snapshot with four outputs of
 $2.5\times10^6$ samples each, so that every error is the scatter between outputs. The
@@ -357,12 +387,19 @@ hard bands, where the hard photons are made by hundreds of scatterings in deep h
 the split copies' walks buy nothing. Per unit CPU the biased scheme breaks even only at
 0.1--0.3~keV. For this problem the emission scheme is the production tool.
 
-The two schemes also disagree on the spectral shape by more than either's scatter, the
-biased run 13\% higher at 30--100~eV and 7--18\% lower from 0.3 to 10~keV with the
-totals agreeing to 1\%. The same pattern appeared in an earlier pair, but all the runs
-share one seed, so the emission runs are not independent of each other; by the
-emission run's quoted errors the difference is 2$\sigma$. A repeat of the emission run
-with a different seed would settle it.
+The two schemes also disagreed on the spectral shape by more than either's scatter,
+the biased run 6\% higher at 30--100~eV and 9, 8 and 24\% lower at 0.3--1, 1--3 and
+3--10~keV. A second emission run with a different seed reproduced the first in every
+band, and an equal-weight run could not arbitrate (0.06\% of its samples escape, 60
+effective). Binning both runs' lists by birth temperature and emitted energy put the
+whole deficit in photons born at 0.1--0.25~keV in $6\times10^5$--$10^6$~K gas that
+escape two to ten times harder, which the energy draw at $\xi_E = 1$ with the
+\key{pesc\_min} floor effectively never samples
+(Section~\ref{sec:energy}); the emission run is right there, and
+\key{bias\_energy\_mix} is the fix. The emission run's weights are the heavy-tailed ones
+(130--600 effective photons per band against thousands of families for the biased run)
+but that skews it low, not high, so it cannot be the source of the difference. The
+biased run above was made before the mixed energy draw existed.
 
 What the biased scheme would need here is an importance for the hard band, which the
 escape probability is not. The cheap experiment not yet run is a floor at
@@ -387,6 +424,7 @@ key & value & why \\
 \key{weights} & \key{biased} & emission is deep; samples belong at the skin \\
 \key{<problem> escape\_file} & from \key{escape\_table.py} & block-local columns overstate escape at block faces \\
 \key{bias\_energy} & \key{true} & free-free absorption is strongly energy dependent \\
+\key{bias\_energy\_mix} & 0.9 & bounds the energy weight factor at 10; at 1 the run above lost the soft-born upscattered photons \\
 \key{bias\_mix} & 0.9--0.99 & 0.9 helps the 1--3~keV band; nothing below 0.5 \\
 \key{minweight}, \key{roulette} & $10^{-4}$, 0.1 & harmless with the window; the only floor without it \\
 \key{wwin\_top}, \key{wwin\_bottom} & 4, 0 & splits climbers; the floor amplifies table errors \\

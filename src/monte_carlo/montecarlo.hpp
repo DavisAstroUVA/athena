@@ -300,6 +300,7 @@ public:
   AthenaArray<Real> escape_lne;
   bool bias_energy; // biased version of PhotonEmitFreeFree
   Real bias_mix; // xi parameter for composite biasing
+  Real bias_energy_mix; // the same for the energy-group draw of a biased emission
   Real bias_scale; // xi E/S, the factor on the escape probability in the mixed importance
   // The importance is mixed in place once, at the first initialization; later outputs
   // reuse the mixed array and the importance-only reference weight recorded then

@@ -65,6 +65,16 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
         << "<montecarlo>/bias_mix = " << bias_mix << "; use 0 < bias_mix <= 1" << std::endl;
     ATHENA_ERROR(msg);
   }
+  // The energy-group draw is mixed the same way, so that the factor it puts on the
+  // weight is bounded at 1/(1 - bias_energy_mix); it follows bias_mix unless set
+  bias_energy_mix = pin->GetOrAddReal("montecarlo","bias_energy_mix",bias_mix);
+  if (bias_energy_mix <= 0. || bias_energy_mix > 1.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/bias_energy_mix = " << bias_energy_mix
+        << "; use 0 < bias_energy_mix <= 1" << std::endl;
+    ATHENA_ERROR(msg);
+  }
   bias_scale = 1.;
   bias_mixed_ = false;
   weight_ref_bias_ = 0.;
@@ -1139,6 +1149,12 @@ void MonteCarlo::DistributeSamples(int etype) {
                   << ", weights bounded at " << 1./(1. - bias_mix)
                   << " times the equal weight" << std::endl;
     }
+    if (!bias_mixed_ && bias_energy && nescape > 0 && Globals::my_rank == 0)
+      std::cout << "Energy biasing: bias_energy_mix = " << bias_energy_mix
+                << ", energy weight factor bounded at "
+                << ((bias_energy_mix < 1.) ? 1./(1. - bias_energy_mix)
+                                           : std::numeric_limits<Real>::infinity())
+                << std::endl;
     bias_mixed_ = true;
   }
 
