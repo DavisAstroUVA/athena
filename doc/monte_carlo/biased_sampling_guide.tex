@@ -311,9 +311,73 @@ and when active the window's copy and roulette counts and the stretching setting
   photons dominates $\sum w^2$. When one does, run with \key{nout > 1} and take the
   scatter between the outputs' spectra as the error, which assumes nothing about the
   weights; \key{combine\_spectra.py -m time} averages them afterwards.
+\item The quoted error can also come out too large. The emission scheme hands every
+  block the same number of samples, so its sampling is stratified by block, and
+  $\sum w^2$, which assumes independent draws, overstates the variance: on the X-ray
+  binary the emission run's quoted errors were 1.4 to 3 times the scatter between its
+  four outputs. The scatter is the measurement; the quoted error is a bound whose
+  direction depends on the scheme.
+\item Runs that share \key{iseed} draw the same cells and are not independent. Two
+  emission runs with the same seed agreeing to 2\% says nothing about their errors,
+  and a shape difference between schemes that recurs across such runs is not thereby
+  confirmed. Change the seed when a repeat is meant as a check.
 \end{itemize}
 
-\section{Settings for an X-ray binary run}
+\section{What the X-ray binary runs showed}
+
+The schemes were compared on the high-resolution snapshot with four outputs of
+$2.5\times10^6$ samples each, so that every error is the scatter between outputs. The
+biased run used the global escape table, \key{bias\_mix = 0.9}, the split-only window
+(\key{wwin\_top = 4}, \key{wwin\_bottom = 0}) with the interpolated reference, and no
+stretching; the emission run was the standard input. CPU: biased $3.85\times10^6$~s,
+emission $2.46\times10^5$~s, a ratio of 15.7.
+
+\begin{center}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+band [keV] & emission & biased & flux ratio & FoM biased/emission \\
+\midrule
+0.01--0.03 & 4.8\% & 4.1\% & 1.07 & 0.09 \\
+0.03--0.1  & 2.3\% & 1.6\% & 1.13 & 0.14 \\
+0.1--0.3   & 2.4\% & 0.6\% & 1.02 & 1.06 \\
+0.3--1     & 2.1\% & 0.7\% & 0.93 & 0.69 \\
+1--3       & 2.8\% & 1.6\% & 0.94 & 0.21 \\
+3--10      & 6.8\% & 7.0\% & 0.82 & 0.06 \\
+10--30     & 5.9\% & 6.9\% & 0.98 & 0.05 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The biased run's errors are honest: scatter, family-level and photon-level estimates
+agree, the family-level effective counts are 4000--6000 per output overall and
+700--1500 in the 1--3~keV band, and no family carries more than 1\% of an output. Its
+absolute errors are smaller in the soft and middle bands, by four times at 0.1--0.3~keV,
+but that is what sixteen times the CPU would buy the emission scheme anyway, and in the
+hard bands, where the hard photons are made by hundreds of scatterings in deep hot gas,
+the split copies' walks buy nothing. Per unit CPU the biased scheme breaks even only at
+0.1--0.3~keV. For this problem the emission scheme is the production tool.
+
+The two schemes also disagree on the spectral shape by more than either's scatter, the
+biased run 13\% higher at 30--100~eV and 7--18\% lower from 0.3 to 10~keV with the
+totals agreeing to 1\%. The same pattern appeared in an earlier pair, but all the runs
+share one seed, so the emission runs are not independent of each other; by the
+emission run's quoted errors the difference is 2$\sigma$. A repeat of the emission run
+with a different seed would settle it.
+
+What the biased scheme would need here is an importance for the hard band, which the
+escape probability is not. The cheap experiment not yet run is a floor at
+\key{wwin\_bottom = 0.1} with the interpolated reference, which should fire only on
+genuine inward migration and could cut the CPU several-fold; even so the scheme would
+stay behind the emission run outside 0.1--1~keV. The machinery stays useful where it
+fits: the family-level errors and the output scatter for any run, the carried flight
+budget for all transport, and the window and stretching for problems with a genuine
+thin scattering layer or an importance that varies gently from cell to cell.
+
+\section{Settings that were tested on the X-ray binary}
+
+These are the settings of the biased run above, kept as the reference configuration
+for the biased scheme; see the previous section before choosing it over
+\key{weights = emission} for this problem.
 
 \begin{center}
 \begin{tabular}{@{}llp{2.6in}@{}}
