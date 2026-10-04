@@ -399,7 +399,13 @@ escape two to ten times harder, which the energy draw at $\xi_E = 1$ with the
 \key{bias\_energy\_mix} is the fix. The emission run's weights are the heavy-tailed ones
 (130--600 effective photons per band against thousands of families for the biased run)
 but that skews it low, not high, so it cannot be the source of the difference. The
-biased run above was made before the mixed energy draw existed.
+biased run above was made before the mixed energy draw existed. A rerun with
+\key{bias\_energy\_mix = 0.9} and $1.25\times10^6$ samples per output brought the total
+onto the emission value and the 0.3--1 and 1--3~keV bands to within $1\sigma$ of it
+after two outputs, at three times the old run's scatterings per output, since the
+recovered photons are the ones that scatter hundreds of times; 3--10~keV stayed 20\%
+low at $2\sigma$, where the emission run itself rests on about 60 effective photons per
+output.
 
 What the biased scheme would need here is an importance for the hard band, which the
 escape probability is not. The cheap experiment not yet run is a floor at
