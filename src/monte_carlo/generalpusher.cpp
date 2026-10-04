@@ -65,8 +65,9 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
   for (int ip=ips; ip<=ipe; ip++) {
     // check if photon is on this block
     if (!IsOnBlock(pphot,ip)) continue;
-    // get number of mean free paths photon will travel
-    Real tauremaining = GetOpticalDepth(pran);
+    // budget of mean free paths for this flight; a photon arriving from another block
+    // carries what was left, which is zero when its interaction point lies on this block
+    Real tauremaining = (pphot->taup[ip] >= 0.) ? pphot->taup[ip] : GetOpticalDepth(pran);
     Real step = StepSize(pphot,ip);
     //printf("step %g\n",step);
     Real path_length;
@@ -117,6 +118,9 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
         oi1 = pphot->i1p[ip]; oi2 = pphot->i2p[ip]; oi3 = pphot->i3p[ip];
       }
       bool accel_success = false;
+      // multiplier of the step that ends the flight, applied once the step is known not
+      // to have left the domain
+      Real interact_alpha = 1.;
 
       Real dl_face = 0.;
       if ((acceleration) && (resonance)) {
@@ -144,14 +148,17 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
       }
       if (!accel_success) {// Acceleration not triggered - take standard step
         Real tau_step = chi * l_cgs * step * pphot->ep[ip];
-        if (tauremaining > tau_step) { // Photon hasn't yet reached tauremaining
+        const Real alpha = StretchFactor(pphot,ip,chi,step * pphot->ep[ip]);
+        if (tauremaining > alpha * tau_step) { // Photon hasn't yet reached tauremaining
           // advance photon position, momentum, and polarization
           AdvanceStep(pphot,step,ip);
-          tauremaining -= tau_step; // uses ep, chi at step start
+          tauremaining -= alpha * tau_step; // uses ep, chi at step start
         } else { // Photon has reached end of tauremaining - step to make it 0
-          step = tauremaining / (chi * l_cgs * pphot->ep[ip]);
+          step = tauremaining / (alpha * chi * l_cgs * pphot->ep[ip]);
+          tau_step = chi * l_cgs * step * pphot->ep[ip];
           AdvanceStep(pphot,step,ip);
           tauremaining = 0.;
+          interact_alpha = alpha;
         }
         pphot->dtp[ip] -= pphot->ep[ip] * step / c_code;
         // Update moments
@@ -165,6 +172,7 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
             pmcb->UpdateMoments(pphot,dl_cgs,ip);
           }
         }
+        ApplyStretch(pphot,ip,alpha,tau_step);
       } else {
         // Photon has been given a new position on sphere of radius dl_face
         // Set exit parameters and continue the loop over photons
@@ -185,6 +193,9 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
         acon_valid = false;
         metric_valid = false;
       }
+      if (interact_alpha != 1. &&
+          (pphot->statp[ip] == EVOLVING || pphot->statp[ip] == BUFFERED))
+        pphot->wp[ip] /= interact_alpha;
 
       // Position and wavevector only, every step; the full check including the sixteen
       // tensor columns runs once per flight below
@@ -207,6 +218,7 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
     // calls and blocks, which is what it takes to bound a flight; it is reset at each
     // scattering, in TransferPhotonsOnBlock.
     pphot->nmvp[ip] = nmv0 + iter;
+    pphot->taup[ip] = tauremaining;
     pmy_mcb->lb_nstep += iter;
     // This photon is done with whatever cell it was in, so the scattering-moment
     // contribution held back for it becomes one squared term in the error.
@@ -450,9 +462,8 @@ void GeneralPusher::RK4Step(Photon *pphot, Real step, int ip) {
   // Both roots of a f^2 + b f + c = 0.  Outside the ergosphere c < 0 and exactly one
   // root is positive.  Inside it g_00 > 0, so both are: one near unity, which is this
   // photon's projection, and one equal to c/a, which belongs to the photon with the
-  // opposite sign of k_t.  Always taking the larger root, as this once did, flipped the
-  // energy at infinity of every negative-energy photon on every step.  The larger root
-  // is formed without cancellation; the other follows from the sum of the roots.
+  // opposite sign of k_t.  The larger root is formed without cancellation; the other
+  // follows from the sum of the roots.
   Real f1 = b < 0. ? (d-b) / (2.*a) : -2.*c / (b+d);
   Real f2 = -b/a - f1;
   Real factor = std::abs(f1-1.) <= std::abs(f2-1.) ? f1 : f2;

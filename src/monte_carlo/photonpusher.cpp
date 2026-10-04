@@ -7,6 +7,8 @@
 //! \brief implementation for photon moving functions
 
 // C/C++ headers
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 // Athena++ headers
@@ -33,6 +35,10 @@ PhotonPusher::PhotonPusher(MonteCarloBlock *pmcb) {
   compton = (pmcb->scattering_meth == SCATCOMP);
   //compton = (!pmcb->coherent_scattering) && (!resonance);
   time_acc = pmcb->time_acc;
+  stretch_ = pmy_mc->stretch;
+  stretch_lnbound_ = std::log(pmy_mc->stretch_bound);
+  stretch_taucell_ = pmy_mc->stretch_taucell;
+  stretching_ = (stretch_ != 1.);
 
   if (acceleration) {
     InitializeMRWDist();
@@ -513,6 +519,32 @@ Real PhotonPusher::GetOpticalDepth(MCRandom *pran) {
     dev=pran->uniform();
   //std::cout << dev << std::endl;
   return -log(dev);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real PhotonPusher::StretchFactor(Photon *pphot, int ip, Real chi, Real dl_seg)
+//! \brief extinction multiplier for the next flight segment
+
+Real PhotonPusher::StretchFactor(Photon *pphot, int ip, Real chi, Real dl_seg) {
+  if (!stretching_ || chi <= 0. || dl_seg <= 0.) return 1.;
+  const Real l_cgs = pmy_mcb->l_cgs;
+  if (stretch_taucell_ < HUGE_NUMBER &&
+      chi * l_cgs * CellWidth(pphot, ip) > stretch_taucell_) return 1.;
+  const Real tau_seg = chi * l_cgs * dl_seg;
+  const Real d = pphot->strp[ip];
+  if (stretch_ > 1.) return std::min(stretch_, 1. + (stretch_lnbound_ - d) / tau_seg);
+  return std::max(stretch_, 1. - (stretch_lnbound_ + d) / tau_seg);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real PhotonPusher::CellWidth(Photon *pphot, int ip)
+//! \brief smallest coordinate width of the photon's cell
+
+Real PhotonPusher::CellWidth(Photon *pphot, int ip) {
+  const Real dx1 = pcoord->x1f(pphot->i1p[ip]+1) - pcoord->x1f(pphot->i1p[ip]);
+  const Real dx2 = pcoord->x2f(pphot->i2p[ip]+1) - pcoord->x2f(pphot->i2p[ip]);
+  const Real dx3 = pcoord->x3f(pphot->i3p[ip]+1) - pcoord->x3f(pphot->i3p[ip]);
+  return std::min(dx1, std::min(dx2, dx3));
 }
 
 //----------------------------------------------------------------------------------------

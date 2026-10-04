@@ -80,6 +80,15 @@ enum EmissionFlag {EMISUSER = 0, EMISNONE = 1, EMISFF = 2, EMISBB = 3, MULTI = 4
 enum EmissionGeometry {EMISVOL = 0, EMISAREA = 1, EMISGNONE = 2};
 enum AbsorptionOpacityFlag {ABSUSER = 0, ABSNONE = 1, ABSFF = 2, ABSDUST =3};
 enum AbsorptionMethodFlag {ABSWEIGHT = 0, ABSPROB = 1, ABSTAU = 2};
+// How samples are allocated to cells and weighted, <montecarlo>/weights:
+//   emission  cells are drawn uniformly and the cell's emission goes into the weight
+//   equal     cells are drawn in proportion to their emission and every sample carries
+//             the same weight em_tot/nphot
+//   biased    cells are drawn in proportion to emission times a per-cell importance
+//             (an escape estimate the problem generator supplies) and the weight is
+//             divided by the importance; with an escape table the energy is drawn
+//             the same way within the cell.  Unbiased for any positive importance.
+enum WeightScheme {WEIGHTS_EMISSION = 0, WEIGHTS_EQUAL = 1, WEIGHTS_BIASED = 2};
 enum ScatteringFlag {SCATUSER = 0, SCATNONE =1, SCATISO = 2, SCATTHOM = 3, SCATCOMP =4,
                      SCATRES = 5, SCATDUST = 6};
 enum MCBoundaryFlag {MC_PERIODIC_BNDRY = 0, MC_ESCAPE_BNDRY = 1, MC_ABSORB_BNDRY = 2,
@@ -173,6 +182,7 @@ void GetZonePositionCartesianFace(Photon *pphot, MCRandom *pran, MCCoord *pcoord
 //---------------------- prototypes for setting flags ------------------------------------
 enum MCBoundaryFlag GetMCBoundaryFlag(std::string input_string);
 enum EmissionFlag GetEmissionFlag(std::string input_string);
+enum WeightScheme GetWeightScheme(ParameterInput *pin);
 enum EmissionGeometry GetEmissionGeometry(std::string input_string);
 enum BoundaryFace SetEmissionSurface(std::string input_face);
 enum AbsorptionOpacityFlag GetAbsorptionOpacityFlag(std::string input_string);
@@ -249,6 +259,9 @@ public:
   Real last_transport_time; // mesh time at the start of the last transport's step
   Real ttransport; // simulation time the transport has covered, in code units
   Real weightratio; // used for setting minimum weight for absorption
+  Real roulette; // determines if low weight samples are absorbed or survive
+  // Path stretching paramters
+  Real stretch, stretch_bound, stretch_taucell;
 
   int ntype; // number of emission types
   int64_t nsamp;  // total number of photons to integrate per timestep/output
@@ -280,7 +293,28 @@ public:
   bool using_bfield; // set magnetic fields
   bool tetrads; // convert from coordinate frame
   bool emission_array;  // Compute and save cell emissivities
-  bool *emission_eqwt; // Set initial weights equal
+  // Escape table for weights = biased: nescape energy groups with edges escape_lne in
+  // ln(energy/erg), set by the problem generator in InitUserMonteCarloData; 0 means the
+  // energy draw is not biased.
+  int nescape;
+  AthenaArray<Real> escape_lne;
+  bool bias_energy; // biased version of PhotonEmitFreeFree
+  Real bias_mix; // xi parameter for composite biasing
+  Real bias_energy_mix; // the same for the energy-group draw of a biased emission
+  Real bias_scale; // xi E/S, the factor on the escape probability in the mixed importance
+  // The importance is mixed in place once, at the first initialization; later outputs
+  // reuse the mixed array and the importance-only reference weight recorded then
+  bool bias_mixed_;
+  Real weight_ref_bias_;
+  // Weight window (weights = biased): at each interaction a sample heavier than wwin_top
+  // times the cell's window centre is split into up to wwin_max_split copies, one lighter
+  // than wwin_bottom times it survives roulette at the centre or is absorbed.  The centre
+  // is the weight the biased emission gives that cell at that energy.  0 disables a side.
+  Real wwin_top, wwin_bottom;
+  int wwin_max_split;
+  bool wwin_energy; // take the centre from the escape table at the sample's energy group
+  bool wwin_interp; // interpolate the table between cell centres to the sample's position
+  WeightScheme *weight_scheme; // sample allocation and weighting, per emission type
   bool *initialize_comoving; // Transform from comoving frame for emission
   enum AbsorptionMethodFlag *absorption_method; // absorption method for each emission type
 
@@ -556,6 +590,8 @@ public:
   void UnpackFromTransfer(const std::vector<int> &ib, const std::vector<Real> &rb,
                           const std::vector<char> &sb);
   int64_t nabs, nesc, ndes, nscat, nrem; // counters
+  int64_t nsplit, nroul; // copies made and samples rouletted by the weight window
+  Real wesc_sum, wesc_sq; // escaped weight and its square, for the effective count
   int loop_max_size;
   int nx1,nx2,nx3;
   int is,ie,js,je,ks,ke;
@@ -622,6 +658,10 @@ public:
   Real emin_scat, emax_scat, dloge_scat; // min/max energy for scattering moments
 
   AthenaArray<Real> emission;
+  // weights = biased: per-cell importance (ghost-inclusive, 1 where not set) and the
+  // escape probability per energy group on active cells, (k-ks, j-js, i-is, l)
+  AthenaArray<Real> importance;
+  AthenaArray<Real> escape_prob;
   AthenaArray<Real> moments;
   AthenaArray<Real> moments_com;
   AthenaArray<Real> moments_coord;
@@ -693,6 +733,14 @@ public:
   // Functions for handling distributed emission over cells
   void ComputeEmissionArray(int etype, Real &emm_min, Real &emm_max, Real &emm_tot);
   void ComputeEmissionSampleArray();
+  // emission times importance when biased, emission otherwise: what samples are drawn on
+  Real SampleDensity(int k, int j, int i) const;
+  void RouletteOrAbsorb(Photon *pphot, int ip);
+  //! the weight the biased emission gives the sample's cell at its energy
+  Real WindowCenter(Photon *pphot, int ip) const;
+  //! split or roulette a sample outside the weight window; copies are appended
+  void WeightWindow(Photon *pphot, int ip);
+  Real SampleDensityTotal() const;
   //void ComputeEmissionSampleArray(BoundaryFace face);
   void SetEmissionCellWeight(Photon *pphot, int ips, int ipe);
   void SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face, int ips, int ipe);

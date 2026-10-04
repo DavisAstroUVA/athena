@@ -63,6 +63,8 @@ public:
   void StoreTensor(int ip, const std::complex<Real> n[4][4]);
   std::complex<Real> Tensor(int ip, int i, int j) const;
   void AllocatePhotons(int nphot);
+  //! copy every property of photon src into slot dst
+  void CopyPhoton(int src, int dst);
   void SendToNeighbors();
   void ApplyPeriodicBoundary(Real &x1, Real &x2, Real &x3, int k);
   bool ReceiveFromNeighbors();
@@ -128,6 +130,7 @@ public:
   static int ik0p, ik1p, ik2p, ik3p;
   static int idk0p, idk1p, idk2p, idk3p;
   static int iep, iwp, iscp, iacp;
+  static int istrp, itaup, iwrefp;
   static int isip, isqp, isup, isvp;
   static int iuserp;
   static int ipolp;
@@ -148,6 +151,13 @@ public:
   static std::vector<Real> dk_scratch_;
   void EnsureScratch();
   std::vector<Real> &ep, &wp, &scp, &acp;
+  //! ln of path stretching factor
+  std::vector<Real> &strp;
+  //! optical depth left in the current flight
+  std::vector<Real> &taup;
+  //! weight over the cell's window centre at emission; the weight window keeps this
+  //! ratio within its bounds as the photon moves between cells and energy groups
+  std::vector<Real> &wrefp;
   std::vector<Real> &sip, &sqp, &sup, &svp;
   std::vector<Real> &dtp;
   std::vector<Real> *user;     //!>   user variable arrays

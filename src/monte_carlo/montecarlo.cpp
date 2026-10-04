@@ -56,6 +56,43 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   UserWorkInMove=nullptr;
   GetEmission=nullptr;
   UserGetDensity=nullptr;
+  nescape = 0;
+  bias_energy = pin->GetOrAddBoolean("montecarlo","bias_energy",true);
+  bias_mix = pin->GetOrAddReal("montecarlo","bias_mix",0.99);
+  if (bias_mix <= 0. || bias_mix > 1.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/bias_mix = " << bias_mix << "; use 0 < bias_mix <= 1" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  // The energy-group draw is mixed the same way, so that the factor it puts on the
+  // weight is bounded at 1/(1 - bias_energy_mix); it follows bias_mix unless set
+  bias_energy_mix = pin->GetOrAddReal("montecarlo","bias_energy_mix",bias_mix);
+  if (bias_energy_mix <= 0. || bias_energy_mix > 1.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/bias_energy_mix = " << bias_energy_mix
+        << "; use 0 < bias_energy_mix <= 1" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  bias_scale = 1.;
+  bias_mixed_ = false;
+  weight_ref_bias_ = 0.;
+  wwin_top = pin->GetOrAddReal("montecarlo","wwin_top",0.);
+  wwin_bottom = pin->GetOrAddReal("montecarlo","wwin_bottom",0.);
+  wwin_max_split = pin->GetOrAddInteger("montecarlo","wwin_max_split",8);
+  wwin_energy = pin->GetOrAddBoolean("montecarlo","wwin_energy",true);
+  wwin_interp = pin->GetOrAddBoolean("montecarlo","wwin_interp",true);
+  if ((wwin_top != 0. && wwin_top < 1.) || wwin_bottom < 0. || wwin_bottom > 1. ||
+      wwin_max_split < 2) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/wwin_top = " << wwin_top << ", wwin_bottom = " << wwin_bottom
+        << ", wwin_max_split = " << wwin_max_split
+        << "; use wwin_top >= 1 or 0, 0 <= wwin_bottom <= 1, wwin_max_split >= 2"
+        << std::endl;
+    ATHENA_ERROR(msg);
+  }
   UserGetTemperature=nullptr;
   UserGetNumberDensity=nullptr;
   UserScattering=nullptr;
@@ -132,6 +169,25 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 
   // Set mininmum weight if using weighting for absorption
   weightratio = pin->GetOrAddReal("montecarlo","minweight",1.0e-20);
+  roulette = pin->GetOrAddReal("montecarlo","roulette",0.1);
+  if (roulette < 0. || roulette >= 1.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/roulette = " << roulette << "; use 0 <= roulette < 1" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+
+  stretch = pin->GetOrAddReal("montecarlo","stretch",1.0);
+  stretch_bound = pin->GetOrAddReal("montecarlo","stretch_bound",10.0);
+  stretch_taucell = pin->GetOrAddReal("montecarlo","stretch_taucell",HUGE_NUMBER);
+  if (stretch <= 0. || stretch_bound < 1. || stretch_taucell <= 0.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "<montecarlo>/stretch = " << stretch << ", stretch_bound = " << stretch_bound
+        << ", stretch_taucell = " << stretch_taucell
+        << "; use stretch > 0, stretch_bound >= 1, stretch_taucell > 0" << std::endl;
+    ATHENA_ERROR(msg);
+  }
 
   // Number of outputs for static monte carlo
   nout = pin->GetOrAddInteger("montecarlo","nout",1);
@@ -691,6 +747,8 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
 
     // initialize counters to zero
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
+    pmcb->nsplit = pmcb->nroul = 0;
+    pmcb->wesc_sum = pmcb->wesc_sq = 0.;
     pmcb->loop_max_size = loop_max;
 
     // Call problem generators for Monte Carlo
@@ -930,7 +988,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
     ntype = pin->GetInteger("montecarlo","ntype"); // must be set for multi
   }
   nsamptype = new int64_t[ntype];
-  emission_eqwt = new bool[ntype];
+  weight_scheme = new WeightScheme[ntype];
   initialize_comoving = new bool[ntype];
   std::string abs_def = pin->GetOrAddString("montecarlo","abs_method","weight");
   absorption_method = new AbsorptionMethodFlag[ntype];
@@ -941,7 +999,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   if (emission_flag == EMISNONE) {
     GetEmission[0] = nullptr; // left unset
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
-    emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
+    weight_scheme[0] = GetWeightScheme(pin);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
     emission_geometry[0] = GetEmissionGeometry(pin->GetOrAddString("montecarlo","emission_geometry","none"));
@@ -949,7 +1007,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   } else if (emission_flag ==  EMISUSER) {
     GetEmission[0] = nullptr; // must be set in InitUserMonteCarloData
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
-    emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
+    weight_scheme[0] = GetWeightScheme(pin);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
     emission_geometry[0] = GetEmissionGeometry(pin->GetOrAddString("montecarlo","emission_geometry","volume"));
@@ -959,7 +1017,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   } else if (emission_flag ==  EMISFF) {
     GetEmission[0] = GetEmissionFreeFree;
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
-    emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
+    weight_scheme[0] = GetWeightScheme(pin);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
     emission_geometry[0] = EMISVOL; // Must be volumetric
@@ -967,7 +1025,7 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   } else if (emission_flag ==  EMISBB) {
     GetEmission[0] = GetEmissionBlackbody;
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
-    emission_eqwt[0] = pin->GetOrAddBoolean("montecarlo","equal_weight",false);
+    weight_scheme[0] = GetWeightScheme(pin);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
     emission_geometry[0] = EMISAREA; // Must be areal
@@ -1015,7 +1073,9 @@ void MonteCarlo::DistributeSamples(int etype) {
         << std::endl;
     ATHENA_ERROR(msg);
   }
-  bool equal_weight = emission_eqwt[etype];
+  const bool biased = (weight_scheme[etype] == WEIGHTS_BIASED);
+  // equal and biased share the allocation machinery; biased draws on a different density
+  const bool equal_weight = (weight_scheme[etype] == WEIGHTS_EQUAL) || biased;
   
   // compute emission properties over all blocks on this process
   Real em_min = SQR(HUGE_NUMBER), em_max = -HUGE_NUMBER, em_tot = 0.;
@@ -1038,8 +1098,68 @@ void MonteCarlo::DistributeSamples(int etype) {
   MPI_Allreduce(MPI_IN_PLACE,&em_tot,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
 #endif
 
+  // The density samples are allocated on: the emission, or emission times importance
+  // when biased.  em_tot stays the physical emission for the report below.
+  Real s_tot = em_tot;
+  Real weight_ref = em_tot/static_cast<Real>(ntot);
+  if ((wwin_top > 0. || wwin_bottom > 0.) && !biased) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo::Initialize" << std::endl
+        << "the weight window needs weights = biased for its importance" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  if (biased) {
+    em_proc = 0.;
+    for (int nb=0; nb<nblocal; nb++) {
+      tot_block[nb] = my_blocks(nb)->SampleDensityTotal();
+      em_proc += tot_block[nb];
+    }
+    s_tot = em_proc;
+#ifdef MPI_PARALLEL
+    MPI_Allreduce(MPI_IN_PLACE,&s_tot,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+#endif
+    if (!bias_mixed_) {
+      if (Globals::my_rank == 0)
+        std::cout << "Importance: emission-weighted mean " << s_tot/em_tot << std::endl;
+      // The minimum weight is referenced to the importance-only average, not the
+      // equal weight
+      weight_ref_bias_ = s_tot/static_cast<Real>(ntot);
+    }
+    weight_ref = weight_ref_bias_;
+    // Composite biasing: replace the importance I by (1 - xi) + xi I E/S, so the
+    // allocation density becomes (1 - xi) emission/E + xi emission I/S and no weight
+    // exceeds 1/(1 - xi) times the equal weight.  Applied once; the array stays mixed.
+    if (!bias_mixed_ && bias_mix < 1. && s_tot > 0.) {
+      const Real scale = bias_mix * em_tot / s_tot;
+      bias_scale = scale;
+      em_proc = 0.;
+      for (int nb=0; nb<nblocal; nb++) {
+        MonteCarloBlock *pmcb = my_blocks(nb);
+        for (int n=0; n<pmcb->importance.GetSize(); ++n)
+          pmcb->importance(n) = (1. - bias_mix) + scale * pmcb->importance(n);
+        tot_block[nb] = pmcb->SampleDensityTotal();
+        em_proc += tot_block[nb];
+      }
+      s_tot = em_proc;
+#ifdef MPI_PARALLEL
+      MPI_Allreduce(MPI_IN_PLACE,&s_tot,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+#endif
+      if (Globals::my_rank == 0)
+        std::cout << "Composite biasing: bias_mix = " << bias_mix
+                  << ", weights bounded at " << 1./(1. - bias_mix)
+                  << " times the equal weight" << std::endl;
+    }
+    if (!bias_mixed_ && bias_energy && nescape > 0 && Globals::my_rank == 0)
+      std::cout << "Energy biasing: bias_energy_mix = " << bias_energy_mix
+                << ", energy weight factor bounded at "
+                << ((bias_energy_mix < 1.) ? 1./(1. - bias_energy_mix)
+                                           : std::numeric_limits<Real>::infinity())
+                << std::endl;
+    bias_mixed_ = true;
+  }
+
   if (equal_weight) {
-    // emmision weights are all equal 
+    // emmision weights are all equal
 
     // First, each process sends its its own block totals to rank 0
     std::vector<Real> emiss_proc(Globals::nranks, 0.0);
@@ -1054,7 +1174,7 @@ void MonteCarlo::DistributeSamples(int etype) {
     if (Globals::my_rank == 0) {
       std::vector<Real> prob(Globals::nranks);
       for (int irank=0; irank<Globals::nranks; irank++)
-        prob[irank] = emiss_proc[irank]/em_tot;
+        prob[irank] = emiss_proc[irank]/s_tot;
       my_blocks(0)->pran->SampleMultinomial(ntot,Globals::nranks,prob.data(),count.data());
     }
     int64_t my_count;
@@ -1069,13 +1189,13 @@ void MonteCarlo::DistributeSamples(int etype) {
     for (int nb=0; nb<nblocal; nb++)
       prob_b[nb] = tot_block[nb]/em_proc;
     my_blocks(0)->pran->SampleMultinomial(my_count,nblocal,prob_b.data(),count_b.data());
-    Real ave_weight = em_tot/static_cast<Real>(ntot);
+    Real ave_weight = s_tot/static_cast<Real>(ntot);
 
 
     for (int nb=0; nb<nblocal; nb++) {
       my_blocks(nb)->nphremain = count_b[nb];
       my_blocks(nb)->nphrun = 0;
-      my_blocks(nb)->minweight = weightratio * ave_weight;
+      my_blocks(nb)->minweight = weightratio * weight_ref;
       my_blocks(nb)->emiss_to_weight = ave_weight;
       // distribute photons within each block
       my_blocks(nb)->ComputeEmissionSampleArray();
@@ -1145,7 +1265,22 @@ void MonteCarlo::DistributeSamples(int etype) {
   if (Globals::my_rank == 0) {
     std::cout << "Emission array range (min, max), total: " << em_min << " "
               << em_max << " " << em_tot << std::endl;
+    if (biased)
+      std::cout << "Sample density total (emission x importance): " << s_tot
+                << std::endl;
     std::cout << "Minimum weight: " << my_blocks(0)->minweight << std::endl;
+    if (wwin_top > 0. || wwin_bottom > 0.)
+      std::cout << "Weight window: split above " << wwin_top << " x centre into at most "
+                << wwin_max_split << ", roulette below " << wwin_bottom << " x centre, "
+                << (wwin_energy ? "centre per energy group" : "centre per cell")
+                << (wwin_interp ? ", interpolated" : "") << std::endl;
+    if (stretch != 1.) {
+      std::cout << "Path stretching: extinction x " << stretch
+                << ", weight factor per flight bounded at " << stretch_bound;
+      if (stretch_taucell < HUGE_NUMBER)
+        std::cout << ", in cells with tau_cell < " << stretch_taucell;
+      std::cout << std::endl;
+    }
   }
   delete[] tot_block;
 
@@ -1226,6 +1361,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     pmcb->pphot->ClearBoundary();
     // reset counters
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb-> nrem = 0;
+    pmcb->nsplit = pmcb->nroul = 0;
+    pmcb->wesc_sum = pmcb->wesc_sq = 0.;
   }
 
   // Reset the moments and source terms for this transport, in both modes.  Every output
@@ -1244,6 +1381,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     for (int nb=0; nb<nblocal; nb++) {
       MonteCarloBlock *pmcb = my_blocks(nb);
       pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = 0;
+      pmcb->nsplit = pmcb->nroul = 0;
+      pmcb->wesc_sum = pmcb->wesc_sq = 0.;
       pmcb->lb_time = 0.0;
       pmcb->lb_nstep = 0;
       pmcb->lb_pending = 0.0;
@@ -1321,9 +1460,14 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // below, so all six have to be 64 bits wide: reducing into a 32-bit ntot writes four
     // bytes past it.
     int64_t ntot = 0;
-    int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0;
+    int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0, nsplit = 0, nroul = 0;
+    Real wesc_sum = 0., wesc_sq = 0.;
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
+      nsplit += pmcb->nsplit;
+      nroul += pmcb->nroul;
+      wesc_sum += pmcb->wesc_sum;
+      wesc_sq += pmcb->wesc_sq;
       nesc += pmcb->nesc;
       nabs += pmcb->nabs;
       ndes += pmcb->ndes;
@@ -1341,6 +1485,10 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&nscat,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&ntot,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nsplit,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nroul,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&wesc_sum,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&wesc_sq,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
   #endif
     // Global totals for the whole run, for the end-of-run cost report.  These are the
     // reduced values, so every rank holds the same number and rank 0 can print it.
@@ -1358,6 +1506,14 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   << static_cast<Real>(nscat)/static_cast<Real>(ntot) << std::endl;
       else
           std::cout << std::endl;
+      if (wwin_top > 0. || wwin_bottom > 0.)
+        std::cout << "weight window: " << nsplit << " copies made, " << nroul
+                  << " samples rouletted" << std::endl;
+      // (sum w)^2 / sum w^2 over the escaped samples: the number of equal-weight
+      // samples with the same variance
+      if (wesc_sq > 0.)
+        std::cout << "escaped weight: " << wesc_sum << " effective samples: "
+                  << wesc_sum*wesc_sum/wesc_sq << std::endl;
     }
 
     lb_transport_wall = std::chrono::duration<double>(
@@ -1769,10 +1925,11 @@ MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
   MonteCarloBlock *pmcb = new MonteCarloBlock(pmb, nullptr, this, pin);
   SetupBlockFromFluid(pmcb);
   pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
+  pmcb->nsplit = pmcb->nroul = 0;
   pmcb->loop_max_size = ComputeLoopMax();
   // The problem generator runs before the payload is unpacked, exactly as at startup:
   // it supplies per-block state that is neither fluid-derived nor carried (photon
-  // budgets of emission = none decks, image geometry, per-block tables), and whatever
+  // budgets of emission = none athinput files, image geometry, per-block tables), and whatever
   // it sets that the payload also carries is then overwritten by the block's real
   // state.  The contract for a generator is therefore that this hook is repeatable for
   // a block and touches no state shared across blocks or indexed by lid; one that does
@@ -2654,4 +2811,28 @@ void MCRandom::SampleMultinomial(int n, int m, Real *prob, int *counts) {
   }
   counts[m-1] = remain;
   
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn enum WeightScheme GetWeightScheme(ParameterInput *pin)
+//! \brief read <montecarlo>/weights, the sample allocation and weighting scheme
+
+enum WeightScheme GetWeightScheme(ParameterInput *pin) {
+  if (pin->DoesParameterExist("montecarlo","equal_weight")) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
+        << "<montecarlo>/equal_weight is not an option; use weights = emission | equal"
+        << " | biased" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  std::string s = pin->GetOrAddString("montecarlo","weights","emission");
+  if (s == "emission") return WEIGHTS_EMISSION;
+  if (s == "equal") return WEIGHTS_EQUAL;
+  if (s == "biased") return WEIGHTS_BIASED;
+  std::stringstream msg;
+  msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
+      << "<montecarlo>/weights = " << s << " is not one of emission, equal, biased"
+      << std::endl;
+  ATHENA_ERROR(msg);
+  return WEIGHTS_EMISSION;
 }

@@ -8,6 +8,7 @@
 
 // C++ headers
 #include <algorithm>  // min
+#include <cmath>
 #include <cstdint>    // int64_t
 #include <cstring>   // strcmp
 #include <limits>     // numeric_limits
@@ -462,7 +463,14 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     }
   }
   if (pmy_mc->emission_array) emission.NewAthenaArray(ncells3,ncells2,ncells1);
-  if (pmy_mc->emission_eqwt[0]) emit_count_.NewAthenaArray(ncells3,ncells2,ncells1);
+  if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION)
+    emit_count_.NewAthenaArray(ncells3,ncells2,ncells1);
+  if (pmy_mc->weight_scheme[0] == WEIGHTS_BIASED) {
+    importance.NewAthenaArray(ncells3,ncells2,ncells1);
+    for (int n=0; n<importance.GetSize(); ++n) importance(n) = 1.;
+    if (pmy_mc->nescape > 0) escape_prob.NewAthenaArray(nx3,nx2,nx1,pmy_mc->nescape);
+  }
+  wesc_sum = wesc_sq = 0.;
   if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
     planck_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
     planck_inv_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
@@ -510,7 +518,9 @@ MonteCarloBlock::~MonteCarloBlock() {
     sourceterms_error.DeleteAthenaArray();
   }
   if (pmy_mc->emission_array) emission.DeleteAthenaArray();
-  if (pmy_mc->emission_eqwt[0]) emit_count_.DeleteAthenaArray();
+  if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) emit_count_.DeleteAthenaArray();
+  if (importance.GetSize() > 0) importance.DeleteAthenaArray();
+  if (escape_prob.GetSize() > 0) escape_prob.DeleteAthenaArray();
   if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
     planck_opacity.DeleteAthenaArray();
     planck_inv_opacity.DeleteAthenaArray();
@@ -598,6 +608,8 @@ void MonteCarloBlock::PackForTransfer(std::vector<int> &ib, std::vector<Real> &r
   PackI64(ib, ndes);
   PackI64(ib, nscat);
   PackI64(ib, nrem);
+  PackI64(ib, nsplit);
+  PackI64(ib, nroul);
   PackI64(ib, lb_nstep);
   ib.push_back(i1_);
   ib.push_back(i2_);
@@ -606,6 +618,10 @@ void MonteCarloBlock::PackForTransfer(std::vector<int> &ib, std::vector<Real> &r
   rb.push_back(minweight);
   rb.push_back(emiss_to_weight);
   rb.push_back(lb_time);
+  rb.push_back(wesc_sum);
+  rb.push_back(wesc_sq);
+  PackArray(rb, importance);
+  PackArray(rb, escape_prob);
   PackArray(rb, moments);
   PackArray(rb, moments_com);
   PackArray(rb, moments_coord);
@@ -653,6 +669,8 @@ void MonteCarloBlock::UnpackFromTransfer(const std::vector<int> &ib,
   ndes = UnpackI64(ib, pi);
   nscat = UnpackI64(ib, pi);
   nrem = UnpackI64(ib, pi);
+  nsplit = UnpackI64(ib, pi);
+  nroul = UnpackI64(ib, pi);
   lb_nstep = UnpackI64(ib, pi);
   i1_ = ib.at(pi++);
   i2_ = ib.at(pi++);
@@ -661,6 +679,10 @@ void MonteCarloBlock::UnpackFromTransfer(const std::vector<int> &ib,
   minweight = rb.at(pr++);
   emiss_to_weight = rb.at(pr++);
   lb_time = rb.at(pr++);
+  wesc_sum = rb.at(pr++);
+  wesc_sq = rb.at(pr++);
+  UnpackArray(rb, pr, importance, "importance");
+  UnpackArray(rb, pr, escape_prob, "escape_prob");
   UnpackArray(rb, pr, moments, "moments");
   UnpackArray(rb, pr, moments_com, "moments_com");
   UnpackArray(rb, pr, moments_coord, "moments_coord");
@@ -716,7 +738,10 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
   ppusher->Move(pphot,0,pphot->nphot-1);
 
   for (int ip=pphot->nphot-1; ip >= 0; ip--) {
-    if (pphot->statp[ip] != EVOLVING) {
+    if (pphot->statp[ip] == EVOLVING) {
+      // rays do not interact, so an exhausted flight is simply redrawn
+      pphot->taup[ip] = -1.;
+    } else {
 
       if (pphot->statp[ip] != BUFFERED) {
         // Bring the Stokes parameters up to date with the transported coherency tensor
@@ -740,6 +765,8 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
           pphlist->AddPhoton(pphot,ip);
         }
         nesc++;
+        wesc_sum += pphot->wp[ip];
+        wesc_sq += SQR(pphot->wp[ip]);
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
@@ -776,6 +803,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
 
   int nold = pphot->nphot;
   const int64_t navail = static_cast<int64_t>(nold) + nphremain;
+  const bool window = (pmy_mc->wwin_top > 0. || pmy_mc->wwin_bottom > 0.);
 
   // Emit photons to replace those that left meshblock or were terminated
   // limit ntot < loop_max_size unless nold is larger than loop_max_size
@@ -804,6 +832,12 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       }
       TransformToCoordinate(pphot,nold,pphot->nphot-1);
     }
+    if (window) {
+      for (int ip = nold; ip < pphot->nphot; ip++) {
+        const Real c = WindowCenter(pphot,ip);
+        pphot->wrefp[ip] = (c > 0.) ? pphot->wp[ip] / c : 0.;
+      }
+    }
 
     // Update the absorption and scattering extinction coefficients
     if (call_srcterms) {
@@ -826,8 +860,10 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
   //  pphot->PrintPhoton("after",0);
   //}
   //printf("%d done\n",pmy_block->gid);
-  // perform all absorption and scattering related tasks for all samples
+  // perform all absorption and scattering related tasks for all samples; copies the
+  // weight window appends are reached by the same loop
   for (int ip=0; ip<pphot->nphot; ip++) {
+    if (window && pphot->statp[ip] == EVOLVING) WeightWindow(pphot,ip);
     // record initial weight and direction
     Real weight0 = pphot->wp[ip];
     Real e_pre_scat = pphot->ep[ip];
@@ -838,17 +874,14 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
     if (pphot->statp[ip] == EVOLVING) {
       if (absorption_meth == ABSWEIGHT) {
         pphot->wp[ip] *= (pphot->scp[ip]/(pphot->scp[ip]+pphot->acp[ip]));
-        if(pphot->wp[ip] <= minweight) {
-          pphot->statp[ip] = ABSORBED;
-        }
+        if (pphot->wp[ip] <= minweight) RouletteOrAbsorb(pphot, ip);
       } else if (absorption_meth == ABSPROB) {
-        if (pran->uniform() > (pphot->scp[ip]/(pphot->scp[ip]+pphot->acp[ip])) )
+        if (pran->uniform() > (pphot->scp[ip]/(pphot->scp[ip]+pphot->acp[ip])) ) {
           pphot->wp[ip] = 0.;
-        pphot->statp[ip] = ABSORBED;
-      } else if (absorption_meth == ABSTAU) {
-        if(pphot->wp[ip] <= minweight) {
           pphot->statp[ip] = ABSORBED;
         }
+      } else if (absorption_meth == ABSTAU) {
+        if (pphot->wp[ip] <= minweight) RouletteOrAbsorb(pphot, ip);
       }
     } // status == evolving
 
@@ -874,8 +907,10 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         FromScatteringBasis(this, pphot, ip);
       nscat++;
       pphot->nscp[ip]++;
-      // Scattering starts a new free flight, so the capmove counter resets
+      // Scattering starts a new free flight
       pphot->nmvp[ip] = 0;
+      pphot->strp[ip] = 0.;
+      pphot->taup[ip] = -1.;
       if (pphot->nscp[ip] % pmy_mc->checkscat == 0) {
         //pphot->PrintPhoton("check scat",ip);
         // Check for possible infinite loop due to NaN in photon
@@ -929,6 +964,8 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
           pphlist->AddPhoton(pphot,ip);
         }
         nesc++;
+        wesc_sum += pphot->wp[ip];
+        wesc_sq += SQR(pphot->wp[ip]);
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
@@ -1167,9 +1204,8 @@ void MonteCarloBlock::UpdateMoments(Photon *pphot, Real dl, int ip) {
       weight_scat = wp * e_scat * dl * shift / c_cgs;
     } else {
       // Without boosts the lab (normal-observer) frame is the comoving frame, so both
-      // the bin and the weight take the lab energy.  In flat spacetime sl.e is ep; in
-      // GR it is alpha k^t, and binning on ep put the source term 1/alpha too high in
-      // energy.
+      // the bin and the weight take the lab energy: ep in flat spacetime, alpha k^t
+      // in GR.
       const PhotonFrameState &sl = frames.Get(MCFRAME_LAB);
       e_scat = sl.e;
       weight_scat = wp * sl.e * sl.dl / c_cgs;
@@ -1938,6 +1974,138 @@ void MonteCarloBlock::ComputeEmissionArray(int etype, Real &em_min, Real &em_max
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void InterpCell(Real x, Real xl, Real xr, int i, int is, int ie, int &i0, Real &t)
+//! \brief the lower cell of the pair of centres bracketing x in cell i (faces xl, xr)
+//! and the weight of the upper one; both clamped to the active range
+
+static void InterpCell(Real x, Real xl, Real xr, int i, int is, int ie, int &i0,
+                       Real &t) {
+  const Real f = (x - 0.5*(xl+xr)) / (xr - xl);  // -0.5 .. 0.5 about the centre
+  if (f < 0.) {
+    i0 = i - 1; t = f + 1.;
+  } else {
+    i0 = i; t = f;
+  }
+  if (i0 < is) { i0 = is; t = 0.; }
+  if (i0 >= ie) { i0 = ie; t = 0.; }
+  t = std::min(std::max(t, 0.), 1.);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const
+//! \brief the weight the biased emission gives the sample's cell: the average sample
+//! weight over the mixed importance, taken at the escape-table group of the sample's
+//! energy when wwin_energy is set and per cell otherwise
+
+Real MonteCarloBlock::WindowCenter(Photon *pphot, int ip) const {
+  // a flight carried from a neighbouring block can end in a ghost cell; the table
+  // covers active cells only, so use the nearest one
+  const int k = std::min(std::max(pphot->i3p[ip], ks), ke);
+  const int j = std::min(std::max(pphot->i2p[ip], js), je);
+  const int i = std::min(std::max(pphot->i1p[ip], is), ie);
+  Real imp;
+  const int ng = pmy_mc->nescape;
+  if (pmy_mc->wwin_energy && ng > 0 && escape_prob.GetSize() > 0) {
+    const Real lne = std::log(pphot->ep[ip]);
+    const AthenaArray<Real> &edges = pmy_mc->escape_lne;
+    int l = 0;
+    while (l < ng-1 && lne >= edges(l+1)) ++l;
+    Real p;
+    if (pmy_mc->wwin_interp) {
+      // trilinear in ln p between cell centres, so the reference is continuous across
+      // cell faces; constant beyond the block's outermost centres
+      int i0, j0, k0;
+      Real tx, ty, tz;
+      InterpCell(pphot->x1p[ip], pcoord->x1f(i), pcoord->x1f(i+1), i, is, ie, i0, tx);
+      InterpCell(pphot->x2p[ip], pcoord->x2f(j), pcoord->x2f(j+1), j, js, je, j0, ty);
+      InterpCell(pphot->x3p[ip], pcoord->x3f(k), pcoord->x3f(k+1), k, ks, ke, k0, tz);
+      const int i1 = std::min(i0+1, ie), j1 = std::min(j0+1, je), k1 = std::min(k0+1, ke);
+      auto lp = [&](int kk, int jj, int ii) {
+        return std::log(escape_prob(kk-ks,jj-js,ii-is,l));
+      };
+      const Real c00 = (1.-tx)*lp(k0,j0,i0) + tx*lp(k0,j0,i1);
+      const Real c01 = (1.-tx)*lp(k0,j1,i0) + tx*lp(k0,j1,i1);
+      const Real c10 = (1.-tx)*lp(k1,j0,i0) + tx*lp(k1,j0,i1);
+      const Real c11 = (1.-tx)*lp(k1,j1,i0) + tx*lp(k1,j1,i1);
+      const Real c0 = (1.-ty)*c00 + ty*c01, c1 = (1.-ty)*c10 + ty*c11;
+      p = std::exp((1.-tz)*c0 + tz*c1);
+    } else {
+      p = escape_prob(k-ks,j-js,i-is,l);
+    }
+    imp = (1. - pmy_mc->bias_mix) + pmy_mc->bias_scale * p;
+  } else {
+    imp = importance(k,j,i);
+  }
+  if (!(imp > 0.) || !std::isfinite(imp)) return 0.;
+  return emiss_to_weight / imp;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::WeightWindow(Photon *pphot, int ip)
+//! \brief the window is set for each sample by its weight over the centre at emission,
+//! so it acts only on the change since then.  A sample above it is split into
+//! equal-weight copies at the same state, one below it survives at the window's
+//! reference with probability weight/reference or is absorbed carrying no weight.  The
+//! expected weight is unchanged either way.
+
+void MonteCarloBlock::WeightWindow(Photon *pphot, int ip) {
+  const Real ref = WindowCenter(pphot,ip) * pphot->wrefp[ip];
+  if (!(ref > 0.) || !std::isfinite(ref)) return;
+  const Real w = pphot->wp[ip];
+  if (pmy_mc->wwin_top > 0. && w > pmy_mc->wwin_top * ref) {
+    int m = static_cast<int>(std::ceil(w / ref));
+    m = std::min(m, pmy_mc->wwin_max_split);
+    if (m > 1) {
+      const int nold = pphot->nphot;
+      pphot->AllocatePhotons(nold + m - 1);
+      pphot->wp[ip] = w / m;
+      for (int n = 0; n < m-1; ++n) pphot->CopyPhoton(ip, nold + n);
+      nsplit += m - 1;
+    }
+  } else if (pmy_mc->wwin_bottom > 0. && w < pmy_mc->wwin_bottom * ref) {
+    if (pran->uniform() < w / ref) {
+      pphot->wp[ip] = ref;
+    } else {
+      pphot->wp[ip] = 0.;
+      pphot->statp[ip] = ABSORBED;
+    }
+    nroul++;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip)
+//! \brief a sample below the minimum weight survives with probability roulette and
+//! carries 1/roulette times its weight, or is absorbed; the expected weight is unchanged
+
+void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip) {
+  const Real p = pmy_mc->roulette;
+  if (p > 0. && pran->uniform() < p)
+    pphot->wp[ip] /= p;
+  else
+    pphot->statp[ip] = ABSORBED;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::SampleDensity(int k, int j, int i) const
+//! \brief the density samples are drawn on: emission, times importance when biased
+
+Real MonteCarloBlock::SampleDensity(int k, int j, int i) const {
+  if (pmy_mc->weight_scheme[0] == WEIGHTS_BIASED)
+    return emission(k,j,i) * importance(k,j,i);
+  return emission(k,j,i);
+}
+
+Real MonteCarloBlock::SampleDensityTotal() const {
+  Real tot = 0.;
+  for (int k=ks; k<=ke; ++k)
+    for (int j=js; j<=je; ++j)
+      for (int i=is; i<=ie; ++i)
+        tot += SampleDensity(k,j,i);
+  return tot;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::ComputeEmissionSampleArray()
 //! \brief compute emission array for equal weight scheme
 
@@ -1953,8 +2121,8 @@ void MonteCarloBlock::ComputeEmissionSampleArray() {
     for (int j=js; j<=je; ++j) {
       for (int i=is; i<=ie; ++i) {
         int n = (k-ks)*nx2*nx1 + (j-js)*nx1 + i-is;
-        prob[n] = emission(k,j,i);
-        total_emission += emission(k,j,i);
+        prob[n] = SampleDensity(k,j,i);
+        total_emission += prob[n];
       }
     }
   }
@@ -1999,7 +2167,7 @@ void MonteCarloBlock::ComputeEmissionSampleArray() {
 
 void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
 
-  if (pmy_mc->emission_eqwt[0]) {
+  if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) {
     // Set intial cell based on probability within cell
 
     for (int ip=ips; ip<=ipe; ip++) {
@@ -2032,6 +2200,8 @@ void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
       } // end while (!this_zone)
       // Set weight to constant value for all photons
       pphot->wp[ip] = emiss_to_weight;
+      if (pmy_mc->weight_scheme[0] == WEIGHTS_BIASED)
+        pphot->wp[ip] /= importance(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
 
     } // end loop over ip
   } else {
@@ -2057,7 +2227,7 @@ void MonteCarloBlock::SetEmissionCellWeight(Photon *pphot, int ips, int ipe) {
 void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face, int ips,
                                                 int ipe) {
 
-  if (pmy_mc->emission_eqwt[0]) {
+  if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) {
     // Set intial cell based on probability within cell
     for (int ip=ips; ip<=ipe; ip++) {
       bool i1flag = true;
@@ -2140,6 +2310,8 @@ void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face
       } // end while (!this_zone)
       // Set weight to constant value for all photons
       pphot->wp[ip] = emiss_to_weight;
+      if (pmy_mc->weight_scheme[0] == WEIGHTS_BIASED)
+        pphot->wp[ip] /= importance(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
 
     } // end loop over ip
   } else {

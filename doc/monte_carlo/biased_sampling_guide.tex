@@ -1,0 +1,447 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\newcommand{\key}[1]{\texttt{#1}}
+
+\title{Biased sampling in the Monte Carlo module:\\ algorithms, parameters and when to use them}
+\author{Athena++ Monte Carlo radiation transport}
+\date{}
+
+\begin{document}
+\sloppy
+\maketitle
+
+\section{The estimator and what biasing may change}
+
+Every escaping sample contributes its weight $w$ to the spectrum. The run estimates a
+band flux as $F = \sum_{\rm esc} w$ and its statistical error as
+$\sigma_F = \sqrt{\sum_{\rm esc} w^2}$, both sums over the samples landing in the band.
+The sampling is unbiased when the expectation of $\sum w$ over all escaping samples equals
+the true escaping luminosity, whatever the individual weights are.
+
+Every feature described here changes \emph{where samples are drawn and how often they
+interact}, and compensates by changing their weights so that the expectation is untouched.
+None of them changes the answer; all of them change the error, the cost, or both. The
+right way to compare two settings is the figure of merit of the band you care about,
+\begin{equation}
+  \mathrm{FoM} = \frac{1}{(\sigma_F/F)^2\, t_{\rm cpu}},
+\end{equation}
+which is what a setting buys per CPU second. The global effective sample count printed by
+the run, $(\sum w)^2/\sum w^2$ over all escaping samples, is the same statistic for the
+bolometric luminosity and is dominated by the heaviest samples wherever they land in the
+spectrum; it is a check for pathology, not a measure of the hard band.
+
+\section{Sample allocation: \key{weights}}
+
+\key{<montecarlo> weights} selects how emission cells are drawn.
+\begin{description}
+\item[\key{emission}] cells are drawn uniformly and the cell's emission goes into the
+  weight. Cheap to set up and the weights follow the emissivity, which varies by orders
+  of magnitude across a disk.
+\item[\key{equal}] cells are drawn in proportion to their emission; every sample starts
+  with the same weight $E/N$, the total emission over the number of samples. This is the
+  natural analog scheme and the reference for everything below.
+\item[\key{biased}] cells are drawn in proportion to emission times a per-cell importance
+  $I$, and the weight is divided by $I$: $w = (S/N)/I$ with $S = \sum_c E_c I_c$. Cells
+  the importance rates highly get more samples, each lighter. Unbiased for any positive
+  $I$.
+\end{description}
+The biased scheme is worth its setup when most of the emission happens where it cannot
+escape. In the X-ray binary disk over $99.9\%$ of the emission sits in cells of Thomson
+depth above 30 per cell, and the equal-weight run spends most of its samples on photons
+that are absorbed after hundreds of scatterings. With the escape-probability importance
+the samples are moved to the skin, and the soft band ($<0.3$~keV) gains a factor of three
+in error for twice the CPU.
+
+\section{The importance: escape probabilities}
+
+The importance the \key{mc\_readhdf\_gr} generator uses is an estimate of the probability
+that a photon emitted in the cell escapes without being absorbed. It is built from the
+effective extinction of a scattering, absorbing medium,
+$\kappa_{\rm eff} = \sqrt{3\alpha_a(\alpha_a+\alpha_s)}$, the inverse of the
+thermalization length, so that the cell's escape probability at energy group $l$ is
+\begin{equation}
+  p_l = \max\!\left(e^{-\tau_{l,\min}},\ \key{pesc\_min}\right),
+\end{equation}
+where $\tau_{l,\min}$ is the smallest column of $\kappa_{\rm eff}$ from the cell to the
+domain boundary along the six axis directions. The cell's own contribution is not its
+full depth but $-\ln[(1-e^{-\tau_c})/\tau_c]$, the escape probability of a sample placed
+uniformly in it, without which a thick emitting skin cell would be rated unable to emit
+at all.
+
+The cell importance is the spectrum-weighted mean of $p_l$ over the groups,
+\begin{equation}
+  I = \frac{\sum_l s_l\, p_l}{\sum_l s_l},
+\end{equation}
+with $s_l = e^{-x}\Delta\ln E$ for free-free emission ($x = E/kT$) and the table's photon
+shares for table emission.
+
+\paragraph{Where the columns come from.} Without a file the columns are integrated within
+each block only, which overstates escape in the face layer of every block, one cell in
+eight on a 16-cell block. \key{vis/python/montecarlo/escape\_table.py} integrates them
+through the whole mesh and writes the per-group probabilities on the snapshot's block
+structure; \key{<problem> escape\_file} reads that file. Use the file for any production
+run; the block-local estimate is for tests.
+
+\paragraph{Parameters.}
+\begin{center}
+\begin{tabular}{@{}llp{3.1in}@{}}
+\toprule
+key & default & meaning \\
+\midrule
+\key{<problem> nescape} & 32 & energy groups of the free-free table (table emission uses its own grid) \\
+\key{<problem> pesc\_min} & $10^{-10}$ & floor on $p_l$; bounds the weight a deep sample can carry at $(S/N)/\key{pesc\_min}$ \\
+\key{<problem> escape\_file} & none & global escape table from \key{escape\_table.py} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\key{pesc\_min} rarely needs changing. A deep sample with $I = \key{pesc\_min}$ carries
+an enormous weight but almost never escapes; the composite mixing of the cell draw
+(\key{bias\_mix}) and of the energy draw (\key{bias\_energy\_mix}) is the tool that
+bounds it, not the floor.
+
+\paragraph{What this importance is and is not.} It is the probability of escaping at all,
+which is the right importance for the soft flux that leaves the skin directly. It is not
+the probability of escaping \emph{in a given band}: in the X-ray binary the photons above
+10~keV are emitted at $3$--$10\times10^6$~K a few scattering depths in, and scatter
+400--600 times before leaving. Those cells have $I \sim 10^{-3}$, so their samples carry
+$10^3$ times the skin weight, and the few that come out hard dominate the hard-band error.
+The weight window (Section~\ref{sec:window}) is the correction for that; a
+band-specific importance would need a tally from a previous run and is not implemented.
+
+\section{Energy biasing in \key{PhotonEmitFreeFree}: \key{bias\_energy}}
+\label{sec:energy}
+
+The free-free sampler draws $\ln E$ uniformly over the cell's range ($x$ from
+\key{tfloor} to \key{tceiling} in units of $kT$) and puts the spectrum into the weight,
+$w \propto e^{-x}\,\Delta\ln E$. This deliberately oversamples the Wien tail relative to
+its share of the emission, by $e^{x}$, so that a hard band has samples at all.
+
+With an escape table and \key{bias\_energy = true} (the default in the biased scheme),
+group $l$ is drawn with probability proportional to its overlap $d_l$ with the cell's
+range times
+\begin{equation}
+  m_l = (1-\xi_E) + \xi_E\,\frac{p_l}{\langle p\rangle},
+  \qquad \langle p\rangle = \frac{\sum_l d_l p_l}{\sum_l d_l},
+\end{equation}
+and the weight measure becomes $\Delta\ln E / m_l$ instead of the flat $\Delta\ln E$.
+$\xi_E$ is \key{<montecarlo> bias\_energy\_mix}, which follows \key{bias\_mix} unless
+set. Groups that can escape get more samples, each lighter; the expectation is
+unchanged; and no sample's measure exceeds $1/(1-\xi_E)$ times the flat one, which is
+the same bound the composite mixing of the next section puts on the cell weight. The
+table sampler of \key{mc\_readhdf\_gr} does the same with the table's photon shares in
+place of $d_l$. This helps where absorption is strongly energy dependent, as free-free
+absorption ($\propto \nu^{-3}$) is: the soft groups of a skin cell are absorbed and the
+hard ones escape, and the biased draw stops spending samples on the former.
+
+\paragraph{Why the bound is needed.} At $\xi_E = 1$ the measure is
+$\langle p\rangle\Delta\ln E/p_l$, and a group the table holds at the \key{pesc\_min}
+floor is drawn $10^{10}$ times less often than one that escapes freely. The table rates
+a sample by its birth energy in its birth cell and cannot see what scattering does to
+it afterwards. On the X-ray binary that is exactly the class the hard bands are made of:
+photons born at 0.1--0.25~keV in $10^6$~K gas that come out at 0.3--10~keV after
+Compton upscattering, from cells where the table has the 32--100~eV band at the floor
+in 13\% of cases and the 100--316~eV band there in 3\%. In expectation they are still
+counted, but through samples so rare that a run of $10^7$ photons never draws one,
+and when one does arrive it is a giant (the 2941-copy family of
+Section~\ref{sec:window} was one). The biased run was 8--24\% low from 0.3 to 10~keV
+against the emission run for this reason, with no other difference between the inputs
+(Section~\ref{sec:xrb}). With $\xi_E = 0.9$ the suppression is at most tenfold and the
+class is sampled. On an emission-only sphere (no absorption or scattering, so the
+escaping spectrum is the emission spectrum) with a synthetic table whose soft bands sit
+at the floor, $\xi_E = 0.9$ reproduces the equal-weight total and band shares to 0.3\%
+over four outputs of $10^6$ samples, while $\xi_E = 1$ comes out 9\% low with 30--70
+effective samples per output.
+
+Set \key{bias\_energy = false} to keep the cell allocation but draw energies as the
+other schemes do. That is the right choice when the escape probabilities are nearly flat
+in energy (pure scattering, or grey absorption), where the biased draw buys nothing and
+only adds weight spread, and it is the way to isolate the effect of the cell allocation
+in a test.
+
+\section{Composite mixing: \key{bias\_mix}}
+
+Pure importance sampling gives a cell of importance $I$ the weight $(S/N)/I$, which for a
+deep cell is unbounded above. Baes et al.\ (2016) mix the importance allocation with the
+equal-weight one: the sampling density becomes $(1-\xi)\,E_c/E + \xi\,E_c I_c/S$, so the
+weight of any cell is
+\begin{equation}
+  w_c = \frac{E/N}{(1-\xi) + \xi\, I_c E/S} \le \frac{1}{1-\xi}\,\frac{E}{N}.
+\end{equation}
+\key{<montecarlo> bias\_mix} is $\xi$; the default $0.99$ bounds every weight at 100
+equal weights; $1$ is pure importance sampling. The code applies the mix once, at the
+first initialization, by replacing the stored importance with $(1-\xi) + \xi I E/S$,
+so everything downstream (window centres included) sees the mixed value; later outputs
+of a \key{nout > 1} run reuse the mixed array and the reference weight recorded then.
+
+\paragraph{What it does and does not fix.} The bound acts on samples from cells whose
+$I E/S$ is below $1-\xi$: in the X-ray binary that is $I < 1.6\times10^{-7}$ at
+$\xi = 0.99$, the deep disk. Those samples are 1\% of the run, carry 100 equal weights,
+and the rare one that escapes lands in the 0.3--4~keV range, where seven such photons
+carried 8\% of the escaped luminosity in one run. Lowering $\xi$ to $0.9$ cuts their
+weight tenfold at the cost of 10\% of the samples drawn at equal weight, and an estimate
+from the photon list puts the gain at a factor of two in effective samples in the
+1--3~keV band and nothing elsewhere. The hard-band outliers come from cells with
+$I \sim 10^{-3}$, for which $I E/S \gg 1-\xi$ at any reasonable $\xi$; the mix cannot
+reach them.
+
+\paragraph{Choosing $\xi$.} $0.99$ when the run is dominated by the soft band; $0.9$ when
+the mid band matters; never below $0.5$, where half the samples go back to the analog
+allocation and the soft-band gain is lost. The reference weight for \key{minweight} is
+the importance-only average $S/N$, so it does not move with $\xi$.
+
+\section{Minimum weight and roulette: \key{minweight}, \key{roulette}}
+
+A sample whose weight falls below \key{minweight} times the reference weight ($E/N$ in
+the equal scheme, $S/N$ in the biased one, the maximum cell emission in the emission
+scheme) plays Russian roulette at its next interaction: it survives with probability
+\key{roulette} (default $0.1$) carrying $1/\key{roulette}$ times its weight, or is
+absorbed. This is unbiased and lets \key{minweight} be set high, $10^{-4}$ say, where
+the old absorb-outright rule would have biased the result; the point is to stop
+following samples whose weight has decayed under \key{abs\_method = weight} to where
+they cannot matter. With the weight window's floor on this roulette is never reached,
+since the window acts at a fraction of the birth weight rather than at $10^{-4}$ of it;
+it remains the only roulette in the emission and equal schemes.
+
+\section{Weight window: \key{wwin\_top}, \key{wwin\_bottom}, \key{wwin\_max\_split}}
+\label{sec:window}
+
+Importance sampling at emission gives the ideal weight only while a sample stays where it
+was born. A sample that random-walks from a cell of importance $10^{-3}$ to one of
+importance $0.1$ now carries a hundred times the weight of its neighbours; one walking
+the other way costs as much to push as ever while its expected contribution has become
+negligible. The window corrects both at every interaction:
+\begin{itemize}
+\item the sample's reference is the cell's window centre, $(S/N)$ over the mixed
+  importance at the sample's current energy group, times the sample's own ratio of weight
+  to centre at emission, stored in \key{Photon::wrefp};
+\item above \key{wwin\_top} times the reference the sample is split into
+  $\min(\lceil w/\mathrm{ref}\rceil, \key{wwin\_max\_split})$ equal copies at the same
+  state, which the transport loop scatters independently;
+\item below \key{wwin\_bottom} times the reference it survives at the reference with
+  probability $w/\mathrm{ref}$ or is absorbed carrying no weight.
+\end{itemize}
+Both bounds default to 0, which disables that side; the window needs
+\key{weights = biased} for its importance. The run report counts copies and roulettes.
+
+\paragraph{Why relative to the birth ratio.} A window set per cell alone would compare
+every sample with the cell's average weight. The energy sampler draws $\ln E$ flat and
+carries $e^{-x}$ in the weight, so Wien-tail samples are born far below any per-cell
+centre; such a window rouletted them wholesale and collapsed the 10--30~keV band of a
+test sphere to a single survivor, while splitting the soft samples at their first
+interaction. Referenced to each sample's birth ratio, the window acts only on the change
+since emission, migration between cells and energy groups and absorption decay, and
+leaves the emission's choices alone.
+
+\paragraph{Where the reference is taken.} The centre is taken at the sample's
+current energy group (\key{wwin\_energy}, default true): per cell, a hard photon
+entering a cooler cell is split although its own escape prospects did not change, and
+on a Compton sphere that made fifty times the copies. It is interpolated in $\ln p$
+between cell centres to the sample's position (\key{wwin\_interp}, default true): a
+cell-centred reference jumps by the neighbouring cells' importance ratio at every face,
+15 in the X-ray binary disk, while a random walker moves a fiftieth of a cell per
+scattering, so it is split and rouletted at every crossing, a fifth of all interactions.
+Interpolation halved the events on the sphere.
+
+\paragraph{Copies are correlated.} The copies of one birth photon share its history to
+the split, so the photon-level effective count and the quoted errors of a window run
+overstate the statistics badly: on one X-ray binary output a single birth photon's 2941
+escaping copies carried 27\% of the luminosity and 64\% of the 1--3~keV band, 22,745
+effective photons but 13 effective families. \key{family\_stats.py} groups the
+escaping photons by birth photon through the emission temperature and emitted energy
+columns and prints both counts, and \key{make\_spectrum.py --family-cols 0 1} writes
+family-level errors, the root of the sum of squared family totals per bin, which is the
+correct estimator with copies and reduces to the usual one without them; on the output
+above it raised the 1--3~keV error from 4\% to 34\%. The scatter between outputs of a
+\key{nout > 1} run is the error that needs neither.
+
+\paragraph{The floor amplifies importance errors.} A sample the table rates unlikely to
+escape is rouletted as it walks inward and its survivor carries $1/\key{wwin\_bottom}$
+per round; if the table is wrong and such samples do escape, a family that survived $n$
+rounds comes out with $4^n$ times the weight. Since the minimum-column escape
+probability underestimates diffusive and oblique escape by orders of magnitude, this is
+the origin of the giant families. On the cool Compton sphere the split alone reached
+26\% of the equal-weight figure of merit, both sides 11--13\%, and the biased scheme
+without a window 0.7\%. Start with \key{wwin\_top = 4}, \key{wwin\_bottom = 0}, and
+turn the floor on only against a measured importance.
+
+\paragraph{Choosing the bounds.} Copy counts approaching the number of interactions
+mean the window is churning; widen it or raise \key{wwin\_max\_split} only if the split
+is what is churning. The window is inert in a problem where samples do not migrate in
+importance: a thin medium, or one where the importance is nearly uniform.
+
+\section{Path stretching: \key{stretch}, \key{stretch\_taucell}, \key{stretch\_bound}}
+
+Free paths are drawn with the extinction multiplied by $\alpha = \key{stretch}$, and the
+weight carries the ratio of true to stretched survival, $e^{(\alpha-1)\tau}$ over the
+depth flown since the last interaction, with a further factor $1/\alpha$ at the
+interaction itself. A sample crossing a thin layer of depth $\tau$ then interacts with
+probability $1 - e^{-\alpha\tau}$ instead of $1 - e^{-\tau}$, at proportionally lower
+weight. The scheme is exact for any $\alpha$ that depends on position and on the
+sample's history, which is what allows the two controls:
+\begin{itemize}
+\item \key{stretch\_taucell} (default unlimited) applies the multiplier only in cells
+  whose depth across their smallest width is below the value, so a thick disk stays
+  analog and its cost does not rise by $\alpha$;
+\item \key{stretch\_bound} (default 10) caps the weight factor one flight may gain,
+  after which the flight continues analog.
+\end{itemize}
+\key{Photon::strp} holds the flight's log weight factor and \key{Photon::taup} the depth
+left in the flight, carried across blocks so that a flight whose interaction point lies
+on a neighbouring block interacts there. Before \key{taup} existed such interactions were
+redrawn on the new block and thereby skipped, about 1.6\% of them on a 16-cell block; with
+stretching that was a bias of several percent, and in analog transport it delayed those
+scatterings. The fix applies to every scheme.
+
+\paragraph{When it helps.} When the observable comes from photons that cross a thin
+scattering layer once or twice: a corona of $\tau \sim 0.3$ over a cool source, where
+the analog run wastes most samples on photons that pass through unscattered. In a sphere
+of $\tau = 0.9$ inside a $\tau = 0.3$ shell at $10^9$~K, \key{stretch = 2} confined to
+the shell halved the Comptonized-tail errors for 8\% more CPU. The gain compounds over
+the scatterings that make a tail photon, so larger values lose: 3 gained nothing more and
+5 tripled the errors, and applying it to the sphere as well as the shell was worse still.
+
+\paragraph{When it does not.} When the hard photons are made by long random walks in
+thick hot gas rather than by single crossings of a thin layer. In the X-ray binary the
+hard band is built by 400--600 scatterings in cells of Thomson depth 30--100, no thin
+corona is crossed, and \key{stretch = 2} on the cells below depth 0.03 changed the
+hard-band errors only by noise for 6\% more CPU. Leave it off unless the geometry has a
+genuine thin layer and the target photons cross it a few times.
+
+\section{Reading the diagnostics}
+
+The run report prints, per output interval, the escaped weight and its effective sample
+count, the counts of escaped, absorbed and removed samples, the mean scattering count,
+and when active the window's copy and roulette counts and the stretching settings.
+\begin{itemize}
+\item The escaped weight must agree between settings within its error; the scheme is
+  unbiased and any drift of several sigma is a bug.
+\item The global effective count is set by the heaviest samples. In the X-ray binary it
+  moved from 6372 to 1263 between two runs of the same settings because one deep-cell
+  photon escaped in one and not the other. Compare per-band errors, from the spectrum
+  file or from the photon list, and divide by CPU.
+\item A photon list with the user columns (emission temperature, emitted energy,
+  scattering count) tells where the heavy samples come from, which decides which tool
+  applies: mixing for deep-cell outliers, the window for climbers, stretching for
+  crossers.
+\item The error $\sqrt{\sum w^2}$ is itself a sample estimate, and with heavy-tailed
+  weights it is biased low: the samples that would dominate it are the ones the run
+  did not draw. On a cool, dense sphere five seeds of the same biased-window run
+  scattered by 1.5\% while each quoted 0.3\%, and the hundred heaviest escaping
+  photons carried 20--50\% of $\sum w^2$; the equal-weight run quoted 0.24\% and
+  scattered by 0.2\%. A quoted error is trustworthy only when no small group of
+  photons dominates $\sum w^2$. When one does, run with \key{nout > 1} and take the
+  scatter between the outputs' spectra as the error, which assumes nothing about the
+  weights; \key{combine\_spectra.py -m time} averages them afterwards.
+\item The quoted error can also come out too large. The emission scheme hands every
+  block the same number of samples, so its sampling is stratified by block, and
+  $\sum w^2$, which assumes independent draws, overstates the variance: on the X-ray
+  binary the emission run's quoted errors were 1.4 to 3 times the scatter between its
+  four outputs. The scatter is the measurement; the quoted error is a bound whose
+  direction depends on the scheme.
+\item Runs that share \key{iseed} draw the same cells and are not independent. Two
+  emission runs with the same seed agreeing to 2\% says nothing about their errors,
+  and a shape difference between schemes that recurs across such runs is not thereby
+  confirmed. Change the seed when a repeat is meant as a check.
+\end{itemize}
+
+\section{What the X-ray binary runs showed}
+\label{sec:xrb}
+
+The schemes were compared on the high-resolution snapshot with four outputs of
+$2.5\times10^6$ samples each, so that every error is the scatter between outputs. The
+biased run used the global escape table, \key{bias\_mix = 0.9}, the split-only window
+(\key{wwin\_top = 4}, \key{wwin\_bottom = 0}) with the interpolated reference, and no
+stretching; the emission run was the standard input. CPU: biased $3.85\times10^6$~s,
+emission $2.46\times10^5$~s, a ratio of 15.7.
+
+\begin{center}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+band [keV] & emission & biased & flux ratio & FoM biased/emission \\
+\midrule
+0.01--0.03 & 4.8\% & 4.1\% & 1.07 & 0.09 \\
+0.03--0.1  & 2.3\% & 1.6\% & 1.13 & 0.14 \\
+0.1--0.3   & 2.4\% & 0.6\% & 1.02 & 1.06 \\
+0.3--1     & 2.1\% & 0.7\% & 0.93 & 0.69 \\
+1--3       & 2.8\% & 1.6\% & 0.94 & 0.21 \\
+3--10      & 6.8\% & 7.0\% & 0.82 & 0.06 \\
+10--30     & 5.9\% & 6.9\% & 0.98 & 0.05 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The biased run's errors are honest: scatter, family-level and photon-level estimates
+agree, the family-level effective counts are 4000--6000 per output overall and
+700--1500 in the 1--3~keV band, and no family carries more than 1\% of an output. Its
+absolute errors are smaller in the soft and middle bands, by four times at 0.1--0.3~keV,
+but that is what sixteen times the CPU would buy the emission scheme anyway, and in the
+hard bands, where the hard photons are made by hundreds of scatterings in deep hot gas,
+the split copies' walks buy nothing. Per unit CPU the biased scheme breaks even only at
+0.1--0.3~keV. For this problem the emission scheme is the production tool.
+
+The two schemes also disagreed on the spectral shape by more than either's scatter,
+the biased run 6\% higher at 30--100~eV and 9, 8 and 24\% lower at 0.3--1, 1--3 and
+3--10~keV. A second emission run with a different seed reproduced the first in every
+band, and an equal-weight run could not arbitrate (0.06\% of its samples escape, 60
+effective). Binning both runs' lists by birth temperature and emitted energy put the
+whole deficit in photons born at 0.1--0.25~keV in $6\times10^5$--$10^6$~K gas that
+escape two to ten times harder, which the energy draw at $\xi_E = 1$ with the
+\key{pesc\_min} floor effectively never samples
+(Section~\ref{sec:energy}); the emission run is right there, and
+\key{bias\_energy\_mix} is the fix. The emission run's weights are the heavy-tailed ones
+(130--600 effective photons per band against thousands of families for the biased run)
+but that skews it low, not high, so it cannot be the source of the difference. The
+biased run above was made before the mixed energy draw existed. A rerun with
+\key{bias\_energy\_mix = 0.9} and $1.25\times10^6$ samples per output brought the total
+onto the emission value and the 0.3--1 and 1--3~keV bands to within $1\sigma$ of it
+after two outputs, at three times the old run's scatterings per output, since the
+recovered photons are the ones that scatter hundreds of times; 3--10~keV stayed 20\%
+low at $2\sigma$, where the emission run itself rests on about 60 effective photons per
+output.
+
+What the biased scheme would need here is an importance for the hard band, which the
+escape probability is not. The cheap experiment not yet run is a floor at
+\key{wwin\_bottom = 0.1} with the interpolated reference, which should fire only on
+genuine inward migration and could cut the CPU several-fold; even so the scheme would
+stay behind the emission run outside 0.1--1~keV. The machinery stays useful where it
+fits: the family-level errors and the output scatter for any run, the carried flight
+budget for all transport, and the window and stretching for problems with a genuine
+thin scattering layer or an importance that varies gently from cell to cell.
+
+\section{Settings that were tested on the X-ray binary}
+
+These are the settings of the biased run above, kept as the reference configuration
+for the biased scheme; see the previous section before choosing it over
+\key{weights = emission} for this problem.
+
+\begin{center}
+\begin{tabular}{@{}llp{2.6in}@{}}
+\toprule
+key & value & why \\
+\midrule
+\key{weights} & \key{biased} & emission is deep; samples belong at the skin \\
+\key{<problem> escape\_file} & from \key{escape\_table.py} & block-local columns overstate escape at block faces \\
+\key{bias\_energy} & \key{true} & free-free absorption is strongly energy dependent \\
+\key{bias\_energy\_mix} & 0.9 & bounds the energy weight factor at 10; at 1 the run above lost the soft-born upscattered photons \\
+\key{bias\_mix} & 0.9--0.99 & 0.9 helps the 1--3~keV band; nothing below 0.5 \\
+\key{minweight}, \key{roulette} & $10^{-4}$, 0.1 & harmless with the window; the only floor without it \\
+\key{wwin\_top}, \key{wwin\_bottom} & 4, 0 & splits climbers; the floor amplifies table errors \\
+\key{wwin\_max\_split} & 8 & default \\
+\key{stretch} & 1 & no thin corona to cross \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+And for a cool source under a thin hot corona: \key{weights = equal} or \key{biased} as
+the source's depth demands, \key{stretch = 2}, \key{stretch\_taucell} between the
+corona's and the source's cell depths, window on if biased.
+
+\end{document}

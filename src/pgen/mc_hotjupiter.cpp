@@ -312,7 +312,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   if (nion > 0) {
     ion_str = etype;
     nsamp += nsamptype[etype] = nion;
-    emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "ion_eqwt",true);
+    weight_scheme[etype] = pin->GetOrAddBoolean("problem", "ion_eqwt",true) ? WEIGHTS_EQUAL : WEIGHTS_EMISSION;
     initialize_comoving[etype] = false; // ions initialized in lab frame
     std::string abs_meth = pin->GetOrAddString("problem","ion_str_abs","tau");
     absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
@@ -325,14 +325,14 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
                 << std::endl;
       std::cout << "nion: " << nion << std::endl;
       std::cout << "absortion method: " << abs_meth << std::endl;
-      std::cout << "equal weight: " << emission_eqwt[etype-1] << std::endl;
+      std::cout << "equal weight: " << (weight_scheme[etype-1] == WEIGHTS_EQUAL) << std::endl;
       std::cout << "etype: " << etype-1 << std::endl << std::endl;
     }
   }
   if (nlyastr > 0) {
     lya_str = etype;
     nsamp += nsamptype[etype] = nlyastr;
-    emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "lys_eqwt",true);
+    weight_scheme[etype] = pin->GetOrAddBoolean("problem", "lys_eqwt",true) ? WEIGHTS_EQUAL : WEIGHTS_EMISSION;
     initialize_comoving[etype] = false; // stellar  initialized in lab frame
     std::string abs_meth = pin->GetOrAddString("problem","lya_str_abs","weight");
     absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
@@ -345,14 +345,14 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
                 << std::endl;
       std::cout << "nlyastr: " << nlyastr << std::endl;
       std::cout << "absortion method: " << abs_meth << std::endl;
-      std::cout << "equal weight: " << emission_eqwt[etype-1] << std::endl;
+      std::cout << "equal weight: " << (weight_scheme[etype-1] == WEIGHTS_EQUAL) << std::endl;
       std::cout << "etype: " << etype-1 << std::endl << std::endl;
     }
   }
   if (nlyarec > 0) {
     lya_rec = etype;
     nsamp += nsamptype[etype] = nlyarec;
-    emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "lyr_eqwt",false);
+    weight_scheme[etype] = pin->GetOrAddBoolean("problem", "lyr_eqwt",false) ? WEIGHTS_EQUAL : WEIGHTS_EMISSION;
     initialize_comoving[etype] = true; // recomb. lyman alpha initialized in comoving frame
     std::string abs_meth = pin->GetOrAddString("problem","lya_rec_abs","weight");
     absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
@@ -364,7 +364,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
                 << std::endl;
       std::cout << "nlyarec: " << nlyarec << std::endl;
       std::cout << "absortion method: " << abs_meth << std::endl;
-      std::cout << "equal weight: " << emission_eqwt[etype] << std::endl;
+      std::cout << "equal weight: " << (weight_scheme[etype] == WEIGHTS_EQUAL) << std::endl;
       std::cout << "etype: " << etype << std::endl << std::endl;
     }
   }

@@ -47,8 +47,8 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
 
   for (int ip=ips; ip<=ipe; ip++) {
 
-    // get number of mean free paths photon will travel
-    Real tauremaining = GetOpticalDepth(pran);
+    // budget of mean free paths for this flight, carried across blocks
+    Real tauremaining = (pphot->taup[ip] >= 0.) ? pphot->taup[ip] : GetOpticalDepth(pran);
 
     Real& kx = pphot->k1p[ip];
     Real& ky = pphot->k2p[ip];
@@ -109,8 +109,10 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
       NextFace(dlx,dly,dlz,face,dl);
       // set total extinction coefficient
       Real chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
+      const Real alpha = StretchFactor(pphot,ip,chi,dl);
+      const Real chi_str = alpha * chi;
 
-      if ((chi > 0.) && (dl*l_cgs > tauremaining / chi)) { // Photon remains in cell
+      if ((chi > 0.) && (dl*l_cgs > tauremaining / chi_str)) { // Photon remains in cell
         bool accel_success = false;
         if (acceleration) {
           Real dist;
@@ -134,7 +136,7 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
           if (pphot->statp[ip] != EVOLVING)
             break;
           // compute distance remaining in cell
-          dl = tauremaining / chi / l_cgs;
+          dl = tauremaining / chi_str / l_cgs;
           pphot->dtp[ip] -= dl / c_code; // SWD: set with k0p instead
 
   
@@ -148,7 +150,9 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
               pmcb->UpdateMoments(pphot,dl_cgs,ip);
             }
           }
-          //pphot->wp[ip] *= etaua;
+          ApplyStretch(pphot,ip,alpha,chi*l_cgs*dl);
+          pphot->wp[ip] /= alpha;
+          tauremaining = 0.;
           // update position
           // k0p is the photon energy, not a unit time component: the coordinate time
           // advance over a path length dl is just dl (in units where c = 1).
@@ -182,7 +186,8 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
         pphot->x2p[ip] += pphot->k2p[ip] * dl;
         pphot->x3p[ip] += pphot->k3p[ip] * dl;
 
-        tauremaining -= chi * l_cgs * dl;
+        tauremaining -= chi_str * l_cgs * dl;
+        ApplyStretch(pphot,ip,alpha,chi*l_cgs*dl);
         pphot->dtp[ip] -= dl / c_code;
 
         // Perform any user work
@@ -202,6 +207,7 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
     // first step there.  Any other status is already terminal, REMOVED included, so this
     // cannot fire twice.
     pphot->nmvp[ip] = nmv0 + iter;
+    pphot->taup[ip] = tauremaining;
     pmy_mcb->lb_nstep += iter;
     // This photon is done with whatever cell it was in, so the scattering-moment
     // contribution held back for it becomes one squared term in the error.
