@@ -1,0 +1,766 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[round]{natbib}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+
+\newcommand{\dd}{\mathrm{d}}
+
+\title{Green's functions of the Kompaneets equation with absorption,\\
+and quantile tables for Monte Carlo sampling}
+\author{Notes on \texttt{research/kompaneets/kompaneets\_greens.py}}
+\date{September 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The modified random walk (MRW) acceleration of our Compton Monte Carlo replaces
+the many scatterings inside an optically thick sphere by a single step. That
+step samples an escape time, then samples the photon's energy change during
+that time from the Green's function of the Kompaneets equation. This document
+describes a new method for computing that Green's function, including an
+energy-dependent absorption sink such as free-free opacity. It also describes
+how the result is tabulated as quantiles for fast sampling.
+
+The Kompaneets equation is rewritten as a Fokker--Planck equation in
+$s=\ln x$. It is solved with an analytic short-time kernel at small Compton
+parameter $y$ and with a conservative, equilibrium-preserving finite-volume
+scheme at larger $y$. The solution agrees with Becker's (2003) exact solution
+to $2.5\times10^{-5}$ of the peak value, and with a direct Monte Carlo
+simulation of Compton scattering on Maxwellian electrons. The quantile tables
+reproduce the solver to better than $10^{-3}$ of the distribution width.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Purpose and overview}
+%======================================================================
+
+In an optically thick, uniform, isothermal sphere, a photon random-walks for
+roughly $\tau^2$ scatterings before escaping. An MRW step replaces this walk
+with two samples: the escape time from a known distribution
+\citep{fleck1984,min2009,robitaille2010}, and the photon's final energy.
+If the energy change and the spatial walk are statistically independent
+(Section~\ref{sec:separation}), the final energy follows the Green's function
+of the Kompaneets equation evaluated at the Compton parameter $y$
+accumulated during the escape time.
+
+The ingredients are:
+\begin{enumerate}
+\item an accurate Green's function $P_\Lambda(x_f,y\,|\,x_i)$ over the whole
+  range $10^{-6}\le y\le 15$ and $10^{-3}\le x_i\le 60$, including absorption
+  of strength $\Lambda$ (Sections~\ref{sec:formulation}--\ref{sec:numerics});
+\item the probability $S$ that the photon survives absorption;
+\item a table from which $x_f$ can be drawn with one uniform random number
+  and $S$ interpolated (Sections~\ref{sec:tables}--\ref{sec:sampling}).
+\end{enumerate}
+
+Section~\ref{sec:validation} summarises the tests, and
+Section~\ref{sec:limits} the range of validity. Section~\ref{sec:old} records
+the problems with the previous implementation (\texttt{compton\_greens.py})
+that motivated this work.
+
+%======================================================================
+\section{Formulation}\label{sec:formulation}
+%======================================================================
+
+\subsection{The Kompaneets equation}
+
+Let $x=h\nu/kT$ be the photon energy in units of the electron temperature and
+$\theta=kT/m_ec^2$. Define the Compton parameter
+\begin{equation}
+  y = \int \theta\, n_e\sigma_T c\,\dd t = \theta\,\tau_{\rm path},
+\end{equation}
+where $\tau_{\rm path}$ is the Thomson optical length of the photon's path.
+Neglecting induced scattering, which is valid for Monte Carlo photon packets
+in the linear regime, the occupation number obeys \citep{kompaneets1957}
+\begin{equation}\label{eq:kompaneets}
+  \frac{\partial n}{\partial y} = \frac{1}{x^2}\frac{\partial}{\partial x}
+  \left[x^4\left(\frac{\partial n}{\partial x}+n\right)\right].
+\end{equation}
+The first term is Doppler diffusion and the second is recoil. Photon number
+$\int x^2 n\,\dd x$ is conserved, and the equilibrium is the Wien spectrum
+$n\propto e^{-x}$.
+
+\subsection{Fokker--Planck form in $\ln x$}
+
+We work with $s=\ln x$ and the photon number per unit $\ln x$,
+\begin{equation}
+  P(s,y) = x^3 n, \qquad \int P\,\dd s = \int x^2 n\,\dd x .
+\end{equation}
+Substituting into \eqref{eq:kompaneets} gives a Fokker--Planck equation with
+unit diffusion coefficient:
+\begin{equation}\label{eq:fp}
+  \frac{\partial P}{\partial y} = \frac{\partial}{\partial s}
+  \left[\frac{\partial P}{\partial s} + V'(s)\,P\right],
+  \qquad V(s) = e^s - 3s .
+\end{equation}
+Equivalently, $\ln x$ diffuses with variance $2y$ and drifts at rate
+$3-x$ per unit $y$: Doppler upscattering dominates for $x<3$ and recoil for
+$x>3$. The equilibrium is
+\begin{equation}
+  P_W(s) = \tfrac12 e^{-V(s)} = \tfrac12 x^3e^{-x},
+  \qquad \int P_W\,\dd s = 1,
+\end{equation}
+the Wien spectrum per unit $\ln x$. We normalise the Green's function per
+photon, $P(s,0)=\delta(s-s_i)$ with $s_i=\ln x_i$. The occupation number in
+the normalisation of the old code ($\int x_f^2 n\,\dd x_f = x_i^2$) is
+$n = x_i^2 P/x_f^3$.
+
+\subsection{Morse potential and spectrum}
+
+The substitution $P=e^{-V/2}\psi$ turns \eqref{eq:fp} into an imaginary-time
+Schr\"odinger equation,
+\begin{equation}\label{eq:schrodinger}
+  \frac{\partial\psi}{\partial y} = \frac{\partial^2\psi}{\partial s^2} - U(s)\psi,
+  \qquad U = \frac{V'^2}{4}-\frac{V''}{2} = \frac{e^{2s}}{4}-2e^s+\frac94 ,
+\end{equation}
+with a Morse potential. Its spectrum has two discrete eigenvalues, $0$ (Wien)
+and $2$, and a continuum starting at $9/4$ (the value of $U$ as
+$s\to-\infty$). These are exactly the two residues and the branch cut in
+Becker's Laplace-inversion solution \citep[][see also \citealt{nagirner1997}]{becker2003},
+\begin{align}\label{eq:becker}
+  f_G(x,x_0,y) ={}& \frac{32}{\pi}\,e^{-9y/4}\,\frac{e^{(x_0-x)/2}}{x_0^2x^2}
+  \int_0^\infty e^{-u^2y}\,\frac{u\sinh(\pi u)}{(1+4u^2)(9+4u^2)}\,
+  W_{2,iu}(x_0)\,W_{2,iu}(x)\,\dd u \nonumber\\
+  &+ \frac{e^{-x}}{2} + \frac{e^{-x-2y}(2-x)(2-x_0)}{2x_0x},
+\end{align}
+with $P=x^3f_G$ and $W$ the Whittaker function. Equation~\eqref{eq:becker} is
+exact but awkward to use as a production method:
+\begin{itemize}
+\item at small $y$ the $u$-integral must be carried to $u\sim\sqrt{40/y}$, where
+  the integrand oscillates as $\cos(u\ln x)$;
+\item in the tails of the distribution the continuum and discrete terms cancel
+  to many digits.
+\end{itemize}
+We use it only as an independent check (Section~\ref{sec:validation}).
+
+\subsection{An exact moment identity}
+
+Multiplying \eqref{eq:fp} by $e^{-s}=1/x$ and integrating by parts gives
+$\dd\langle x^{-1}\rangle/\dd y = 1-2\langle x^{-1}\rangle$, hence
+\begin{equation}\label{eq:identity}
+  \left\langle \frac1x\right\rangle(y)
+  = \frac12 + \left(\frac1{x_i}-\frac12\right)e^{-2y},
+\end{equation}
+the projection onto the eigenvalue-2 mode. Together with photon-number
+conservation, this gives an exact test at every $(x_i,y)$.
+
+\subsection{Absorption}\label{sec:absorption}
+
+Let the absorption opacity be $\kappa_{\rm abs}(x)=\kappa_{\rm ff}(1)\,a(x)$
+with $a(1)=1$. Per unit $y$ the absorption rate is
+$\kappa_{\rm abs}/(\kappa_{\rm es}\theta)$, so \eqref{eq:fp} gains a sink
+term:
+\begin{equation}\label{eq:fpabs}
+  \frac{\partial P}{\partial y} = \frac{\partial}{\partial s}
+  \left[\frac{\partial P}{\partial s} + V' P\right] - \Lambda\,a(x)\,P,
+  \qquad
+  \Lambda = \frac{\kappa_{\rm ff}(x{=}1)}{\kappa_{\rm es}\,\theta}.
+\end{equation}
+$\Lambda$ is the quantity called \texttt{tfac} in the old code; it is
+computed by \texttt{lam\_freefree($\rho$,$T$)}. For free-free absorption
+with Gaunt factor 1 and stimulated emission,
+\begin{equation}
+  a(x) = \frac{1-e^{-x}}{x^3\,(1-e^{-1})} \;\approx\; \frac{1}{(1-e^{-1})\,x^2}
+  \quad (x\ll1).
+\end{equation}
+With absorption, $P_\Lambda$ is no longer normalised. Its integral is the
+survival fraction
+\begin{equation}
+  S(y) = \int P_\Lambda(s,y)\,\dd s .
+\end{equation}
+In \eqref{eq:schrodinger} the sink simply adds $\Lambda a$ to $U$.
+
+\subsection{Separation of energy and space in a uniform sphere}\label{sec:separation}
+
+In the diffusion approximation, the photon density $N(\mathbf r,x,t)$ in a
+uniform sphere obeys
+\begin{equation}
+  \frac{\partial N}{\partial t} = D\nabla^2 N
+  + n_e\sigma_Tc\,\theta\left(\mathcal K - \Lambda a\right)N,
+  \qquad D=\frac{c}{3n_e\sigma_T},
+\end{equation}
+where $\mathcal K$ is the Kompaneets operator. The spatial operator does not
+depend on $x$ (Thomson opacity), and $\mathcal K-\Lambda a$ does not depend
+on $\mathbf r$. The boundary conditions are also independent of $x$. So
+$N=R(\mathbf r,t)\,P_\Lambda(x,y(t))$, and the joint distribution of escape
+time $t$ and escape energy factorises:
+\begin{equation}
+  \frac{\dd^2 N_{\rm esc}}{\dd t\,\dd\ln x_f} = p_{\rm esc}(t)\;
+  P_\Lambda\!\left(\ln x_f,\,y(t)\,\middle|\,\ln x_i\right),
+  \qquad y(t)=\theta n_e\sigma_Tc\,t .
+\end{equation}
+Here $p_{\rm esc}$ is the escape-time distribution without absorption. The
+MRW step therefore:
+\begin{enumerate}
+\item samples $t$ (equivalently $\tau_{\rm path}$) from $p_{\rm esc}$;
+\item sets $y=\theta\tau_{\rm path}$;
+\item draws $x_f$ from $P_\Lambda/S$;
+\item multiplies the packet weight by $S(y)$.
+\end{enumerate}
+
+The factorisation requires:
+\begin{enumerate}
+\item $\kappa_{\rm abs}\ll\kappa_{\rm es}$, i.e.\ $\theta\Lambda a(x)\ll1$
+  at the relevant energies. Otherwise the spatial mean free path depends on
+  $x$.
+\item Negligible correlation between a scattering's energy change and the
+  photon's new direction. This fails for photons escaping after only a few
+  mean free paths (Section~\ref{sec:mc}).
+\end{enumerate}
+
+%======================================================================
+\section{Numerical method}\label{sec:numerics}
+%======================================================================
+
+The Green's function is computed in two regimes. For
+$y<y_s(x_i)$ an analytic short-time kernel is used. For $y\ge y_s$ a
+finite-volume solution of \eqref{eq:fpabs} is advanced from the kernel at
+$y_s$. Starting from the kernel, not a $\delta$-function, means the grid only
+has to resolve a distribution of width $\sqrt{2y_s}$.
+
+\subsection{Short-time kernel}\label{sec:kernel}
+
+For small $y$ the heat kernel of \eqref{eq:schrodinger} has the expansion
+$K_\psi = (4\pi y)^{-1/2}e^{-\Delta^2/4y}\,[1 - y\bar U + O(y^2)]$, where
+$\Delta=s-s_i$ and $\bar U$ is the mean of $U$ along the straight line from
+$s_i$ to $s$ \citep[e.g.][]{vassilevich2003}. Exponentiating the correction
+and undoing the symmetrisation gives
+\begin{equation}\label{eq:kernel}
+  P_k(s,y\,|\,s_i) = \frac{1}{\sqrt{4\pi y}}
+  \exp\!\left[-\frac{(s-s_i)^2}{4y}
+  -\frac{V(s)-V(s_i)}{2} - y\,\overline{(U+\Lambda a)}\right],
+\end{equation}
+\begin{equation}
+  \overline{U} = \frac14\,\overline{e^{2s}} - 2\,\overline{e^{s}} + \frac94,
+  \qquad
+  \overline{e^{ks}} = e^{ks_i}\,\frac{e^{k\Delta}-1}{k\Delta}.
+\end{equation}
+The absorption term $\overline{\Lambda a}$ is averaged along the line with
+8-point Gauss--Legendre quadrature.
+
+Two properties matter:
+\begin{itemize}
+\item For $x\ll1$, $U\to9/4$ and \eqref{eq:kernel} reduces to the exact
+  lognormal $P=(4\pi y)^{-1/2}\exp[-(\Delta-3y)^2/4y]$ of
+  \citet{zeldovich1969}.
+\item The leading relative error is the next heat-kernel coefficient,
+  $\approx y^2(U+\Lambda a)''/6$. This is $\approx y^2x^2/6$ at large $x$,
+  and $\approx\frac23\Lambda a\,y^2$ for $a\propto x^{-2}$.
+\end{itemize}
+The switch point is chosen to keep this error small:
+\begin{equation}
+  y_s(x_i) = \min\!\left[\frac{0.02}{\max(1,x_i)},\;
+  \max\!\left(\min\!\left(\sqrt{\frac{1.5\epsilon_k}{\Lambda a(x_i)}},\,
+  \frac{0.1}{\Lambda a(x_i)}\right),\,10^{-4}\right)\right],
+  \qquad \epsilon_k=5\times10^{-5}.
+\end{equation}
+The second argument limits the kernel's error in the survival to
+$\sim\epsilon_k$ and the absorption optical depth across the kernel step to
+0.1. The floor $10^{-4}$ matters only for photons that are absorbed almost
+immediately. Moving $y_s$ by a factor of 4 changes the results by less than
+$10^{-4}$.
+
+\subsection{Spatial discretisation}
+
+Nodes $s_j$ span $x\in[10^{-9},150]$, far enough that the zero-flux
+boundaries do not affect any tabulated quantity. With spacings
+$h_{j+1/2}=s_{j+1}-s_j$, cell widths
+$\Delta_j=\frac12(h_{j-1/2}+h_{j+1/2})$ and Wien weights
+$w_j=e^{-V(s_j)}$, the flux through the face between nodes $j$ and $j+1$ is
+\begin{equation}\label{eq:flux}
+  F_{j+1/2} = -\frac{\bar w_{j+1/2}}{h_{j+1/2}}
+  \left(\frac{P_{j+1}}{w_{j+1}}-\frac{P_j}{w_j}\right),
+  \qquad
+  \bar w_{j+1/2} = \frac{w_{j+1}-w_j}{\ln(w_{j+1}/w_j)} .
+\end{equation}
+This is the Scharfetter--Gummel flux \citep{scharfetter1969}: it is exact
+when $V$ is linear between nodes, and for this problem it is equivalent to
+the \citet{chang1970} weighting. The semi-discrete system is
+\begin{equation}
+  \frac{\dd P_j}{\dd y} = -\frac{F_{j+1/2}-F_{j-1/2}}{\Delta_j}
+  - \Lambda a(x_j)\,P_j,
+  \qquad F_{1/2}=F_{N+1/2}=0 .
+\end{equation}
+Written as $\dd\mathbf P/\dd y = A\mathbf P$, $A$ is tridiagonal. Without the
+sink it has three properties:
+\begin{itemize}
+\item photon number $\sum_j\Delta_jP_j$ is conserved to round-off;
+\item $P_j\propto w_j$ (the discrete Wien spectrum) is an exact steady state;
+\item $A$ has non-negative off-diagonal entries, so implicit steps preserve
+  positivity.
+\end{itemize}
+The coefficients are evaluated in the stable forms $(e^d-1)/d$ and
+$2\sinh(d/2)/d$ with $d=\ln w_{j+1}-\ln w_j$.
+
+\paragraph{Grid.} The error is second order in $h|V'|\approx hx$, and the
+kernel at $y_s$ must span several nodes. The spacing is
+\begin{equation}
+  h(s) = \min\!\left[0.01,\; \frac{0.05}{\max(1,x)},\;
+  \frac{\sqrt{2y_s(x)}}{8}\right],
+\end{equation}
+where the last condition is applied only for $x>10^{-4}$, since no photons
+are seeded below that. This gives about 5000 nodes without absorption and
+up to about $10^4$ for strong absorption.
+
+\subsection{Time integration}
+
+Equation~\eqref{eq:fpabs} is advanced with TR-BDF2 \citep{bank1985,hosea1996},
+a second-order, L-stable one-step method. With $\gamma=2-\sqrt2$, a step
+$\mathbf P^n\to\mathbf P^{n+1}$ of size $\delta y$ is
+\begin{align}
+  \left(I-\tfrac{\gamma\delta y}{2}A\right)\mathbf P^{*}
+    &= \left(I+\tfrac{\gamma\delta y}{2}A\right)\mathbf P^{n},\\
+  \left(I-\tfrac{1-\gamma}{2-\gamma}\delta y\,A\right)\mathbf P^{n+1}
+    &= \frac{\mathbf P^{*}-(1-\gamma)^2\mathbf P^n}{\gamma(2-\gamma)} .
+\end{align}
+Each stage is a tridiagonal solve. Step sizes grow geometrically,
+$\delta y=\min[\max(0.02\,y,\,\delta y_0),\,0.02]$, and are adjusted to land
+exactly on each requested output $y$. Photon number is conserved by both
+stages.
+
+\paragraph{Why not an eigendecomposition?} Because $A$ is similar to a
+symmetric tridiagonal matrix, $e^{yA}$ could in principle be applied exactly
+through its eigenvectors. In practice, the symmetrising variables
+$P/\sqrt{w}$ span some 60 decades over the grid. Round-off in the
+eigenvectors is then amplified to errors of $\sim10^{-3}$ for large $x_i$.
+Time-stepping $P$ directly keeps every quantity $O(1)$.
+
+\subsection{Survival fraction}\label{sec:survival}
+
+Computing $S=\int P_\Lambda\,\dd s$ and $-\ln S$ from it loses all precision
+when little is absorbed, because $1-S$ is then below round-off. Instead the
+absorbed number is integrated directly:
+\begin{itemize}
+\item \emph{Kernel ($y\le y_s$):}
+  $1-S_k = \int P_{k,0}\,(1-e^{-y\,\overline{\Lambda a}})\,\dd s \big/ \int P_{k,0}\,\dd s$,
+  evaluated with \texttt{expm1}. Here $P_{k,0}$ is the kernel without the sink.
+  When most photons are absorbed, the logarithm of
+  $\int P_{k,0}e^{-y\overline{\Lambda a}}$ is instead computed in log space.
+\item \emph{Propagation:} the absorbed number
+  $\mathcal A(y)=\int_{y_s}^{y}\Lambda\sum_j\Delta_j a_jP_j\,\dd y'$ is
+  accumulated with the trapezoid rule over the TR-BDF2 steps. Then
+  $\ln S = \ln S_k + \ln(1-\mathcal A/N_{\rm seed})$ while more than half
+  the seed survives, and $\ln S=\ln S_k+\ln(N/N_{\rm seed})$ otherwise.
+\end{itemize}
+Where both forms apply, they agree to $3\times10^{-5}$ in $\ln S$.
+
+%======================================================================
+\section{Validation}\label{sec:validation}
+%======================================================================
+
+\subsection{Exact properties and the exact solution}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.5\textwidth}ll}
+\toprule
+test & tolerance & result \\
+\midrule
+photon number $\int P\,\dd s=1$ & $10^{-4}$ & $3\times10^{-12}$ (propagator)\\
+ & & $2\times10^{-5}$ (kernel)\\
+identity \eqref{eq:identity}, $10^{-3}\le x_i\le60$, $10^{-5}\le y\le10$ & $2\times10^{-3}$ & $\le 5\times10^{-4}$\\
+Wien limit at $y=15$ & $10^{-4}$ of peak & pass\\
+lognormal limit ($x_i=10^{-3}$) & $10^{-3}$ of peak & pass\\
+Becker eq.~\eqref{eq:becker}, $x_0=0.1,1,5$; $y=0.1,0.5,2$ & $10^{-4}$ of peak & $\le2.5\times10^{-5}$\\
+constant sink: $S=e^{-\Lambda y}$ & $10^{-3}$ & pass\\
+switch-point insensitivity (free-free sink) & $10^{-4}$ in $S$ & pass\\
+\bottomrule
+\end{tabular}
+\caption{Tests in \texttt{test\_kompaneets\_greens.py}.}
+\end{table}
+
+Under grid refinement the quantiles of $\ln x_f$ converge at second order.
+With the default grid they are within $3\times10^{-3}$ of a four-times-finer
+reference at the $10^{-4}$ tail levels, and much closer in the core.
+Figure~\ref{fig:greens} shows example Green's functions together with the
+exact solution.
+
+At $x_0=0.1$, $y=0.1$, $x_f=10$, Becker's formula evaluated at 25 digits
+gives $8\times10^{-18}$ while the solver gives $9\times10^{-23}$. A Gaussian
+estimate gives $\sim10^{-20}$, so the exact formula's value there is
+cancellation noise. This is the problem with using \eqref{eq:becker} in the
+tails.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_greens.pdf}
+\caption{Left: Green's functions per unit $\ln x_f$ for $x_i=1$, with
+Becker's exact solution (circles) and the Wien limit. Right: $x_i=0.03$ with
+free-free absorption $\Lambda=2\times10^{-3}$ (solid, labelled with the
+survival $S$) and without (dashed). Absorption removes the low-energy side
+first.}
+\label{fig:greens}
+\end{figure}
+
+\subsection{Direct Monte Carlo}\label{sec:mc}
+
+\texttt{mc\_sphere\_check.py} simulates the physical problem directly:
+\begin{itemize}
+\item photons start at the centre of a uniform sphere of Thomson radius
+  $\tau$;
+\item each scattering is exact Compton scattering on a relativistic
+  Maxwell--J\"uttner electron, done in the electron rest frame with the
+  Klein--Nishina cross-section and a null-collision method \citep{pozdnyakov1983};
+\item free-free absorption $\kappa_{\rm abs}/\kappa_{\rm es}=\theta\Lambda a(x)$
+  is applied as a continuous weight along each path.
+\end{itemize}
+Each escaping photon's $y=\theta\tau_{\rm path}$ is recorded. The solver then
+predicts the escaping spectrum and survival from those same $y$ values. This
+tests the Kompaneets approximation, the separation of
+Section~\ref{sec:separation}, and the absorption treatment together.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cccccc}
+\toprule
+$x_0$ & $\Lambda$ & $\tau$ & $S$ (MC) & $S$ (solver) & max $|\Delta\,$CDF$|$ (all photons)\\
+\midrule
+1 & 0 & 15 & 1 & 1 & 0.0075\\
+0.03 & $2\times10^{-3}$ & 15 & 0.6120 & 0.6116 & 0.0082\\
+0.3 & $2\times10^{-2}$ & 15 & 0.9449 & 0.9450 & 0.0060\\
+3 & 1 & 15 & 0.9716 & 0.9718 & 0.0053\\
+1 & 0 & 40 & 1 & 1 & 0.0019\\
+\bottomrule
+\end{tabular}
+\caption{Monte Carlo versus solver, $\theta=2\times10^{-3}$,
+$2\times10^5$ photons ($5\times10^4$ for $\tau=40$, where $y$ reaches 15).}
+\end{table}
+
+Binned by $y$, survival agrees to 0.1--0.5\% (mostly within $2\sigma$ of the
+MC noise; the largest deviation, $4.8\sigma$, is $1.5\times10^{-4}$ in $S$),
+and the spectra agree within $\lesssim0.7\%$ in CDF (Figure~\ref{fig:mc}). The exception
+is the earliest-escaping sixth of the photons, whose paths are only 1--4
+times $\tau$. Their spectra differ by 2--3\% in CDF and about 2\% in mean
+energy at $\tau=15$, falling to about 1\% (the MC noise level) at $\tau=40$.
+These photons escape nearly straight out: they had fewer scatterings than
+their path length implies, so energy and escape time are correlated. This is
+a limitation of the MRW factorisation, not of the Green's function
+(Section~\ref{sec:limits}).
+
+The diffusion escape-time distribution used by the existing MRW code,
+\texttt{prob\_esc\_time} in \texttt{compton\_greens.py}, matches the MC escape paths well.
+At the MC's 10/25/50/75/90\% quantiles it gives 0.107, 0.258, 0.506, 0.753
+and 0.901 for $\tau=15$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.62\textwidth]{fig_mc.pdf}
+\caption{Escaping spectra in bins of $y$ for $x_0=0.03$,
+$\Lambda=2\times10^{-3}$, $\tau=15$, $\theta=2\times10^{-3}$: direct Compton
+Monte Carlo (solid) against the absorbed Kompaneets Green's function (dashed),
+per injected photon.}
+\label{fig:mc}
+\end{figure}
+
+%======================================================================
+\section{Quantile tables}\label{sec:tables}
+%======================================================================
+
+\subsection{What is tabulated}
+
+A Monte Carlo code needs to draw $x_f$ from $P_\Lambda(\cdot,y\,|\,x_i)/S$ with a
+single uniform random number. It also needs $S$. The inverse CDF is therefore
+tabulated. For each $(\Lambda,y,x_i)$ and cumulative probability $p_k$, the
+table stores
+\begin{equation}
+  u_k = \frac{\ln(x_f/x_i)}{\sqrt{2y}}
+  \quad\text{at}\quad
+  \frac1S\int_{-\infty}^{\ln x_f}P_\Lambda\,\dd s = p_k .
+\end{equation}
+The scaling by $\sqrt{2y}$ is the key choice. As $y\to0$ the distribution
+collapses to a Gaussian of width $\sqrt{2y}$ in $\ln x_f$, so $u_k$ tends to
+the constant $\Phi^{-1}(p_k)$. The table therefore stays smooth and
+interpolable over the full seven decades of $y$ (Figure~\ref{fig:quantiles}).
+The old approach tabulated $\ln n$ on a fixed $x_f$ grid, which cannot
+resolve a distribution of width $10^{-3}$ in $\ln x$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_quantiles.pdf}
+\caption{Tabulated scaled quantiles $u_p$ against $y$ for $x_i\approx1$,
+without absorption and with $\Lambda=1$. At small $y$ they approach the
+Gaussian values $\Phi^{-1}(p)$; at large $y$ the distribution approaches its
+$y$-independent form, so $u_p\propto y^{-1/2}$.}
+\label{fig:quantiles}
+\end{figure}
+
+\paragraph{Levels.} The $N_Q=257$ levels are uniform in logit $p$ between
+$p_{\min}=10^{-7}$ and $1-p_{\min}$, which puts about half of them in each
+tail. The end levels are then set to exactly 0 and 1:
+\begin{equation}
+  z_k = z_0\left(1-\frac{2k}{N_Q-1}\right),\quad z_0=\ln\frac{p_{\min}}{1-p_{\min}},\quad
+  p_k=\frac{1}{1+e^{-z_k}} .
+\end{equation}
+
+\paragraph{Construction.} For each $\Lambda$ (one process per $\Lambda$
+slice), the solver runs once per $x_i$ and returns $P_\Lambda$ at all
+tabulated $y$. The CDF is built with the trapezoid rule on the solver grid
+and inverted by linear interpolation.
+
+\paragraph{Survival.} $S$ can change by many decades between adjacent
+$\Lambda$ values, so it is stored as the mean absorption rate
+\begin{equation}
+  \bar a(\Lambda,y,x_i) = -\frac{\ln S}{\Lambda y},
+\end{equation}
+which varies slowly. As $\Lambda\to0$, $\bar a$ tends to the absorption
+coefficient averaged over the unabsorbed Green's function and history. Cells
+with $S<10^{-12}$ are flagged \emph{dead}. There the propagated density is
+round-off, $\bar a$ is computed from $\max(\ln S,-700)$, and the quantiles
+are carried over from the previous $y$.
+
+\subsection{Table contents}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llll}
+\toprule
+array & type & shape & content\\
+\midrule
+\texttt{lam} & f64 & $(N_\Lambda)$ & $0$, then $10^{-10}\ldots10^{3}$ log-spaced (half-decade)\\
+\texttt{y} & f64 & $(N_y)$ & $10^{-6}\ldots15$, log-spaced, 10 per decade\\
+\texttt{xi} & f64 & $(N_x)$ & $10^{-3}\ldots60$, log-spaced\\
+\texttt{levels} & f64 & $(N_Q)$ & $p_k$\\
+\texttt{uq} & f32 & $(N_\Lambda,N_y,N_x,N_Q)$ & $u_k$\\
+\texttt{abar} & f64 & $(N_\Lambda,N_y,N_x)$ & $\bar a$ (0 in the $\Lambda=0$ slice)\\
+\texttt{dead} & bool & $(N_\Lambda,N_y,N_x)$ & $S<10^{-12}$\\
+\bottomrule
+\end{tabular}
+\caption{Arrays in \texttt{kgreens\_table\_ff.npz}:
+$N_\Lambda=28$, $N_y=73$, $N_x=61$, $N_Q=257$, 129 MB.
+\texttt{kgreens\_table.npz} has the same layout with only the $\Lambda=0$
+slice.}
+\end{table}
+
+A byte-level description for porting the reader is given in
+\texttt{KGREENS\_TABLE\_FORMAT.md}.
+
+%======================================================================
+\section{Sampling algorithm}\label{sec:sampling}
+%======================================================================
+
+All interpolation uses $\ln\Lambda$, $\ln y$ and $\ln x_i$. Let
+$\mathrm{lin}(g,v)$ return the lower index $i$ and weight
+$t=(v-g_i)/(g_{i+1}-g_i)$ of $v$ clamped to the grid $g$. Let
+$\mathrm{cub}(g,v)$ return the four nodes $i-1,\dots,i+2$ and their Lagrange
+weights, falling back to $\mathrm{lin}$ in the first and last intervals.
+
+\subsection{Final energy}
+
+Beyond $y_{\max}=15$ the distribution of the survivors has reached its
+$y$-independent form: the Wien spectrum without absorption, or the
+slowest-decaying absorbed mode with it. The $y_{\max}$ quantiles are
+therefore reused there. Below $y_{\min}$ the small-$y$ Gaussian limit is
+exact to the kernel's accuracy.
+
+Interpolation is linear in every dimension, so interpolating only the two
+levels bracketing $r$ gives the same result as interpolating whole quantile
+vectors. This needs at most 16 table reads per sample.
+
+\begin{algorithm}[h]
+\caption{Sample $x_f$ given $x_i$, $y$, $\Lambda$ and a uniform $r\in[0,1)$}
+\begin{algorithmic}[1]
+\If{$y<y_1$}
+  \State \Return $x_i\exp[(3-x_i)y+\sqrt{2y}\,\Phi^{-1}(r)]$
+\EndIf
+\State $y_e\gets\min(y,y_{N_y})$
+\State $(j_y,a)\gets\mathrm{lin}(\ln\mathbf y,\ln y_e)$;\quad $(j_x,b)\gets\mathrm{lin}(\ln\mathbf x_i,\ln x_i)$
+\State find $k$ with $p_k\le r\le p_{k+1}$;\quad $c\gets(r-p_k)/(p_{k+1}-p_k)$
+\State $\Lambda$ slices: $\{(0,1)\}$ if $\Lambda\le0$; $\{(0,1-\beta),(1,\beta)\}$ with $\beta=\Lambda/\Lambda_1$ if $\Lambda\le\Lambda_1$;
+\Statex \hspace{\algorithmicindent} otherwise $(m,\beta)\gets\mathrm{lin}(\ln\boldsymbol\Lambda_{1:},\ln\Lambda)$ and $\{(m{+}1,1-\beta),(m{+}2,\beta)\}$
+\State $u\gets\sum_{(l,w_l)}\sum_{\text{4 corners}} w_l\,w_{yx}\,[(1-c)\,u_{l,\cdot,\cdot,k}+c\,u_{l,\cdot,\cdot,k+1}]$
+\State \Return $x_i\exp(u\sqrt{2y_e})$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Survival}
+
+The error in $\ln S=-\Lambda y\bar a$ scales with $\Lambda y$. Linear
+interpolation of $\bar a$ gave errors of up to 25\% in $S$ where $S$ was
+small, so $\ln\bar a$ is interpolated cubically in $\ln\Lambda$ and
+$\ln x_i$. Near fully absorbed cells $\ln\bar a$ is not smooth and a cubic
+stencil overshoots; there the interpolation falls back to linear.
+
+\begin{algorithm}[h]
+\caption{Survival $S$ given $x_i$, $y$, $\Lambda$}
+\begin{algorithmic}[1]
+\If{$\Lambda\le0$} \Return 1 \EndIf
+\If{$y<y_1$} \Return $\exp[-\Lambda a(x_i)y]$ \EndIf
+\Function{abar}{$y'$}
+  \State $\ell\gets\ln\max(\Lambda,\Lambda_1)$;\quad $(I_\Lambda,W_\Lambda)\gets\mathrm{cub}(\ln\boldsymbol\Lambda_{1:},\ell)$;\quad $(I_x,W_x)\gets\mathrm{cub}(\ln\mathbf x_i,\ln x_i)$
+  \State $(j_y,a)\gets\mathrm{lin}(\ln\mathbf y,\ln y')$
+  \If{any \texttt{dead}$[i{+}1,\{j_y,j_y{+}1\},I_x]$ for $i\in I_\Lambda$}
+     \State replace $(I_\Lambda,W_\Lambda)$ and $(I_x,W_x)$ by the linear stencils
+  \EndIf
+  \State \Return $\exp\sum_{i,j}W_{\Lambda,i}W_{x,j}\,[(1-a)\ln\bar a_{i+1,j_y,j}+a\ln\bar a_{i+1,j_y+1,j}]$
+\EndFunction
+\If{$y\le y_{N_y}$} \Return $\exp[-\Lambda y\,\Call{abar}{y}]$ \EndIf
+\State $\ell_1\gets-\Lambda y_{N_y-1}\Call{abar}{y_{N_y-1}}$;\quad $\ell_2\gets-\Lambda y_{N_y}\Call{abar}{y_{N_y}}$
+\State \Return $\exp[\ell_2+(\ell_2-\ell_1)(y-y_{N_y})/(y_{N_y}-y_{N_y-1})]$ \Comment{$\ln S$ linear in $y$}
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Use in the MRW step}
+
+For a sphere of optical radius $\tau$, temperature $\theta$ and density
+$\rho$:
+\begin{enumerate}
+\item compute $\Lambda=\texttt{lam\_freefree}(\rho,T)$ once per zone;
+\item sample the escape path $\tau_{\rm path}$ (in the old code's
+  convention, $y=t\cdot3\tau^2\theta/\pi^2$ for a central source);
+\item set $y=\theta\tau_{\rm path}$ and draw $x_f$ with Algorithm~1;
+\item multiply the packet weight by $S$ from Algorithm~2, or absorb the
+  packet with probability $1-S$.
+\end{enumerate}
+
+\subsection{Table accuracy}
+
+At 200 random off-grid $(\Lambda,y,x_i)$ with $S>10^{-6}$
+(\texttt{check\_table.py}):
+\begin{itemize}
+\item \textbf{Survival:} the median relative error is $4\times10^{-11}$ and
+  the 90th percentile $5\times10^{-5}$. The largest errors, 1.5--5\%, occur
+  only where $S<10^{-3}$, and correspond to less than 0.5\% in $\ln S$.
+\item \textbf{Energy quantiles:} the 1, 50 and 99\% quantiles of $\ln x_f$
+  are within $7\times10^{-3}$ of the 1--99\% width; the median error is
+  $10^{-4}$.
+\item \textbf{Moments:} sampled $\langle1/x\rangle$ reproduces
+  \eqref{eq:identity} to about $10^{-3}$ at off-grid $(x_i,y)$.
+\end{itemize}
+
+%======================================================================
+\section{Range of validity}\label{sec:limits}
+%======================================================================
+
+\begin{itemize}
+\item \textbf{Kompaneets limit:} $\theta\lesssim0.03$ and
+  $x_f\theta\lesssim0.05$. Relativistic and Klein--Nishina corrections are
+  $O(\theta)$ and neglected. The table's $x_i\le60$ must be further limited
+  by the caller to $\lesssim0.05/\theta$ at high temperature.
+\item \textbf{Separation:} the sphere must be uniform with
+  $\theta\Lambda a(x)\ll1$ at the relevant energies. For the free-free seeds
+  of interest ($x\sim10^{-3}$--$10^{-2}$) this is the binding constraint.
+\item \textbf{Early escapers:} photons escaping after a path of only a few
+  sphere radii are biased by 2--3\% (CDF) at $\tau=15$ and about 1\% at
+  $\tau=40$. MRW spheres should have $\tau\gtrsim20$--30, or the first few
+  optical depths should be followed with ordinary Monte Carlo.
+\item \textbf{Table range:} $x_i$ is clamped to $[10^{-3},60]$ for the lookup,
+  and $\Lambda>10^3$ is clamped (such photons are absorbed essentially at
+  once). $y>15$ is handled analytically, as described above.
+\end{itemize}
+
+%======================================================================
+\section{The previous implementation}\label{sec:old}
+%======================================================================
+
+\texttt{compton\_greens.py} evaluated \eqref{eq:becker} by quadrature
+(\texttt{greens\_function\_slow}) for $y\ge0.5$. For $y<0.5$ it used an
+asymptotic approximation (\texttt{greens\_function\_fast}). It then
+renormalised each result numerically and tabulated $\ln n$ on a fixed grid
+in $x_f$. The problems found were:
+\begin{itemize}
+\item \textbf{The fast approximation does not conserve photon number.}
+  $\int x_f^2n\,\dd x_f/x_i^2$ was 0.82 at $(x_i,y)=(1,0.1)$ and 0.41 at
+  $(1,0.4)$. Even after renormalisation, its CDF differs from the exact
+  result by 1.3\% and 8\% at $x_i=1$, $y=0.1$ and 0.4, and by 26--32\% at
+  $x_i=20$.
+\item \textbf{The quadrature is truncated.} It stops at $u=\sqrt{10^3}$, which
+  is adequate only for $y\gtrsim0.04$.
+\item \textbf{The $x_f$ grid cannot resolve small $y$.} The distribution has
+  width $2\sqrt y$ in $\ln x$, which the tabulation grid cannot resolve for
+  $y\ll10^{-2}$.
+\item \textbf{Absorption was only approximate.} It was treated by averaging
+  the absorption coefficient over the \emph{unabsorbed} distribution
+  (\texttt{gen\_table\_absff}, \texttt{gen\_table\_tauff}), which ignores the
+  energy history of the surviving photons.
+\end{itemize}
+Any of these may have contributed to the failure of the MRW with absorption
+for spheres of $\tau\gtrsim50$.
+
+%======================================================================
+\appendix
+\section{Code map}
+%======================================================================
+
+\begin{tabular}{ll}
+\texttt{kompaneets\_greens.py} & solver, kernel, tables, \texttt{Sampler}, Becker reference\\
+\quad \texttt{greens()} & Green's function at a list of $y$ (optionally $\ln S$)\\
+\quad \texttt{Propagator} & finite-volume operator and TR-BDF2 integration\\
+\quad \texttt{short\_time\_kernel()} & equation \eqref{eq:kernel}\\
+\quad \texttt{gen\_quantile\_table()} & table generation (parallel over $\Lambda$)\\
+\quad \texttt{Sampler} & Algorithms 1 and 2\\
+\quad \texttt{becker\_greens()} & equation \eqref{eq:becker} via \texttt{mpmath}\\
+\texttt{test\_kompaneets\_greens.py} & test suite (\texttt{python test\_kompaneets\_greens.py [fast]})\\
+\texttt{check\_table.py} & table vs.\ solver at random off-grid points\\
+\texttt{mc\_sphere\_check.py} & direct Compton Monte Carlo comparison\\
+\texttt{KGREENS\_TABLE\_FORMAT.md} & reader specification for porting\\
+\texttt{doc/make\_doc\_figures.py} & figures in this document\\
+\end{tabular}
+
+\medskip
+Tables are regenerated with
+\begin{verbatim}
+python kompaneets_greens.py --out kgreens_table.npz
+python kompaneets_greens.py --absorption --nproc 8 --out kgreens_table_ff.npz
+\end{verbatim}
+
+%======================================================================
+\begin{thebibliography}{99}
+%======================================================================
+
+\bibitem[Bank et al.(1985)]{bank1985}
+Bank, R.~E., Coughran, W.~M., Fichtner, W., Grosse, E.~H., Rose, D.~J., \&
+Smith, R.~K. 1985, IEEE Trans.\ Computer-Aided Design, 4, 436
+
+\bibitem[Becker(2003)]{becker2003}
+Becker, P.~A. 2003, MNRAS, 343, 215
+
+\bibitem[Chang \& Cooper(1970)]{chang1970}
+Chang, J.~S., \& Cooper, G. 1970, J.\ Comput.\ Phys., 6, 1
+
+\bibitem[Fleck \& Canfield(1984)]{fleck1984}
+Fleck, J.~A., \& Canfield, E.~H. 1984, J.\ Comput.\ Phys., 54, 508
+
+\bibitem[Hosea \& Shampine(1996)]{hosea1996}
+Hosea, M.~E., \& Shampine, L.~F. 1996, Appl.\ Numer.\ Math., 20, 21
+
+\bibitem[Kompaneets(1957)]{kompaneets1957}
+Kompaneets, A.~S. 1957, Sov.\ Phys.\ JETP, 4, 730
+
+\bibitem[Min et al.(2009)]{min2009}
+Min, M., Dullemond, C.~P., Dominik, C., de Koter, A., \& Hovenier, J.~W.
+2009, A\&A, 497, 155
+
+\bibitem[Nagirner \& Loskutov(1997)]{nagirner1997}
+Nagirner, D.~I., \& Loskutov, V.~M. 1997, Astrophysics, 40, 227
+
+\bibitem[Pozdnyakov et al.(1983)]{pozdnyakov1983}
+Pozdnyakov, L.~A., Sobol, I.~M., \& Sunyaev, R.~A. 1983, Astrophys.\ Space
+Phys.\ Rev., 2, 189
+
+\bibitem[Robitaille(2010)]{robitaille2010}
+Robitaille, T.~P. 2010, A\&A, 520, A70
+
+\bibitem[Scharfetter \& Gummel(1969)]{scharfetter1969}
+Scharfetter, D.~L., \& Gummel, H.~K. 1969, IEEE Trans.\ Electron Devices,
+16, 64
+
+\bibitem[Vassilevich(2003)]{vassilevich2003}
+Vassilevich, D.~V. 2003, Phys.\ Rep., 388, 279
+
+\bibitem[Zel'dovich \& Sunyaev(1969)]{zeldovich1969}
+Zel'dovich, Ya.~B., \& Sunyaev, R.~A. 1969, Ap\&SS, 4, 301
+
+\end{thebibliography}
+
+\end{document}

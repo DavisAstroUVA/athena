@@ -344,60 +344,6 @@ Real KleinNishina(Real x)
 
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn void InitializeAccelerationOpacity(MonteCarloBlock *pmcb)
-//! \brief Computes mean opacity arrays used by acceleration routines
-
-void InitializeAccelerationOpacity(MonteCarloBlock *pmcb) {
-
-  int ip = 0;
-  int nx = 500;
-  Real x[500], dx[500];
-
-  // Make grid in x=hnu/kT space from 10^-4 to 10^2
-  for(int i=0; i<nx; ++i) {
-    Real log10x = static_cast<Real>(i)/(static_cast<Real>(nx)-1.0)*6.0;
-    x[i] = pow(10.0,log10x)*1.0e-4;
-  }
-
-  // compute dx
-  dx[0] = x[1]-x[0];
-  dx[nx-1] = x[nx-1]-x[nx-2];
-  for(int i=1; i<nx-1; i++) {
-    dx[i] = 0.5 * (x[i+1]-x[i-1]);
-  }
-
-  // Loop over grid cells
-  int il = pmcb->is; int iu = pmcb->ie;
-  int jl = pmcb->js; int ju = pmcb->je;
-  int kl = pmcb->ks; int ku = pmcb->ke;
-
-  Photon *pphot; // SWD temp fix -- will not work below
-  Real kb = 1.380649e-16;
-  for (int k=kl; k<=ku; ++k) {
-    for (int j=jl; j<=ju; ++j) {
-      for (int i=il; i<=iu; ++i) {
-        Real temp = pmcb->tgas(k,j,i);
-        Real dens = pmcb->rho(k,j,i);
-        Real Bint = 0.0;
-        Real planck = 0.0;
-        Real planck_inv = 0.0;
-        for(int l=0; l<nx; ++l) {
-          Real energy = x[l] * kb * temp;
-          Real abs_coef = pmcb->AbsorptionOpacity(pmcb,pphot,ip);
-          Real sct_coef = pmcb->ScatteringOpacity(pmcb,pphot,ip);
-          Real Bx = pow(x[l],3)/(exp(x[l])-1.0) *dx[l];
-          Bint += Bx;
-          planck += Bx * abs_coef;
-          planck_inv += Bx / (abs_coef+sct_coef);
-        }
-        pmcb->planck_inv_opacity(k,j,i) = Bint/planck_inv;
-        pmcb->planck_opacity(k,j,i) = planck/Bint;
-      }}}
-}
-
-// SWD: Useful to retain ability to do different lines but should ensure
-// computation only occurs once
 //----------------------------------------------------------------------------
 //! \fn Real ResLinePre()
 //! \brief Species dependent prefactor

@@ -33,7 +33,9 @@
 // Athena++ headers
 #include "mcexchange.hpp"
 #include "mcpartition.hpp"
+#include "kgreens.hpp"
 #include "montecarlo.hpp"
+#include "mrw.hpp"
 #include "../globals.hpp"
 #include "../parameter_input.hpp"
 #include "../mesh/mesh.hpp"
@@ -142,7 +144,27 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   // was never allocated segfaults, so a problem generator that needs it asks here rather
   // than turning MRW on as a side effect.
   compute_dmin = pin->GetOrAddBoolean("montecarlo","compute_dmin",false);
-  time_acc = pin->GetOrAddBoolean("montecarlo","time_acc",false);
+  accel_tau = pin->GetOrAddReal("montecarlo","accel_tau",20.);
+  accel_face_tau = pin->GetOrAddReal("montecarlo","accel_face_tau",5.);
+  accel_pmax = pin->GetOrAddReal("montecarlo","accel_pmax",0.);
+  {
+    std::string dom = pin->GetOrAddString("montecarlo","accel_domain","cell");
+    if (dom == "cell") {
+      accel_domain = MRW_DOMAIN_CELL;
+    } else if (dom == "sphere") {
+      accel_domain = MRW_DOMAIN_SPHERE;
+    } else {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "accel_domain must be cell or sphere, not " << dom << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+  kgreens_file = pin->GetOrAddString("montecarlo","kgreens_file","");
+  kgreens = nullptr;
+  mrw = nullptr;
+  if (acceleration) mrw = new MRWTables;
+  accel_report = pin->GetOrAddBoolean("montecarlo","accel_report",false);
   verbose = pin->GetOrAddBoolean("montecarlo", "verbose", true);
   lb_report = pin->GetOrAddBoolean("montecarlo", "lb_report", false);
   raytrace_flag = pin->GetOrAddBoolean("montecarlo", "raytrace", false);
@@ -152,6 +174,25 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     general_pusher_flag = pin->GetOrAddBoolean("montecarlo","general_pusher",false);
   scattering_meth = GetScatteringFlag(pin->GetOrAddString("montecarlo","scattering",
                                                           "none"));
+  // The random-walk step with Compton scattering draws the photon's energy change from
+  // the Kompaneets Green's function table, so the table has to be there
+  if (acceleration && scattering_meth == SCATCOMP) {
+    if (kgreens_file.empty()) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "acceleration with Compton scattering needs <montecarlo> kgreens_file"
+          << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    kgreens = new KompaneetsTable;
+    kgreens->Read(kgreens_file);
+    if (Globals::my_rank == 0)
+      std::cout << "Kompaneets table " << kgreens_file << ": lam 0, "
+                << kgreens->LamMin() << " .. " << kgreens->LamMax() << ", y "
+                << kgreens->YMin() << " .. " << kgreens->YMax() << ", xi "
+                << kgreens->XiMin() << " .. " << kgreens->XiMax() << ", "
+                << kgreens->nq << " levels" << std::endl;
+  }
   // Which metric the module integrates on.  Must come before SetGeometryTag and before
   // any MonteCarloBlock is constructed.
   SetCoordinateSystem(pin);
@@ -335,6 +376,8 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 
 MonteCarlo::~MonteCarlo() {
 
+  delete kgreens;
+  delete mrw;
   delete pmcout;
   delete pexch;
 #ifdef MPI_PARALLEL
@@ -748,6 +791,9 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
     // initialize counters to zero
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
     pmcb->nsplit = pmcb->nroul = 0;
+    pmcb->nmrw = pmcb->nmrw_decline = 0;
+    pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
     pmcb->loop_max_size = loop_max;
 
@@ -1362,6 +1408,9 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // reset counters
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb-> nrem = 0;
     pmcb->nsplit = pmcb->nroul = 0;
+    pmcb->nmrw = pmcb->nmrw_decline = 0;
+    pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
   }
 
@@ -1382,6 +1431,9 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       MonteCarloBlock *pmcb = my_blocks(nb);
       pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = 0;
       pmcb->nsplit = pmcb->nroul = 0;
+    pmcb->nmrw = pmcb->nmrw_decline = 0;
+    pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
       pmcb->wesc_sum = pmcb->wesc_sq = 0.;
       pmcb->lb_time = 0.0;
       pmcb->lb_nstep = 0;
@@ -1461,11 +1513,18 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // bytes past it.
     int64_t ntot = 0;
     int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0, nsplit = 0, nroul = 0;
-    Real wesc_sum = 0., wesc_sq = 0.;
+    int64_t nmrw = 0, nmrw_decline = 0;
+    Real wesc_sum = 0., wesc_sq = 0., nmrw_scat = 0.;
+    int64_t scat_hist[MonteCarloBlock::NSCATBINS];
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] = 0;
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
       nsplit += pmcb->nsplit;
       nroul += pmcb->nroul;
+      nmrw += pmcb->nmrw;
+      nmrw_decline += pmcb->nmrw_decline;
+      nmrw_scat += pmcb->nmrw_scat;
+      for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] += pmcb->scat_tau_hist[b];
       wesc_sum += pmcb->wesc_sum;
       wesc_sq += pmcb->wesc_sq;
       nesc += pmcb->nesc;
@@ -1487,6 +1546,11 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nsplit,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nroul,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nmrw,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nmrw_decline,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nmrw_scat,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,scat_hist,MonteCarloBlock::NSCATBINS,MPI_INT64_T,MPI_SUM,
+                  MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sum,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sq,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
   #endif
@@ -1509,6 +1573,22 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       if (wwin_top > 0. || wwin_bottom > 0.)
         std::cout << "weight window: " << nsplit << " copies made, " << nroul
                   << " samples rouletted" << std::endl;
+      if (acceleration)
+        std::cout << "random walk: " << nmrw << " steps standing for " << nmrw_scat
+                  << " scatterings, " << nmrw_decline << " declined" << std::endl;
+      if (accel_report) {
+        // the share of the analog scatterings by the optical half-width of their cell
+        int64_t tot = 0;
+        for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) tot += scat_hist[b];
+        std::cout << "scatterings by cell optical half-width (" << tot << " binned):";
+        for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) {
+          if (scat_hist[b] == 0) continue;
+          std::cout << " [" << std::ldexp(1., b-4) << "," << std::ldexp(1., b-3) << ") "
+                    << 100.*static_cast<Real>(scat_hist[b])/static_cast<Real>(std::max<int64_t>(tot,1))
+                    << "%";
+        }
+        std::cout << std::endl;
+      }
       // (sum w)^2 / sum w^2 over the escaped samples: the number of equal-weight
       // samples with the same variance
       if (wesc_sq > 0.)
@@ -1926,6 +2006,9 @@ MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
   SetupBlockFromFluid(pmcb);
   pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
   pmcb->nsplit = pmcb->nroul = 0;
+    pmcb->nmrw = pmcb->nmrw_decline = 0;
+    pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
   pmcb->loop_max_size = ComputeLoopMax();
   // The problem generator runs before the payload is unpacked, exactly as at startup:
   // it supplies per-block state that is neither fluid-derived nor carried (photon

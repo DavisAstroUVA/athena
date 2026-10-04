@@ -316,20 +316,16 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
 
       bool test = false;
       if ((chi > 0.) && (dl * l_cgs > tauremaining / chi_str)) { // Photon remains in cell
+        // Use MRW if cell is sufficient optically thick
         bool accel_success = false;
-        if (acceleration) {
-          Real dist = pco->dmin(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
-          // Try/perform MRW acceleration if optical depth is large enough
-          if (pmcb->coherent_scattering) {
-            Real tauacc = 10.;
-            if ((pphot->acp[ip]+pphot->scp[ip]) * dist > tauacc)
-              accel_success = MRWAcceleration(pphot,pran,dist,tauacc,ip);
-          } else {
-            Real tauacc = 10.;
-            Real pio = pmcb->planck_inv_opacity(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
-            if (pio * dist > tauacc)
-              accel_success = MRWAcceleration(pphot,pran,dist,tauacc,ip);
-          }
+        if (acceleration && MRWTrigger(pphot,ip,pphot->acp[ip]+pphot->scp[ip]))
+          accel_success = MRWStep(pphot,pran,ip);
+        if (accel_success) {
+          if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
+          if (pphot->statp[ip] != EVOLVING) break;
+          tauremaining = GetOpticalDepth(pran);
+          pphot->strp[ip] = 0.;
+          continue;
         }
 
         if (!accel_success) {

@@ -46,6 +46,12 @@ class ParameterInput;
 class Photon;
 class PhotonPusher;
 class MCRandom;
+class KompaneetsTable;
+class MRWTables;
+
+//! diffusion domain of the random-walk step: the cell itself, or the largest sphere
+//! around the photon that fits in it
+enum MRWDomain {MRW_DOMAIN_CELL = 0, MRW_DOMAIN_SPHERE = 1};
 class MCBoundaryValues;
 class MCOutoupt;
 class MCCoord;
@@ -150,7 +156,6 @@ Real ResLinePre();
 Real XsecLorentzian(Real nu);
 Real XsecDoppler(Real nu, Real tgas);
 Real XsecVoigt(Real nu, Real tgas);
-void InitializeAccelerationOpacity(MonteCarloBlock *pmcb);
 //--------------------- prototypes for scatter.cpp functions -----------------------------
 void NoScatter(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe);
 void ScatterIsotropic(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe);
@@ -320,11 +325,15 @@ public:
 
   MCPolarization polarized;// how much of the polarization state is tracked
   bool acceleration;  // use MRW acceleration
-  bool computedmin;
-  //! <montecarlo>/compute_dmin: build MCCoord::dmin even without MRW acceleration, for a
-  //! user hook that needs the smallest cell width
   bool compute_dmin;
-  bool time_acc;  // use MRW acceleration with time limit
+  Real accel_tau;
+  Real accel_pmax; // cap steps time
+  std::string kgreens_file; // green's function table file
+  KompaneetsTable *kgreens;
+  MRWDomain accel_domain; // cell (default) or sphere
+  Real accel_face_tau; // cell depth that triggers MRW
+  MRWTables *mrw; // MRW table link
+  bool accel_report; // report on MRW usage and success
   bool raytrace_flag; // Will trace photons rather than scatter
   bool general_pusher_flag; // Use integration for photon movement
   bool verbose; // print out more information during run
@@ -620,8 +629,13 @@ public:
   bool coupled; // Whether time dependent code is coupled to hydro
   bool coherent_scattering; // photon does notchange energy after scattering
   bool acceleration;  // use MRW acceleration
-  bool computedmin;
-  bool time_acc;  // use MRW acceleration with time limit
+  AthenaArray<int> accel_mask; // cell mask for MRW acceleration
+  int64_t nmrw, nmrw_decline; // MRW steps taken and declined
+  Real nmrw_scat;
+  //! scatterings by cell optical half-width, bin k holding [2^(k-4), 2^(k-3))
+  static const int NSCATBINS = 20;
+  int64_t scat_tau_hist[NSCATBINS];
+  void BinScatteringDepth(Photon *pphot, int ip);
 
   // Set flags
 
@@ -693,8 +707,6 @@ public:
   AthenaArray<Real> bcc;
   AthenaArray<Real> boost_cmv;
   AthenaArray<Real> boost_lab;
-  AthenaArray<Real> planck_opacity; // for acceleration
-  AthenaArray<Real> planck_inv_opacity; // for acceleration
 
   // functions
   void InitUserMonteCarloBlockData(ParameterInput *pin);
@@ -711,6 +723,8 @@ public:
   void FinalizePhoton(Photon *pphot, int ip);
   void UpdateMoments(Photon *pphot, Real dl, Real etau, int ip);
   void UpdateMoments(Photon *pphot, Real dl, int ip);
+  //! the random-walk step: the whole path, isotropic, at one energy
+  void UpdateMomentsMRW(Photon *pphot, Real ct, Real energy, int ip);
   void UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl, Real k1, Real k2,
                                  Real k3,Real etau, int ip);
   void NormalizeMoments(bool normalize);

@@ -10,6 +10,7 @@
 
 // C++ headers
 #include <cmath>
+#include <vector>
 
 // Athena++ headers
 #include "../athena.hpp"
@@ -22,6 +23,7 @@
 class MeshBlock;
 class ParameterInput;
 class MonteCarloBlock;
+class MRWTables;
 class Photon;
 class Coordinate;
 
@@ -40,10 +42,6 @@ public:
 
   Real dl; // current displacement
   //! bound on the number of steps in a single free flight, accumulated in Photon::nmvp
-  //! across every Move call and every block the photon crosses between scatterings.  It
-  //! catches the flight that never ends -- a near-horizontal photon in an optically thin
-  //! domain with periodic sides -- while leaving a photon that simply scatters often
-  //! alone.  0 disables the cap.
   int capmove;
 
   MonteCarlo *pmy_mc;
@@ -53,27 +51,13 @@ public:
   // function pointers
   UserMoveFunc_t UserWorkInMove;
 
-  // Arrays for MRW acceleration
-  AthenaArray<Real> mrwprob;
-  AthenaArray<Real> mrwdev;
-  AthenaArray<Real> mrwxf;
-  AthenaArray<Real> mrwt;
-  AthenaArray<Real> mrwxi;
-  AthenaArray<Real> mrwp;
-  AthenaArray<Real> mrwrt;
-  AthenaArray<Real> mrwrp;
-  AthenaArray<Real> mrwrr;
-  AthenaArray<Real> mrwta;
-  AthenaArray<Real> mrwtp;
-  AthenaArray<Real> mrwtt;
-
-  int nmax,nxi,np,nt; //used for acceleration arrays
+  const MRWTables *mrw_; // MRW tables (see mrw.hpp)
+  Real mrw_s_pmax_; // sphere time at MRW fraction is accel_pmax
 
   bool acceleration;
   bool boosts;
   bool resonance;
   bool compton;
-  bool time_acc;
 
   // Path stretching (see MonteCarlo::stretch); stretching_ is false when it is off
   bool stretching_;
@@ -101,21 +85,22 @@ public:
   virtual bool UpdateZone(Photon *pphot, int ip);
   virtual bool IsOnBlock(Photon *pphot, int ip);
 //  virtual bool UpdateSingleZone(Photon *pphot, int ip, bool *multizone);
-  virtual void InitializeMRWDist(void);
-  // Acceleration methods
+  // Modified random walk (mrw.cpp)
+  //! the photon's cell as a box in the local orthonormal basis: widths and the photon's
+  //! distances from the lower faces, code length
+  void CellGeometry(Photon *pphot, int ip, Real W[3], Real x[3]);
+  //! distance to the nearest face of the photon's cell, in code length
+  Real FaceDistance(Photon *pphot, int ip);
+  //! whether a step is to be tried here; chi the lab extinction in cm^-1
+  bool MRWTrigger(Photon *pphot, int ip, Real chi);
+  //! one step; false when it declines and leaves the photon untouched
+  bool MRWStep(Photon *pphot, MCRandom *pran, int ip);
+  // Resonant-scattering acceleration (general pusher)
   virtual Real SampleEscapeTime(MCRandom *pran, Real decayRate, Real sphereRadius,
                                 Real diffusionTime);
-  virtual bool MRWAcceleration(Photon *pphot, MCRandom *pran, Real dist, Real tauacc,
-                               int ip);
   virtual void MRWResonanceAcceleration(Photon *pphot, MCRandom *pran, Real dist,
                                Real tauacc, Real &path_length, Real &k1, Real &k2,
                                Real &k3, int ip);
-  virtual Real MRWDist(MCRandom *pran);
-  virtual void ReadComptonGreensFunction(void);
-  virtual Real InterpComptonEnergy(Real x0, Real time, Real prob);
-  virtual void ReadRadiusDistribution(void);
-  virtual void ReadTimeDistribution(void);
-  virtual Real InterpPathTime(Real tau, Real prob);
 
 };
 

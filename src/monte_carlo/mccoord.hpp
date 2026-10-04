@@ -75,7 +75,7 @@ public:
   MCCoord(int ncells1, int ncells2, int ncells3, bool acc);
   ~MCCoord();
 
-  bool computedmin;
+  bool compute_dmin; // <montecarlo> compute_dmin: whether dmin is built
 
   AthenaArray<Real> x1f, x2f, x3f; // face  positions
   AthenaArray<Real> vol;

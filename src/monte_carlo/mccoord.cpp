@@ -194,8 +194,8 @@ MCCoord::MCCoord(Coordinates *pcoord, MonteCarloBlock *pmcb) {
          vol(k,j,i) = 0.;
         }
       }}}
-  computedmin = pmcb->computedmin;
-  if (computedmin) {
+  compute_dmin = pmcb->pmy_mc->compute_dmin;
+  if (compute_dmin) {
     dmin.NewAthenaArray(ncells3,ncells2,ncells1);
     Real dw1,dw2,dw3;
     for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
@@ -229,7 +229,7 @@ MCCoord::MCCoord(int ncells1, int ncells2, int ncells3, bool cdmin) {
   x3f.NewAthenaArray(ncells3+1);
 
   vol.NewAthenaArray(ncells3,ncells2,ncells1);
-  computedmin = cdmin;
+  compute_dmin = cdmin;
   if (cdmin)
     dmin.NewAthenaArray(ncells3,ncells2,ncells1);
 }
@@ -243,7 +243,7 @@ MCCoord::~MCCoord() {
   x2f.DeleteAthenaArray();
   x3f.DeleteAthenaArray();
   vol.DeleteAthenaArray();
-  if (computedmin)
+  if (compute_dmin)
     dmin.DeleteAthenaArray();
 }
 

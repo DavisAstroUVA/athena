@@ -3,12 +3,18 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file mctest.cpp
-//! \brief Problem generator for  monte carlo through uniform sphere
+//! \file mc_sphere_isoth.cpp
+//! \brief Monte Carlo transport through a uniform isothermal sphere.  The escape
+//! surface is the sphere of radius <problem> radius, applied in UserWorkInMove; the
+//! list's user columns are the birth energy, the scattering count at escape and the
+//! unweighted path length, which the sphere_compton tools bin against the Kompaneets
+//! Green's function.
 //
 //========================================================================================
 
 // C++ headers
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 
@@ -36,6 +42,7 @@ namespace {
   bool srcdist,tnorm,planckdist;
   int i1start,i2start,i3start;
   Real logemin, logemax;
+  Real tau_rho_; // the sphere's density
 
   // function headers
   void SphericalEscape(MonteCarloBlock *pmcb, Photon *phot, PhotonPusher *ppusher, int ip);
@@ -52,7 +59,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
   // Gas constant of the default hydrogen-helium mixture, so the temperature the
   // Monte Carlo inverts from this pressure is the one written here.
-  Real rideal = MonteCarloBlock::GasConstant(pin->GetOrAddReal("problem","heabund",0.09));
+  Real heabund = pin->GetOrAddReal("problem","heabund",0.09);
+  Real rideal = MonteCarloBlock::GasConstant(heabund);
   Real c = 2.99792458e10;
   Real temp = pin->GetReal("problem","temp");
   Real tau = pin->GetReal("problem","tau");
@@ -61,23 +69,25 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real gamma = peos->GetGamma();
   vel *= c;
 
-  Real heabund = 0.09; //hardcode for now (should be parameter)
-  //Real heabund = 0.;
   Real mp = 1.6726e-24;
   Real sigmat = 6.65248e-25;
   Real kappaes = sigmat * (1. + 2.*heabund) / (mp * (1.+4.*heabund) );
 
   Real rho = tau / (kappaes * rad0);
-  //printf("rho: %g %g %g %g\n",rho,kappaes,rad0,tau);
-  // density is non-zero only in sphere
+  // Cells whose centre lies outside the sphere get a density floor (a single cell
+  // holding the whole sphere is inside); the escape surface at rad0 keeps photons
+  // out of the floor region anyway
+  Real floor_frac = pin->GetOrAddReal("problem","rho_floor_frac",1.e-10);
   for (int k=ks; k<=ke; k++) {
     for (int j=js; j<=je; j++) {
       for (int i=is; i<=ie; i++) {
-        phydro->u(IDN,k,j,i) = rho;
+        Real r = std::sqrt(SQR(pcoord->x1v(i)) + SQR(pcoord->x2v(j)) + SQR(pcoord->x3v(k)));
+        Real rhoc = (r < rad0) ? rho : rho*floor_frac;
+        phydro->u(IDN,k,j,i) = rhoc;
         phydro->u(IM1,k,j,i) = 0.0;
         phydro->u(IM2,k,j,i) = 0.0;
-        phydro->u(IM3,k,j,i) = rho*vel;
-        phydro->u(IEN,k,j,i) = rideal*rho*temp/(gamma-1.0);
+        phydro->u(IM3,k,j,i) = rhoc*vel;
+        phydro->u(IEN,k,j,i) = rideal*rhoc*temp/(gamma-1.0);
       }
     }
   }
@@ -102,8 +112,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin){
 
   nuser_var = 3;
-  // If time is set in problem generator, terminate photon integration based on time
-  // but if not terminated based on radius
+  // With <problem> time set (a path length, c = 1) the photons stop there; otherwise
+  // at the sphere
   Real time = pin->GetOrAddReal("problem","time",-1.);
   if (time > 0.) {
     EnrollUserWorkInMove(TimedEscape);
@@ -123,6 +133,13 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
   srcdist =pin->GetOrAddBoolean("problem","srcdist",false);
   rad0 = pin->GetReal("problem","radius");
   time0 = pin->GetOrAddReal("problem","time",-1.);
+  {
+    Real heabund = pin->GetOrAddReal("problem","heabund",0.09);
+    Real mp = 1.6726e-24;
+    Real sigmat = 6.65248e-25;
+    Real kappaes = sigmat * (1. + 2.*heabund) / (mp * (1.+4.*heabund) );
+    tau_rho_ = pin->GetReal("problem","tau") / (kappaes * rad0);
+  }
 
   if (pmy_mc->emission_flag == EMISNONE) {
     planckdist = pin->GetOrAddBoolean("problem","planckdist",false);
@@ -167,21 +184,44 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     if ((0. > pcoord->x3f(i)) && (0. <= pcoord->x3f(i+1)))
       i3start = i;
   }
-  if ((i1start < 0) || (i2start < 0) || (i3start < 0)) {
-    std::stringstream msg;
-    msg << "### FATAL ERROR in MonteCarloProblemGenerator" << std::endl
-        << "Origin not found within domain." << std::endl;
-    throw std::runtime_error(msg.str().c_str());
+  const bool has_origin = (i1start >= 0) && (i2start >= 0) && (i3start >= 0);
+
+  // With no emission function the block has to be given its photon count; the point
+  // source goes to the block holding the origin.  Free-free emission uses the standard
+  // per-cell emission array, which is already zero (to the floor) outside the sphere.
+  if (pmy_mc->emission_flag == EMISNONE)
+    nphremain = has_origin ? pin->GetInteger64("montecarlo","nphot") : 0;
+
+  // The random-walk step is for cells wholly inside the sphere: a cell the escape surface
+  // cuts is not the uniform medium the step assumes
+  if (accel_mask.GetSize() > 0) {
+    for (int k=ks; k<=ke; k++) {
+      for (int j=js; j<=je; j++) {
+        for (int i=is; i<=ie; i++) {
+          Real rmax = 0.;
+          for (int c=0; c<8; c++) {
+            Real x = (c & 1) ? pcoord->x1f(i+1) : pcoord->x1f(i);
+            Real y = (c & 2) ? pcoord->x2f(j+1) : pcoord->x2f(j);
+            Real z = (c & 4) ? pcoord->x3f(k+1) : pcoord->x3f(k);
+            rmax = std::max(rmax, std::sqrt(x*x + y*y + z*z));
+          }
+          accel_mask(k,j,i) = (rmax < rad0) ? 1 : 0;
+        }
+      }
+    }
   }
 
-  if (pmy_mc->emission_flag == EMISFF) {
-    // Adjust for smaller emission volume
-    Real cellvol = pcoord->vol(i3start,i2start,i1start);
-    Real spherevol = 4./3.*PI*pow(rad0,3);
-    emission(i3start,i2start,i1start) *= (spherevol/cellvol);
-    pcoord->vol(i3start,i2start,i1start) *= (spherevol/cellvol);
-    minweight *= (spherevol/cellvol);
-  }
+  // Report the volume actually laid down inside the sphere, since the cells are in or
+  // out by their centres
+  Real vin = 0.;
+  for (int k=ks; k<=ke; k++)
+    for (int j=js; j<=je; j++)
+      for (int i=is; i<=ie; i++)
+        if (rho(k,j,i) > 0.5*tau_rho_) vin += pcoord->vol(k,j,i);
+  if (pmy_mc->verbose && vin > 0.)
+    std::cout << "sphere block " << pmy_block->gid << ": volume inside / cell volume = "
+              << vin/(4./3.*PI*rad0*rad0*rad0) << (has_origin ? " (holds the origin)" : "")
+              << std::endl;
 
 }
 
@@ -192,23 +232,26 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
 void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etype) {
 
+  // Free-free photons are spread over the cells in proportion to their emission
+  if (pmy_mc->emission_flag == EMISFF)
+    SetEmissionCellWeight(pphot,ips,ipe);
+
   for (int ip=ips; ip<=ipe; ip++) {
 
-    pphot->user[0][ip] = 0.;
+    // user[0] birth energy (set below), user[1] scattering count at escape,
+    // user[2] unweighted path length
     pphot->user[1][ip] = 0.;
     pphot->user[2][ip] = 0.;
 
     // Set status flag
     pphot->statp[ip] = EVOLVING;
 
-    // Initialize cell number
-    int i1,i2,i3;
-    pphot->i1p[ip] = i1 = i1start;
-    pphot->i2p[ip] = i2 = i2start;
-    pphot->i3p[ip] = i3 = i3start;
-
     // Initialize Photon weights, energy, direction, polarization
     if (pmy_mc->emission_flag == EMISNONE) {
+      // the point source: this block holds the origin
+      pphot->i1p[ip] = i1start;
+      pphot->i2p[ip] = i2start;
+      pphot->i3p[ip] = i3start;
       pphot->wp[ip] = 1.0;
       if (planckdist)
         pphot->ep[ip] = PlanckDist(tsource,pran);
@@ -274,37 +317,29 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
       }
 
     } else if (pmy_mc->emission_flag == EMISFF) {
-      // Set weight according to the emission array, which is the relative number
-      // of photons per unit time emitted in each cell
-      pphot->wp[ip] = emission(i3,i2,i1);
-
-      // Obtain intitial energy, polarization, direction and weight
-      // Utilize free-free emission function in emission.cpp
+      // Cell and weight were set above; position uniform in the cell, energy from the
+      // free-free emission function
+      GetZonePosition(pphot,pran,pcoord,ip);
+      pphot->x0p[ip] = 0.; //time
       if(tnorm) {
-        Real logtg = log(tgas(i3,i2,i1));
+        Real logtg = log(tgas(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]));
         PhotonEmitFreeFree(this,pphot,logemin+logtg,logemax+logtg,ip);
       } else{
         PhotonEmitFreeFree(this,pphot,logemin,logemax,ip);
       }
-
-      Real r0 = pow(pran->uniform()*rad0*rad0*rad0,1./3.);
-      Real phi = 2. * PI * pran->uniform();
-      Real cphi = cos(phi);
-      Real sphi = sin(phi);
-      Real cth = 2. * pran->uniform() - 1.;
-      Real sth = sqrt(1. - SQR(cth));
-      pphot->x1p[ip] = r0*sth*cphi;
-      pphot->x2p[ip] = r0*sth*sphi;
-      pphot->x3p[ip] = r0*cth;
-      pphot->x0p[ip] = 0.; //time
     }
 
-    // Set status flag
+    // Set status flag and the time budget; with no budget the pusher takes no step and
+    // the block loop scatters the photon in place forever
+    pphot->dtp[ip] = pmy_mc->tmax;
     if (pphot->wp[ip] < 0.0)
       pphot->statp[ip] = DESTROYED;
     else
       pphot->statp[ip] = EVOLVING;
 
+
+    pphot->user[0][ip] = pphot->ep[ip];
+    pphot->nscp[ip] = 0;
 
     // Initialize the absorption and scattering extinction coefficients
     // to the values appropriate in the emitted zone
@@ -321,22 +356,22 @@ namespace {
 void SphericalEscape(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher,
                      int ip) {
 
-  pphot->user[0][ip] += ppusher->dl * pphot->wp[ip];
-  pphot->user[1][ip] += ppusher->dl * pphot->wp[ip] * pphot->ep[ip];
-  pphot->user[2][ip] += ppusher->dl * pphot->wp[ip] * pphot->acp[ip];
+  pphot->user[2][ip] += ppusher->dl;
 
   // First check radius condition
   Real r = sqrt(SQR(pphot->x1p[ip])+SQR(pphot->x2p[ip])+SQR(pphot->x3p[ip]));
   if (r >= rad0) {
+    // Back the photon up to the sphere; the Cartesian pusher advances x0p by the path
+    // length, so the correction is a length too
     Real dr = r-rad0;
-    // assume cartesian for now
-    pphot->x0p[ip] -= dr/2.99792458e10;
+    pphot->x0p[ip] -= dr;
+    pphot->user[2][ip] -= dr;
     pphot->x1p[ip] -= pphot->k1p[ip]*dr;
     pphot->x2p[ip] -= pphot->k2p[ip]*dr;
     pphot->x3p[ip] -= pphot->k3p[ip]*dr;
 
+    pphot->user[1][ip] = pphot->nscp[ip];
     pphot->statp[ip] = ESCAPED;
-    //pphot->face = BoundaryFace::undef;
   }
 
 }
@@ -349,25 +384,25 @@ void TimedEscape(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher,
   Real r = sqrt(SQR(pphot->x1p[ip])+SQR(pphot->x2p[ip])+SQR(pphot->x3p[ip]));
   if (r >= rad0) {
     Real dr = r-rad0;
-    // assume cartesian for now
-    pphot->x0p[ip] -= dr/2.99792458e10;
+    pphot->x0p[ip] -= dr;
     pphot->x1p[ip] -= pphot->k1p[ip]*dr;
     pphot->x2p[ip] -= pphot->k2p[ip]*dr;
     pphot->x3p[ip] -= pphot->k3p[ip]*dr;
 
+    pphot->user[1][ip] = pphot->nscp[ip];
     pphot->statp[ip] = ESCAPED;
-    //pphot->face = BoundaryFace::undef;
   }
-  // Then check time condition -- ensures time is not over estimated
+  // Then check the path condition (x0p is the path length) so the photon is not
+  // carried past time0
   if (pphot->x0p[ip] >= time0) {
     Real dt = pphot->x0p[ip] - time0;
     pphot->x0p[ip] -= dt;
-    pphot->x1p[ip] -= pphot->k1p[ip]*dt*2.99792458e10;
-    pphot->x2p[ip] -= pphot->k2p[ip]*dt*2.99792458e10;
-    pphot->x3p[ip] -= pphot->k3p[ip]*dt*2.99792458e10;
+    pphot->x1p[ip] -= pphot->k1p[ip]*dt;
+    pphot->x2p[ip] -= pphot->k2p[ip]*dt;
+    pphot->x3p[ip] -= pphot->k3p[ip]*dt;
 
+    pphot->user[1][ip] = pphot->nscp[ip];
     pphot->statp[ip] = ESCAPED;
-    //pphot->face = BoundaryFace::undef;
   }
 }
 

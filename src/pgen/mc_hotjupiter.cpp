@@ -389,15 +389,12 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   flag_core_skipping = pin->GetOrAddBoolean("problem", "core_skip", false);
   if (flag_core_skipping) {
     // CoreSkipping compares the cell's comoving line optical depth against a threshold,
-    // so it reads MCCoord::dmin.  That array is only built under MRW acceleration or
-    // <montecarlo>/compute_dmin
-    if (!acceleration && !compute_dmin) {
+    // so it reads MCCoord::dmin, which is built only under <montecarlo>/compute_dmin
+    if (!compute_dmin) {
       std::stringstream msg;
       msg << "### FATAL ERROR in MonteCarlo::InitUserMonteCarloData" << std::endl
           << "<problem>/core_skip needs the smallest cell width, MCCoord::dmin."
-          << std::endl
-          << "Set <montecarlo>/compute_dmin = true (or acceleration = true, which also "
-          << "turns on" << std::endl << "the MRW random walk)." << std::endl;
+          << std::endl << "Set <montecarlo>/compute_dmin = true." << std::endl;
       throw std::runtime_error(msg.str());
     }
     EnrollUserWorkInMove(CoreSkipping);

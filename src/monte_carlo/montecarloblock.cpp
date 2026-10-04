@@ -86,7 +86,6 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   boosts = pmy_mc->boosts;
   coupled = pmy_mc->coupled;
   acceleration = pmy_mc->acceleration;
-  time_acc = pmy_mc->time_acc;
   // set in mcoutput if output requested
   mom_flag_lab = pmy_mc->pmcout->mom_flag_lab;
   mom_flag_com = pmy_mc->pmcout->mom_flag_com;
@@ -247,8 +246,6 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   }
 
   // Set up photon movement and initialization methods
-  computedmin = acceleration || pmy_mc->compute_dmin;
-  pmy_mc->computedmin = computedmin;
   tetrads = true;
   // Number of cells including ghosts, for the standalone (pmb == nullptr) constructors.
   const int mc1 = nx1+2*(NGHOST), mc2 = nx2+2*(NGHOST), mc3 = nx3+2*(NGHOST);
@@ -263,12 +260,12 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       if (pmy_mc->general_pusher_flag) {
         ppusher = new GeneralPusher(this);
         pcoord = (pmb != nullptr) ? new MCCartesian(pmb->pcoord,this)
-                                  : new MCCartesian(mc1,mc2,mc3,computedmin);
+                                  : new MCCartesian(mc1,mc2,mc3,pmy_mc->compute_dmin);
       } else {
         tetrads = false;
         ppusher = new CartesianPusher(this);
         pcoord = (pmb != nullptr) ? new MCCoord(pmb->pcoord,this)
-                                  : new MCCoord(mc1,mc2,mc3,computedmin);
+                                  : new MCCoord(mc1,mc2,mc3,pmy_mc->compute_dmin);
       }
       break;
 
@@ -277,12 +274,12 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       if (pmy_mc->general_pusher_flag) {
         ppusher = new GeneralPusher(this);
         pcoord = (pmb != nullptr) ? new MCSphericalPolar(pmb->pcoord,this)
-                                  : new MCSphericalPolar(mc1,mc2,mc3,computedmin);
+                                  : new MCSphericalPolar(mc1,mc2,mc3,pmy_mc->compute_dmin);
       } else {
         tetrads = false;
         ppusher = new SphericalPolarPusher(this);
         pcoord = (pmb != nullptr) ? new MCCoord(pmb->pcoord,this)
-                                  : new MCCoord(mc1,mc2,mc3,computedmin);
+                                  : new MCCoord(mc1,mc2,mc3,pmy_mc->compute_dmin);
       }
       break;
 
@@ -290,21 +287,21 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       GetZonePosition = GetZonePositionCylindrical;
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCCylindrical(pmb->pcoord,this)
-                                : new MCCylindrical(mc1,mc2,mc3,computedmin);
+                                : new MCCylindrical(mc1,mc2,mc3,pmy_mc->compute_dmin);
       break;
 
     case MCCOORD_MINKOWSKI:
       GetZonePosition = GetZonePositionCartesian;
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCMinkowski(pmb->pcoord,this)
-                                : new MCMinkowski(mc1,mc2,mc3,computedmin);
+                                : new MCMinkowski(mc1,mc2,mc3,pmy_mc->compute_dmin);
       break;
 
     case MCCOORD_KERR_SCHILD:
       GetZonePosition = GetZonePositionSphericalPolar;//approximate
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCKerrSchild(pmb->pcoord,this)
-                                : new MCKerrSchild(mc1,mc2,mc3,computedmin);
+                                : new MCKerrSchild(mc1,mc2,mc3,pmy_mc->compute_dmin);
       set_bh_params = (pmb == nullptr);
       break;
 
@@ -312,7 +309,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       GetZonePosition = GetZonePositionSphericalPolar;//approximate
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCBoyerLindquist(pmb->pcoord,this)
-                                : new MCBoyerLindquist(mc1,mc2,mc3,computedmin);
+                                : new MCBoyerLindquist(mc1,mc2,mc3,pmy_mc->compute_dmin);
       set_bh_params = (pmb == nullptr);
       break;
 
@@ -323,7 +320,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       // then dereferenced it for SetSpin, and read coord/a and coord/m unconditionally
       // even though the MeshBlock path already supplies them.
       pcoord = (pmb != nullptr) ? new MCKerrSchildCartesian(pmb->pcoord,this)
-                                : new MCKerrSchildCartesian(mc1,mc2,mc3,computedmin);
+                                : new MCKerrSchildCartesian(mc1,mc2,mc3,pmy_mc->compute_dmin);
       set_bh_params = (pmb == nullptr);
       break;
 
@@ -331,7 +328,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       GetZonePosition = GetZonePositionCartesian;
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCSnake(pmb->pcoord,this)
-                                : new MCSnake(mc1,mc2,mc3,computedmin);
+                                : new MCSnake(mc1,mc2,mc3,pmy_mc->compute_dmin);
       // Not <coord>/a: gr_user requires that name for the black hole spin and GRUser
       // reads it unconditionally, so the shear amplitude needs its own key.  Set on both
       // paths, since the MCCoord(Coordinates*) constructor has no snake parameters to
@@ -471,9 +468,12 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     if (pmy_mc->nescape > 0) escape_prob.NewAthenaArray(nx3,nx2,nx1,pmy_mc->nescape);
   }
   wesc_sum = wesc_sq = 0.;
-  if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
-    planck_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
-    planck_inv_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
+  nmrw = nmrw_decline = 0;
+  nmrw_scat = 0.;
+  for (int b=0; b<NSCATBINS; ++b) scat_tau_hist[b] = 0;
+  if (acceleration) {
+    accel_mask.NewAthenaArray(ncells3,ncells2,ncells1);
+    for (int n=0; n<accel_mask.GetSize(); ++n) accel_mask(n) = 1;
   }
 
  // Create user monte carlo block data
@@ -521,10 +521,7 @@ MonteCarloBlock::~MonteCarloBlock() {
   if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) emit_count_.DeleteAthenaArray();
   if (importance.GetSize() > 0) importance.DeleteAthenaArray();
   if (escape_prob.GetSize() > 0) escape_prob.DeleteAthenaArray();
-  if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
-    planck_opacity.DeleteAthenaArray();
-    planck_inv_opacity.DeleteAthenaArray();
-  }
+  if (accel_mask.GetSize() > 0) accel_mask.DeleteAthenaArray();
 }
 
 //----------------------------------------------------------------------------------------
@@ -907,6 +904,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         FromScatteringBasis(this, pphot, ip);
       nscat++;
       pphot->nscp[ip]++;
+      if (pmy_mc->accel_report) BinScatteringDepth(pphot,ip);
       // Scattering starts a new free flight
       pphot->nmvp[ip] = 0;
       pphot->strp[ip] = 0.;
@@ -3161,3 +3159,66 @@ Real MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip, const Real g
     mcb_bcs[BoundaryFace::outer_x3] = input_bcs[BoundaryFace::outer_x3];
   }
   }*/
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::UpdateMomentsMRW(Photon *pphot, Real ct, Real energy, int ip)
+//! \brief the random-walk step's contribution to the lab moments of its cell: the whole
+//!        path ct, isotropic, at one energy.  Exact in expectation over many steps.
+
+void MonteCarloBlock::UpdateMomentsMRW(Photon *pphot, Real ct, Real energy, int ip) {
+  if (!mom_flag_lab) return;
+  const int type = pphot->type[ip];
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  // ct and energy are comoving; this is the comoving energy density estimate
+  const Real ec = pphot->wp[ip]*energy*ct/MCConstants::c_cgs;
+  if (std::isinf(ec) || std::isnan(ec)) {
+    pphot->statp[ip] = DESTROYED;
+    if (pmy_mc->verbose)
+      pphot->PrintPhoton("Warning: Nan/Inf encountered in UpdateMomentsMRW(),"
+                         " photon destroyed",ip);
+    return;
+  }
+  // an isotropic comoving field seen from the lab, flat spacetime: E = g^2 (1 + b^2/3) Ec,
+  // F^i = (4/3) g^2 b^i c Ec, P^ij = Ec (d^ij/3 + (4/3) g^2 b^i b^j)
+  Real beta[3] = {0., 0., 0.}, g2 = 1., b2 = 0.;
+  if (boosts && !GENERAL_RELATIVITY && vel.GetSize() > 0) {
+    const Real gam = vel(i3,i2,i1,0);
+    for (int m=0; m<3; ++m) beta[m] = vel(i3,i2,i1,m+1)/gam;
+    b2 = SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]);
+    g2 = gam*gam;
+  }
+  moments(type,MCIER,i3,i2,i1) += g2*(1. + b2/3.)*ec;
+  const Real fc = 4./3.*g2*ec;
+  moments(type,MCIFR1,i3,i2,i1) += fc*beta[0]*MCConstants::c_cgs;
+  moments(type,MCIFR2,i3,i2,i1) += fc*beta[1]*MCConstants::c_cgs;
+  moments(type,MCIFR3,i3,i2,i1) += fc*beta[2]*MCConstants::c_cgs;
+  moments(type,MCIPR11,i3,i2,i1) += ec/3. + fc*beta[0]*beta[0];
+  moments(type,MCIPR22,i3,i2,i1) += ec/3. + fc*beta[1]*beta[1];
+  moments(type,MCIPR33,i3,i2,i1) += ec/3. + fc*beta[2]*beta[2];
+  moments(type,MCIPR12,i3,i2,i1) += fc*beta[0]*beta[1];
+  moments(type,MCIPR13,i3,i2,i1) += fc*beta[0]*beta[2];
+  moments(type,MCIPR23,i3,i2,i1) += fc*beta[1]*beta[2];
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::BinScatteringDepth(Photon *pphot, int ip)
+//! \brief count this scattering under the optical half-width of its cell, the smallest
+//!        half-width times the extinction at the photon's energy (<montecarlo>
+//!        accel_report)
+
+void MonteCarloBlock::BinScatteringDepth(Photon *pphot, int ip) {
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  Real w = pcoord->x1f(i1+1) - pcoord->x1f(i1);
+  if (topology == MCTOPO_SPHERICAL) {
+    const Real r = pphot->x1p[ip];
+    w = std::min(w, r*(pcoord->x2f(i2+1) - pcoord->x2f(i2)));
+    w = std::min(w, r*std::sin(pphot->x2p[ip])*(pcoord->x3f(i3+1) - pcoord->x3f(i3)));
+  } else {
+    w = std::min(w, pcoord->x2f(i2+1) - pcoord->x2f(i2));
+    w = std::min(w, pcoord->x3f(i3+1) - pcoord->x3f(i3));
+  }
+  const Real tau = 0.5*w*l_cgs*(pphot->scp[ip] + pphot->acp[ip]);
+  int b = (tau > 0.) ? static_cast<int>(std::floor(std::log2(tau))) + 4 : 0;
+  b = std::min(std::max(b, 0), NSCATBINS-1);
+  scat_tau_hist[b]++;
+}
