@@ -185,6 +185,8 @@ public:
   Real acon[4][4];
   bool acon_valid;
   Real StepSize(Photon *pphot, int ip);
+  //! the step to the nearest cell face along k, straight-line estimate
+  Real FaceStep(Photon *pphot, int ip);
 
   // The metric pair at the point the last RK4 step ended
   Real metric_x[4];

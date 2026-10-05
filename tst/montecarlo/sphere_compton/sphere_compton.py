@@ -298,7 +298,7 @@ def write_athinput(args, filename):
         if block == 'montecarlo' and line.startswith('polarized') and args.general_pusher:
             # the integrator's step is a fraction of the cell crossing; the fixed default
             # affine step is far too small for a cell of 1e10 cm
-            line += "general_pusher = true\nvarystep = true\nstepsize = 0.02\n"
+            line += f"general_pusher = true\nvarystep = true\nstepsize = {args.stepsize}\n"
         if block == 'montecarlo' and line.startswith('polarized') and args.accel_report:
             line += "accel_report = true\n"
         if block == 'montecarlo' and line.startswith('polarized') and args.accel \
@@ -338,6 +338,8 @@ def parse_args(argv=None):
     ap.add_argument('--kgreens', default=None, help='Kompaneets table binary')
     ap.add_argument('--general-pusher', action='store_true',
                     help='integrate with the general pusher (flat spacetime here)')
+    ap.add_argument('--stepsize', type=float, default=0.02,
+                    help='general pusher step as a fraction of the cell crossing')
     ap.add_argument('--beta', type=float, default=0.,
                     help='uniform fluid velocity along z in units of c, with boosts on')
     ap.add_argument('--compare-to', default=None,

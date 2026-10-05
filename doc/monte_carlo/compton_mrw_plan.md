@@ -1,6 +1,6 @@
 # Compton scattering acceleration by a modified random walk: assessment and plan
 
-Status: **Phase A done 2026-10-04 on `compton`.**  `mc_sphere_isoth` had not run since the
+Status: **Phases A to E done 2026-10-04 on `compton`; the XRB says the in-cell step is correct and saves nothing on that grid (Section 7), so the region step of Section 6.7 is the open decision.**  Phase A:  `mc_sphere_isoth` had not run since the
 photon time budget was introduced: with `emission = none` it never set its block's photon
 count (nothing transported) and never set `dtp` (the pusher took no step and the block
 loop scattered the stationary photon forever).  Both fixed, with the user columns and the
@@ -635,9 +635,67 @@ the walk was in.  (2) The advection room under the general pusher used only the 
 velocity relative to the normal observer, while the cell is fixed in coordinates and the
 fluid's coordinate drift includes the shift; the room and the move now use u^i/gamma
 along the cell's edges, and the coordinate time advances by the lab proper time over
-the lapse.  The lists of the rerun are the check that no such photon remains, and a
+the lapse.  **What the XRB timing turned up instead** (`lb_report` on the short deck, 256 ranks,
+acceleration off): 15.2 geodesic steps per scattering at `stepsize` 0.1, 1.27 us per
+step; the busiest rank at 3.84 times its fair share with the ranks idle three quarters
+of the wall through 628,658 synchronous passes, and no `<loadbalancing>` block in the
+production deck; and a step-size dependence of the transport itself, escapers 47,213 at
+`stepsize` 0.05, 46,481 at 0.1 and 42,888 at 0.5 (Poisson error about 215), absorbed
+the other way, bands 31 to 44 percent lower at 0.5.  The cause is in
+`GeneralPusher::StepSize`: the step is a fraction of the cell width over the direction
+cosine, not of the distance to the face ahead, so a photon near a face steps across it
+charged the opacity and frequency shift of the cell it left.  Fixed by capping the step
+at the straight-line distance to the nearest face (`FaceStep`), after which `stepsize`
+governs only the integration inside a cell; the production value of 0.1 carries a
+systematic of about 3 percent in the escaping fraction, and the balancer is a run with
+no code change.  Both are worth more on this grid than the random walk.
+
+With the cap, on the flat gridded sphere under the general pusher, `stepsize` 0.5 and
+0.02 give the same run to the last digit (the geodesic is straight and every draw is per
+flight, so the step can no longer enter), both within 1.5 of the two-sample scale of the
+uncapped run, and the moving-medium and walk cases are unchanged.  The first version of
+the cap nudged the photon across the face by a fraction of the remaining distance, which
+for a photon a rounding error inside a face is below the position's resolution, and the
+photon stepped there forever; the margin is a fixed fraction of the cell crossing.  The
+XRB check is the short deck at 0.1 and 0.5 with the cap: the escaping fractions should
+now agree, and their common value against the uncapped 0.05 run is the size of the
+systematic the production runs carry.
+
+The stratified gate (`tst/montecarlo/disk_atmosphere`, 1e6 and 4e6 photons, one rank)
+passes the same way for both pushers on the capped code: the polarization norm falls at
+order 0.40 (general) and 0.36 (legacy) against the expected 0.5, 0.065 and 0.063 at 4e6
+photons; the grazing band has the right sign in both and is under-powered at this count
+in both; the general pusher's face-on band sits 2.1 sigma above Feautrier, the legacy
+0.7 below, which is within what the plan for the polar axis records for the general
+pusher.  The general pusher took 5.5 times the legacy pusher's time at its default
+`stepsize` 0.5, which is the per-step cost the XRB pays everywhere.
+
+The balancer run (`d01_accel2_lb`, `lb_initial = photons`) moved 7,612 of 7,680 blocks
+in 120 s and left the busiest rank, 255, at 3.89 times its fair share with 11.7 s, the
+same seconds it had before with different blocks; the costliest blocks became the
+highest gids, which are the ones that landed on it.  The cost follows the rank, not the
+blocks.  Core binding changed nothing (`d01_accel3_lb`), so it is the region those gids
+cover, a thin one where photons take many steps per scattering while emitting little,
+which both the default and the emission-share partitions pile onto the last rank.
+
+**The measured-cost partition works** (`d01_emis_lbc` writes `<loadbalancing>
+cost_file`, `d01_emis_lbc2` reads it and redistributes before the first photon):
+7,522 blocks moved, busiest rank 1.16 times its fair share against 3.86, transport wall
+4.47 s against 11.7 s.  Two costs come with it: the redistribution took 105 s on 256
+ranks, and the peak memory during it was 7.2 GB per rank against 2.6 GB plain (payloads
+in flight while blocks are rebuilt), which on a 256 GB node at 32 ranks is close to the
+limit.  For the production run that is a one-time 105 s against a transport that would
+fall from about 980 s to about 380 s.  Both costs disappear if the mesh is partitioned on
+the cost file at construction instead of rebuilt afterwards; that is the follow-up.
+
+The lists of the rerun are the check that no such photon remains, and a
 band sum that includes every photon (`band_luminosity.py`'s total column) is the
-detector: the bands alone did not see them.
+detector: the bands alone did not see them.  Rerun (`d01_accel2`, 1e5 photons, one
+output): no photon with non-positive energy or negative coordinate time, the largest
+weight 1.7e31 against 1.5e31 in the analog short run, the same two MeV corona photons
+in both; total luminosity 0.96 of the analog run at 210 effective samples; 113,090
+steps from 345,375 attempts, 177,717 declined as too thin once the comoving extinction
+and the drift room are known and 54,568 outside the Kompaneets guards that need a frame.
 
 ## 7. Phase E: verification
 
