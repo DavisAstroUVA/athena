@@ -29,14 +29,16 @@ class MRWTables;
 //! \brief the photon's cell as the random-walk step sees it: a box in the lab
 //!        (Eulerian) frame, with the fluid velocity relative to that frame
 struct MRWCellFrame {
-  Real W[3];         // widths along the box axes, code length
+  Real W[3];         // widths along the box axes, code length (lab frame)
+  Real wc[3];        // the same edges in coordinate units (the cell's widths)
   Real x[3];         // the photon's offsets from the lower faces, code length
-  Real beta[3];      // fluid velocity along the box axes, units of c
-  Real beta_tet[3];  // the same on the lab tetrad legs (equal for the legacy pushers)
-  Real gam;          // its Lorentz factor
-  Real ehat[3][3];   // box axis i on the lab tetrad legs a: ehat[i][a]
-  Real econ[4][4];   // lab tetrad legs in coordinate components (general pusher)
-  bool general;      // built by the general pusher: displacements go through econ
+  Real beta[3];      // the fluid's drift relative to the cell along the box axes, in
+                     // box lengths per unit lab time (units of c); under the general
+                     // pusher this is the whole coordinate drift u^i/gamma, shift included
+  Real beta_tet[3];  // the fluid's velocity on the lab tetrad legs, for the moments
+  Real gam;          // its Lorentz factor against the lab (normal) observer
+  Real lapse;        // lab proper time per coordinate time (1 for the legacy pushers)
+  bool general;      // built by the general pusher
 };
 class Photon;
 class Coordinate;

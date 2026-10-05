@@ -52,6 +52,11 @@ class MRWTables;
 //! diffusion domain of the random-walk step: the cell itself, or the largest sphere
 //! around the photon that fits in it
 enum MRWDomain {MRW_DOMAIN_CELL = 0, MRW_DOMAIN_SPHERE = 1};
+//! why a random-walk step declined: no usable frame; the domain too thin once the
+//! comoving extinction and the advection room are known; outside the Kompaneets
+//! description (theta, x theta, absorption, the table's x range); no time budget left
+enum MRWDecline {MRW_DECLINE_FRAME = 0, MRW_DECLINE_THIN = 1, MRW_DECLINE_COMPTON = 2,
+                 MRW_DECLINE_BUDGET = 3, MRW_DECLINE_OTHER = 4};
 class MCBoundaryValues;
 class MCOutoupt;
 class MCCoord;
@@ -632,6 +637,8 @@ public:
   AthenaArray<int> accel_mask; // cell mask for MRW acceleration
   int64_t nmrw, nmrw_decline; // MRW steps taken and declined
   Real nmrw_scat;
+  static const int NMRWDECLINE = 5;
+  int64_t nmrw_declined[NMRWDECLINE]; // the declines by reason (MRWDecline)
   //! scatterings by cell optical half-width, bin k holding [2^(k-4), 2^(k-3))
   static const int NSCATBINS = 20;
   int64_t scat_tau_hist[NSCATBINS];

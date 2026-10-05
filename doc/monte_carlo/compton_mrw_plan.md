@@ -609,6 +609,36 @@ of the scatterings in both pushers here, with 90k to 150k attempts declined for 
 advection room.  What remains of Phase D is the curved-spacetime validation, which is
 the XRB of Phase E.
 
+**XRB, first pass (2026-10-04 evening, hires snapshot on andes, 256 ranks, emission
+weights, 2.5e6 photons, four outputs, `accel_tau` 20, `accel_face_tau` 5, against
+`d01_emis2`).**  `accel_report` on the analog run: scatterings by cell optical half-width
+27 percent below 1, 15 percent 1 to 2, 17 percent 2 to 4, 16 percent 4 to 8, 13 percent
+8 to 16, 8 percent 16 to 32, 2.3 percent 32 to 64, 0.9 percent above; so cells thick
+enough to step in at the threshold hold 9 percent of the work and 60 percent sits in
+cells of 1 to 16 mean free paths.  The accelerated run: bands against emission with the
+error from both runs' output scatter 0.971 +- 0.016 (0.1 to 0.3 keV), 0.98 +- 0.04,
+1.02 +- 0.03, 1.04 +- 0.11 (3 to 10 keV); escape and absorption counts equal to a
+fraction of a percent; the walk stood for 52 million scatterings per output, 6 percent
+of the total, from 7.3 million attempts per output of which 69 percent declined; wall
+1031 s against 980 s.  Correct in the bands, no saving: on this grid the in-cell step
+reaches too little of the work and each attempt under the general pusher costs a tetrad
+and two transforms, so the region step of Section 6.7 is where any saving lies.  The
+trigger now rejects the hot corona (theta, x theta, the table's x range) before any frame
+is built, and the report counts the declines by reason.
+
+Two defects found from the lists, both fixed: a handful of escapers had energies of
+plus or minus MeV and coordinate times run backwards.  (1) A step whose cell update
+handed the photon to another block returned before transforming it back from the
+comoving frame, so it crossed carrying a unit direction where the general pusher expects
+dimensional components; the transform now comes before the cell update, with the cell
+the walk was in.  (2) The advection room under the general pusher used only the fluid's
+velocity relative to the normal observer, while the cell is fixed in coordinates and the
+fluid's coordinate drift includes the shift; the room and the move now use u^i/gamma
+along the cell's edges, and the coordinate time advances by the lab proper time over
+the lapse.  The lists of the rerun are the check that no such photon remains, and a
+band sum that includes every photon (`band_luminosity.py`'s total column) is the
+detector: the bands alone did not see them.
+
 ## 7. Phase E: verification
 
 **Sphere, static** (Phase B grid), MRW against analog on the same deck, with and

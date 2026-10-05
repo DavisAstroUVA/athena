@@ -793,6 +793,7 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
     pmcb->nsplit = pmcb->nroul = 0;
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
     pmcb->loop_max_size = loop_max;
@@ -1410,6 +1411,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     pmcb->nsplit = pmcb->nroul = 0;
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
   }
@@ -1433,6 +1435,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       pmcb->nsplit = pmcb->nroul = 0;
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
       pmcb->wesc_sum = pmcb->wesc_sq = 0.;
       pmcb->lb_time = 0.0;
@@ -1517,6 +1520,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     Real wesc_sum = 0., wesc_sq = 0., nmrw_scat = 0.;
     int64_t scat_hist[MonteCarloBlock::NSCATBINS];
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] = 0;
+    int64_t declined[MonteCarloBlock::NMRWDECLINE];
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) declined[b] = 0;
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
       nsplit += pmcb->nsplit;
@@ -1525,6 +1530,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       nmrw_decline += pmcb->nmrw_decline;
       nmrw_scat += pmcb->nmrw_scat;
       for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] += pmcb->scat_tau_hist[b];
+      for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) declined[b] += pmcb->nmrw_declined[b];
       wesc_sum += pmcb->wesc_sum;
       wesc_sq += pmcb->wesc_sq;
       nesc += pmcb->nesc;
@@ -1551,6 +1557,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&nmrw_scat,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,scat_hist,MonteCarloBlock::NSCATBINS,MPI_INT64_T,MPI_SUM,
                   MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,declined,MonteCarloBlock::NMRWDECLINE,MPI_INT64_T,MPI_SUM,
+                  MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sum,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sq,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
   #endif
@@ -1575,7 +1583,11 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   << " samples rouletted" << std::endl;
       if (acceleration)
         std::cout << "random walk: " << nmrw << " steps standing for " << nmrw_scat
-                  << " scatterings, " << nmrw_decline << " declined" << std::endl;
+                  << " scatterings, " << nmrw_decline << " declined (no frame "
+                  << declined[MRW_DECLINE_FRAME] << ", too thin " << declined[MRW_DECLINE_THIN]
+                  << ", outside Kompaneets " << declined[MRW_DECLINE_COMPTON]
+                  << ", no budget " << declined[MRW_DECLINE_BUDGET] << ", other "
+                  << declined[MRW_DECLINE_OTHER] << ")" << std::endl;
       if (accel_report) {
         // the share of the analog scatterings by the optical half-width of their cell
         int64_t tot = 0;
@@ -2008,6 +2020,7 @@ MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
   pmcb->nsplit = pmcb->nroul = 0;
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
   pmcb->loop_max_size = ComputeLoopMax();
   // The problem generator runs before the payload is unpacked, exactly as at startup:

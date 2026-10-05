@@ -459,9 +459,10 @@ bool PhotonPusher::MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr) {
   CellGeometry(pphot, ip, fr.W, fr.x);
   fr.general = false;
   fr.gam = 1.;
+  fr.lapse = 1.;
   for (int i=0; i<3; ++i) {
+    fr.wc[i] = fr.W[i];
     fr.beta[i] = fr.beta_tet[i] = 0.;
-    for (int a=0; a<3; ++a) fr.ehat[i][a] = (i == a) ? 1. : 0.;
   }
   if (boosts && pmy_mcb->vel.GetSize() > 0) {
     const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
@@ -480,10 +481,11 @@ bool GeneralPusher::MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr) {
   MonteCarloBlock *pmcb = pmy_mcb;
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
   Real xx[4] = {pphot->x0p[ip], pphot->x1p[ip], pphot->x2p[ip], pphot->x3p[ip]};
-  Real gcov[4][4], gcon[4][4], ncon[4], ecov[4][4];
+  Real gcov[4][4], gcon[4][4], ncon[4], econ[4][4], ecov[4][4];
   MetricPairAt(xx, gcov, gcon);
   if (!NormalObserver(gcon, ncon)) return false;
-  ConstructTetrad(ncon, gcov, fr.econ, ecov);
+  ConstructTetrad(ncon, gcov, econ, ecov);
+  fr.lapse = 1./std::sqrt(-gcon[0][0]);
   // the cell's edges and the photon's offsets, coordinate values first
   const Real wc[3] = {pcoord->x1f(i1+1) - pcoord->x1f(i1), pcoord->x2f(i2+1) - pcoord->x2f(i2),
                       pcoord->x3f(i3+1) - pcoord->x3f(i3)};
@@ -496,7 +498,7 @@ bool GeneralPusher::MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr) {
     const Real len = std::sqrt(SQR(dt[1]) + SQR(dt[2]) + SQR(dt[3]));
     if (!(len > 0.) || !(wc[i] > 0.)) return false;
     fr.W[i] = len;
-    for (int a=0; a<3; ++a) fr.ehat[i][a] = dt[a+1]/len;
+    fr.wc[i] = wc[i];
     fr.x[i] = len*std::min(std::max(oc[i]/wc[i], 0.), 1.);
   }
   // the fluid relative to the normal observer; with boosts off this is that observer.
@@ -518,10 +520,10 @@ bool GeneralPusher::MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr) {
   if (!(ut[0] >= 1.)) return false;
   fr.gam = ut[0];
   for (int a=0; a<3; ++a) fr.beta_tet[a] = ut[a+1]/ut[0];
-  for (int i=0; i<3; ++i) {
-    fr.beta[i] = 0.;
-    for (int a=0; a<3; ++a) fr.beta[i] += fr.beta_tet[a]*fr.ehat[i][a];
-  }
+  // The cell is fixed in coordinates, so the room the walk needs is set by the fluid's
+  // coordinate drift, u^i / gamma per unit lab proper time, which carries the shift as
+  // well as the boost; along box axis i a coordinate displacement d x^i is W_i d x^i / wc_i
+  for (int i=0; i<3; ++i) fr.beta[i] = u[i+1]/fr.gam*fr.W[i]/wc[i];
   fr.general = true;
   return true;
 }
@@ -545,8 +547,23 @@ bool PhotonPusher::MRWTrigger(Photon *pphot, int ip, Real chi) {
     wmin = std::min(wmin, W[m]);
   }
   const Real l = pmcb->l_cgs;
-  if (pmy_mc->accel_domain == MRW_DOMAIN_SPHERE) return chi*dmin*l > pmy_mc->accel_tau;
-  return (chi*0.5*wmin*l > pmy_mc->accel_tau) && (chi*dmin*l > pmy_mc->accel_face_tau);
+  bool thick;
+  if (pmy_mc->accel_domain == MRW_DOMAIN_SPHERE) {
+    thick = chi*dmin*l > pmy_mc->accel_tau;
+  } else {
+    thick = (chi*0.5*wmin*l > pmy_mc->accel_tau) && (chi*dmin*l > pmy_mc->accel_face_tau);
+  }
+  if (!thick) return false;
+  // The Kompaneets guards that need no frame: the cell's temperature and the photon's
+  // energy in units of it, to within the Doppler factor.
+  if (compton) {
+    const Real theta = MCConstants::kmec2*pmcb->tgas(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]);
+    if (theta > 0.03 || theta <= 0.) return false;
+    const Real xi = pphot->ep[ip]/(theta*MCConstants::mec2);
+    if (xi*theta > 0.1 || xi < 0.3*pmy_mc->kgreens->XiMin() || xi > 3.*pmy_mc->kgreens->XiMax())
+      return false;
+  }
+  return true;
 }
 
 //----------------------------------------------------------------------------------------
@@ -569,6 +586,7 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
   MRWCellFrame fr;
   if (!MRWFrame(pphot, ip, fr)) {
     pmcb->nmrw_decline++;
+    pmcb->nmrw_declined[MRW_DECLINE_FRAME]++;
     return false;
   }
   const Real *beta = fr.beta;
@@ -587,14 +605,15 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
     pmcb->TransformToComoving(pphot, ip, ip);
     if (!fr.general) nufact = pphot->ep[ip]/e_lab;
   }
-  auto decline = [&]() {
+  auto decline = [&](int why) {
     if (transformed) pmcb->TransformToCoordinate(pphot, ip, ip);
     pmcb->nmrw_decline++;
+    pmcb->nmrw_declined[why]++;
     return false;
   };
 
   const Real chi = pphot->scp[ip] + pphot->acp[ip]; // cm^-1, comoving
-  if (chi <= 0.) return decline();
+  if (chi <= 0.) return decline(MRW_DECLINE_OTHER);
   const Real D = 1./(3.*chi);
 
   // the cell around the photon, in code length
@@ -625,7 +644,7 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
       const Real am = (bmag > 0.) ? adv_room*std::abs(beta[m])/bmag : 0.;
       Wp[m] = W[m] - am;
       xp[m] = (beta[m] < 0.) ? x[m] - am : x[m];
-      if (xp[m] <= 0. || xp[m] >= Wp[m] || Wp[m] <= 0.) return decline();
+      if (xp[m] <= 0. || xp[m] >= Wp[m] || Wp[m] <= 0.) return decline(MRW_DECLINE_THIN);
     }
     Real dpmin = HUGE_NUMBER, wpmin = HUGE_NUMBER;
     for (int m=0; m<3; ++m) {
@@ -633,10 +652,10 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
       wpmin = std::min(wpmin, Wp[m]);
     }
     if (chi*0.5*wpmin*l_cgs <= pmy_mc->accel_tau
-        || chi*dpmin*l_cgs <= pmy_mc->accel_face_tau) return decline();
+        || chi*dpmin*l_cgs <= pmy_mc->accel_face_tau) return decline(MRW_DECLINE_THIN);
   } else {
     R0 = (1. - f)*dmin_cm*(1. - kEps);
-    if (chi*R0 <= pmy_mc->accel_tau) return decline();
+    if (chi*R0 <= pmy_mc->accel_tau) return decline(MRW_DECLINE_THIN);
   }
 
   // Compton: temperature, energy and absorption parameter of the cell, and the guards
@@ -658,7 +677,7 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
     }
     if (theta > 0.03 || xi*theta > 0.05 || xi < kg->XiMin() || xi > kg->XiMax()
         || theta*lam*KompaneetsTable::FreeFreeShape(xi) > 0.1 || nsig <= 0.)
-      return decline();
+      return decline(MRW_DECLINE_COMPTON);
   }
 
   // comoving path budget c t_b in cm: the advection room, the remaining time of the
@@ -667,7 +686,7 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
   if (bmag > 0.) ct_b = adv_room*l_cgs/(bmag*gam);
   if (pphot->dtp[ip] < 0.5*HUGE_NUMBER)
     ct_b = std::min(ct_b, pphot->dtp[ip]*c_code*l_cgs/gam);
-  if (ct_b <= 0.) return decline();
+  if (ct_b <= 0.) return decline(MRW_DECLINE_BUDGET);
 
   // the draw: path c t (cm) and the comoving displacement dpos (code length)
   Real ct, dpos[3];
@@ -770,24 +789,20 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
     pmcb->UpdateMomentsMRW(pphot, ct, 0.5*(e_old + pphot->ep[ip]), fr.beta_tet, gam, ip);
   pphot->wp[ip] *= surv;
 
-  // lab displacement: the comoving one plus the advection over the lab time gamma t_c,
-  // in the pusher's local orthonormal basis
-  const Real adv = (bmag > 0.) ? gam*ct/l_cgs : 0.;
-  const Real dx = dpos[0] + beta[0]*adv, dy = dpos[1] + beta[1]*adv, dz = dpos[2] + beta[2]*adv;
-  Real dcoord0 = gam*ct/l_cgs; // the lab time elapsed, code length; coordinate time below
+  // lab displacement along the box axes: the comoving one plus the fluid's drift
+  // relative to the cell over the lab time gamma t_c
+  const Real adv = gam*ct/l_cgs;
+  const Real db[3] = {dpos[0] + beta[0]*adv, dpos[1] + beta[1]*adv, dpos[2] + beta[2]*adv};
   if (fr.general) {
-    // onto the lab tetrad legs, then to coordinates with the elapsed proper time on the
-    // time leg: the lapse and the shift are in the legs
-    Real utet[4] = {gam*ct/l_cgs, 0., 0., 0.}, dxc[4];
-    const Real db[3] = {dx, dy, dz};
-    for (int i=0; i<3; ++i)
-      for (int a=0; a<3; ++a) utet[a+1] += db[i]*fr.ehat[i][a];
-    TetradToCoordinate(utet, dxc, fr.econ);
-    pphot->x1p[ip] += dxc[1];
-    pphot->x2p[ip] += dxc[2];
-    pphot->x3p[ip] += dxc[3];
-    dcoord0 = dxc[0];
+    // box axis i is the cell's coordinate edge i, so the move is a fraction of that edge;
+    // coordinate time advances by the lab proper time over the lapse
+    pphot->x1p[ip] += db[0]/fr.W[0]*fr.wc[0];
+    pphot->x2p[ip] += db[1]/fr.W[1]*fr.wc[1];
+    pphot->x3p[ip] += db[2]/fr.W[2]*fr.wc[2];
   } else if (pmcb->topology == MCTOPO_SPHERICAL) {
+    // (dx, dy, dz) are components in the local orthonormal (r, theta, phi) basis, the
+    // one the pusher's directions and vel use; carry them to Cartesian at the photon
+    const Real dx = db[0], dy = db[1], dz = db[2];
     const Real r = pphot->x1p[ip];
     const Real cth = std::cos(pphot->x2p[ip]), snt = std::sin(pphot->x2p[ip]);
     const Real cph = std::cos(pphot->x3p[ip]), sph = std::sin(pphot->x3p[ip]);
@@ -800,12 +815,13 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
     pphot->x3p[ip] = std::atan2(yy, xx);
     if (pphot->x3p[ip] < 0.) pphot->x3p[ip] += 2.*PI;
   } else {
-    pphot->x1p[ip] += dx;
-    pphot->x2p[ip] += dy;
-    pphot->x3p[ip] += dz;
+    pphot->x1p[ip] += db[0];
+    pphot->x2p[ip] += db[1];
+    pphot->x3p[ip] += db[2];
   }
 
-  // new direction, isotropic in the comoving frame; assumed unpolarized
+  // new direction, isotropic in the comoving frame; a deep random walk comes out
+  // unpolarized
   const Real mu = 2.*pran->uniform() - 1.;
   const Real sth = std::sqrt(1. - mu*mu);
   const Real phi = 2.*PI*pran->uniform();
@@ -818,26 +834,32 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
     pphot->svp[ip] = 0.;
   }
 
-  // time (lab), path and the scatterings the path implies
-  dl = dcoord0;
+  // time (lab; coordinate time under the general pusher), path and the scatterings the
+  // path implies; dl is the displacement a user hook reads after a step
+  dl = gam*ct/l_cgs/fr.lapse;
   pphot->x0p[ip] += dl;
   pphot->dtp[ip] -= dl/c_code;
   pphot->nscp[ip] += static_cast<int>(std::lround(pphot->scp[ip]*ct));
   pmcb->nmrw++;
 
-  // the cell, which the domain should not have left. The boundary functions run if the
-  // rounding put it across a block face.  Opacities at the new energy, in the comoving
-  // frame like the block loop after a scattering, and everything else in lab frame
-  const bool newzone = UpdateZone(pphot, ip);
-  if (pphot->statp[ip] != EVOLVING) return true;
+  // Back to the lab while the photon still carries the cell it walked in: the legacy
+  // pushers recompute the opacities at the new energy in the comoving frame first, like
+  // the block loop after a scattering; the general pusher's coherency tensor is rebuilt
+  // for the new direction, and its loop refreshes the opacities after the step.  Only
+  // then the cell update, whose boundary functions may hand the photon to another block
+  // (it must leave in coordinate components) or end it.
   if (fr.general) {
-    // the general pusher's loop refreshes the opacities after the step; the coherency
-    // tensor is rebuilt for the new direction before the transform back
     if (IsPolarized(pmy_mc->polarized)) ScatteringStokesToCoherency(pmcb, pphot, ip);
-  } else if (newzone || compton) {
+  } else if (compton) {
     pphot->acp[ip] = pmcb->AbsorptionOpacity(pmcb, pphot, ip);
     pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb, pphot, ip);
   }
   if (transformed) pmcb->TransformToCoordinate(pphot, ip, ip);
+  const bool newzone = UpdateZone(pphot, ip);
+  if (pphot->statp[ip] != EVOLVING) return true;
+  if (newzone && !fr.general) {
+    pphot->acp[ip] = pmcb->AbsorptionOpacity(pmcb, pphot, ip);
+    pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb, pphot, ip);
+  }
   return true;
 }

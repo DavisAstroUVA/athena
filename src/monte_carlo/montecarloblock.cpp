@@ -473,6 +473,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   nmrw = nmrw_decline = 0;
   nmrw_scat = 0.;
   for (int b=0; b<NSCATBINS; ++b) scat_tau_hist[b] = 0;
+  for (int b=0; b<NMRWDECLINE; ++b) nmrw_declined[b] = 0;
   if (acceleration) {
     accel_mask.NewAthenaArray(ncells3,ncells2,ncells1);
     for (int n=0; n<accel_mask.GetSize(); ++n) accel_mask(n) = 1;
