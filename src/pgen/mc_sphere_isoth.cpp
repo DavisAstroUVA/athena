@@ -75,18 +75,21 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
   Real rho = tau / (kappaes * rad0);
   // Cells whose centre lies outside the sphere get a density floor (a single cell
-  // holding the whole sphere is inside); the escape surface at rad0 keeps photons
-  // out of the floor region anyway
-  Real floor_frac = pin->GetOrAddReal("problem","rho_floor_frac",1.e-10);
+  // holding the whole sphere is inside) and no velocity; the escape surface at rad0
+  // keeps photons out of the floor region anyway.  The floor has to stay above the
+  // hydro density floor: a cell floored up in density keeps its momentum, and the
+  // kinetic energy that frees up becomes heat, 3e9 K in a cell at 0.1 c
+  Real floor_frac = pin->GetOrAddReal("problem","rho_floor_frac",1.e-6);
   for (int k=ks; k<=ke; k++) {
     for (int j=js; j<=je; j++) {
       for (int i=is; i<=ie; i++) {
         Real r = std::sqrt(SQR(pcoord->x1v(i)) + SQR(pcoord->x2v(j)) + SQR(pcoord->x3v(k)));
-        Real rhoc = (r < rad0) ? rho : rho*floor_frac;
+        const bool inside = (r < rad0);
+        Real rhoc = inside ? rho : rho*floor_frac;
         phydro->u(IDN,k,j,i) = rhoc;
         phydro->u(IM1,k,j,i) = 0.0;
         phydro->u(IM2,k,j,i) = 0.0;
-        phydro->u(IM3,k,j,i) = rhoc*vel;
+        phydro->u(IM3,k,j,i) = inside ? rhoc*vel : 0.0;
         phydro->u(IEN,k,j,i) = rideal*rhoc*temp/(gamma-1.0);
       }
     }
@@ -218,10 +221,19 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
     for (int j=js; j<=je; j++)
       for (int i=is; i<=ie; i++)
         if (rho(k,j,i) > 0.5*tau_rho_) vin += pcoord->vol(k,j,i);
-  if (pmy_mc->verbose && vin > 0.)
+  if (pmy_mc->verbose && vin > 0.) {
+    Real tmin = HUGE_NUMBER, tmax = 0., rmin = HUGE_NUMBER, rmax = 0.;
+    for (int k=ks; k<=ke; k++)
+      for (int j=js; j<=je; j++)
+        for (int i=is; i<=ie; i++) {
+          tmin = std::min(tmin, tgas(k,j,i)); tmax = std::max(tmax, tgas(k,j,i));
+          rmin = std::min(rmin, rho(k,j,i)); rmax = std::max(rmax, rho(k,j,i));
+        }
     std::cout << "sphere block " << pmy_block->gid << ": volume inside / cell volume = "
               << vin/(4./3.*PI*rad0*rad0*rad0) << (has_origin ? " (holds the origin)" : "")
+              << "; rho " << rmin << " .. " << rmax << ", T " << tmin << " .. " << tmax
               << std::endl;
+  }
 
 }
 
@@ -361,14 +373,16 @@ void SphericalEscape(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher
   // First check radius condition
   Real r = sqrt(SQR(pphot->x1p[ip])+SQR(pphot->x2p[ip])+SQR(pphot->x3p[ip]));
   if (r >= rad0) {
-    // Back the photon up to the sphere; the Cartesian pusher advances x0p by the path
-    // length, so the correction is a length too
+    // Back the photon up to the sphere along its direction; the pushers advance x0p by
+    // the path length, so the correction is a length too.  The general pusher's k
+    // carries the energy, so it is normalized here.
     Real dr = r-rad0;
+    Real kn = sqrt(SQR(pphot->k1p[ip])+SQR(pphot->k2p[ip])+SQR(pphot->k3p[ip]));
     pphot->x0p[ip] -= dr;
     pphot->user[2][ip] -= dr;
-    pphot->x1p[ip] -= pphot->k1p[ip]*dr;
-    pphot->x2p[ip] -= pphot->k2p[ip]*dr;
-    pphot->x3p[ip] -= pphot->k3p[ip]*dr;
+    pphot->x1p[ip] -= pphot->k1p[ip]/kn*dr;
+    pphot->x2p[ip] -= pphot->k2p[ip]/kn*dr;
+    pphot->x3p[ip] -= pphot->k3p[ip]/kn*dr;
 
     pphot->user[1][ip] = pphot->nscp[ip];
     pphot->statp[ip] = ESCAPED;
@@ -382,12 +396,13 @@ void TimedEscape(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher,
 
   // First check radius condition
   Real r = sqrt(SQR(pphot->x1p[ip])+SQR(pphot->x2p[ip])+SQR(pphot->x3p[ip]));
+  Real kn = sqrt(SQR(pphot->k1p[ip])+SQR(pphot->k2p[ip])+SQR(pphot->k3p[ip]));
   if (r >= rad0) {
     Real dr = r-rad0;
     pphot->x0p[ip] -= dr;
-    pphot->x1p[ip] -= pphot->k1p[ip]*dr;
-    pphot->x2p[ip] -= pphot->k2p[ip]*dr;
-    pphot->x3p[ip] -= pphot->k3p[ip]*dr;
+    pphot->x1p[ip] -= pphot->k1p[ip]/kn*dr;
+    pphot->x2p[ip] -= pphot->k2p[ip]/kn*dr;
+    pphot->x3p[ip] -= pphot->k3p[ip]/kn*dr;
 
     pphot->user[1][ip] = pphot->nscp[ip];
     pphot->statp[ip] = ESCAPED;
@@ -397,9 +412,9 @@ void TimedEscape(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher,
   if (pphot->x0p[ip] >= time0) {
     Real dt = pphot->x0p[ip] - time0;
     pphot->x0p[ip] -= dt;
-    pphot->x1p[ip] -= pphot->k1p[ip]*dt;
-    pphot->x2p[ip] -= pphot->k2p[ip]*dt;
-    pphot->x3p[ip] -= pphot->k3p[ip]*dt;
+    pphot->x1p[ip] -= pphot->k1p[ip]/kn*dt;
+    pphot->x2p[ip] -= pphot->k2p[ip]/kn*dt;
+    pphot->x3p[ip] -= pphot->k3p[ip]/kn*dt;
 
     pphot->user[1][ip] = pphot->nscp[ip];
     pphot->statp[ip] = ESCAPED;

@@ -724,7 +724,8 @@ public:
   void UpdateMoments(Photon *pphot, Real dl, Real etau, int ip);
   void UpdateMoments(Photon *pphot, Real dl, int ip);
   //! the random-walk step: the whole path, isotropic, at one energy
-  void UpdateMomentsMRW(Photon *pphot, Real ct, Real energy, int ip);
+  void UpdateMomentsMRW(Photon *pphot, Real ct, Real energy, const Real beta[3], Real gam,
+                        int ip);
   void UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl, Real k1, Real k2,
                                  Real k3,Real etau, int ip);
   void NormalizeMoments(bool normalize);

@@ -29,10 +29,19 @@
 // S = exp(-alpha_abs c t).  The path-length estimator gets the whole path, isotropic in
 // the comoving frame, at the mean of the two energies.
 //
-// In a moving medium (boosts, flat spacetime), the walk is done in the comoving frame,
-// entered and left with the block loop's own transforms; the fluid element advects by
-// beta gamma c t_c in the lab over comoving time t_c, so the domain is shrunk on the
-// downstream side by the advection the time limit allows.
+// In a moving medium (boosts), the walk is done in the comoving frame, entered and left
+// with the block loop's own transforms; the fluid element advects by beta gamma c t_c in
+// the lab over comoving time t_c, so the domain is shrunk on the downstream side by the
+// advection the time limit allows.  Lorentz contraction of the domain is neglected.
+//
+// Under the general pusher the lab frame is the normal observer's tetrad at the photon:
+// the cell's coordinate edges are projected into it to make the box, the fluid's
+// four-velocity gives beta and gamma on its legs, the displacement and the elapsed proper
+// time go back to coordinates through its legs (which is where the lapse and the shift
+// enter), and the new direction and energy are carried from the comoving frame to
+// coordinates with the comoving tetrad at the exit point, so the change of redshift and
+// of fluid velocity across the step enters there.  Curvature within the cell is
+// neglected.
 
 // C++ headers
 #include <algorithm>
@@ -51,6 +60,8 @@
 #include "mrw.hpp"
 #include "photon.hpp"
 #include "photonpusher.hpp"
+#include "polarization.hpp"
+#include "tetrad.hpp"
 
 namespace {
 
@@ -440,6 +451,82 @@ Real PhotonPusher::FaceDistance(Photon *pphot, int ip) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn bool PhotonPusher::MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr)
+//! \brief legacy pushers: the cell in its own orthonormal basis, the fluid velocity from
+//!        vel = (gamma, gamma beta^i) on the same legs
+
+bool PhotonPusher::MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr) {
+  CellGeometry(pphot, ip, fr.W, fr.x);
+  fr.general = false;
+  fr.gam = 1.;
+  for (int i=0; i<3; ++i) {
+    fr.beta[i] = fr.beta_tet[i] = 0.;
+    for (int a=0; a<3; ++a) fr.ehat[i][a] = (i == a) ? 1. : 0.;
+  }
+  if (boosts && pmy_mcb->vel.GetSize() > 0) {
+    const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+    fr.gam = pmy_mcb->vel(i3,i2,i1,0);
+    for (int m=0; m<3; ++m) fr.beta[m] = fr.beta_tet[m] = pmy_mcb->vel(i3,i2,i1,m+1)/fr.gam;
+  }
+  return true;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool GeneralPusher::MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr)
+//! \brief general pusher: the cell's coordinate edges projected into the normal
+//!        observer's tetrad at the photon, the fluid four-velocity on the same legs
+
+bool GeneralPusher::MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr) {
+  MonteCarloBlock *pmcb = pmy_mcb;
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  Real xx[4] = {pphot->x0p[ip], pphot->x1p[ip], pphot->x2p[ip], pphot->x3p[ip]};
+  Real gcov[4][4], gcon[4][4], ncon[4], ecov[4][4];
+  MetricPairAt(xx, gcov, gcon);
+  if (!NormalObserver(gcon, ncon)) return false;
+  ConstructTetrad(ncon, gcov, fr.econ, ecov);
+  // the cell's edges and the photon's offsets, coordinate values first
+  const Real wc[3] = {pcoord->x1f(i1+1) - pcoord->x1f(i1), pcoord->x2f(i2+1) - pcoord->x2f(i2),
+                      pcoord->x3f(i3+1) - pcoord->x3f(i3)};
+  const Real oc[3] = {pphot->x1p[ip] - pcoord->x1f(i1), pphot->x2p[ip] - pcoord->x2f(i2),
+                      pphot->x3p[ip] - pcoord->x3f(i3)};
+  for (int i=0; i<3; ++i) {
+    Real d[4] = {0., 0., 0., 0.}, dt[4];
+    d[i+1] = wc[i];
+    CoordinateToTetrad(d, dt, ecov);
+    const Real len = std::sqrt(SQR(dt[1]) + SQR(dt[2]) + SQR(dt[3]));
+    if (!(len > 0.) || !(wc[i] > 0.)) return false;
+    fr.W[i] = len;
+    for (int a=0; a<3; ++a) fr.ehat[i][a] = dt[a+1]/len;
+    fr.x[i] = len*std::min(std::max(oc[i]/wc[i], 0.), 1.);
+  }
+  // the fluid relative to the normal observer; with boosts off this is that observer.
+  // In flat spacetime there is no stored four-velocity: vel = (gamma, gamma beta^i) on
+  // the orthonormal legs is carried onto coordinate components with the static tetrad,
+  // as ComovingFrame does
+  Real u[4], ut[4];
+  if (GENERAL_RELATIVITY) {
+    pmcb->FluidFourVelocity(xx, i3, i2, i1, u);
+  } else {
+    Real tet[4][4];
+    pcoord->Tetrad(xx, tet);
+    for (int j=0; j<4; ++j) {
+      u[j] = 0.;
+      for (int a=0; a<4; ++a) u[j] += tet[j][a]*pmcb->vel(i3,i2,i1,a);
+    }
+  }
+  CoordinateToTetrad(u, ut, ecov);
+  if (!(ut[0] >= 1.)) return false;
+  fr.gam = ut[0];
+  for (int a=0; a<3; ++a) fr.beta_tet[a] = ut[a+1]/ut[0];
+  for (int i=0; i<3; ++i) {
+    fr.beta[i] = 0.;
+    for (int a=0; a<3; ++a) fr.beta[i] += fr.beta_tet[a]*fr.ehat[i][a];
+  }
+  fr.general = true;
+  return true;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn bool PhotonPusher::MRWTrigger(Photon *pphot, int ip, Real chi)
 //! \brief whether a step is to be tried: the cell unmasked and thick enough.  chi is the
 //!        lab extinction in cm^-1.  cell domain: the cell's optical half-width above
@@ -474,30 +561,32 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
   const MRWTables *tab = mrw_;
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
 
-  if (boosts && GENERAL_RELATIVITY) { // the tetrad step is not built yet (plan, 6.4)
-    pmcb->nmrw_decline++;
-    return false;
-  }
-
   const Real l_cgs = pmcb->l_cgs;
   const Real c_code = MCConstants::c_cgs / pmcb->vel_cgs;
   const bool box = (pmy_mc->accel_domain == MRW_DOMAIN_CELL);
 
-  // A moving medium: the walk is done in the comoving frame, where the medium is at rest.
-  // vel holds (gamma, gamma beta^i) in the pusher's orthonormal basis.
-  Real beta[3] = {0., 0., 0.}, gam = 1., bmag = 0., nufact = 1.;
-  const bool moving = boosts && pmcb->vel.GetSize() > 0;
-  if (moving) {
-    gam = pmcb->vel(i3,i2,i1,0);
-    for (int m=0; m<3; ++m) beta[m] = pmcb->vel(i3,i2,i1,m+1)/gam;
-    bmag = std::sqrt(SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]));
-    if (bmag > 0.) {
-      const Real e_lab = pphot->ep[ip];
-      pmcb->TransformToComoving(pphot, ip, ip);
-      nufact = pphot->ep[ip]/e_lab;
-    }
+  // the cell as a box in the lab frame, and the fluid's velocity relative to that frame
+  MRWCellFrame fr;
+  if (!MRWFrame(pphot, ip, fr)) {
+    pmcb->nmrw_decline++;
+    return false;
   }
-  const bool transformed = moving && bmag > 0.;
+  const Real *beta = fr.beta;
+  const Real gam = fr.gam;
+  const Real bmag = std::sqrt(SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]));
+
+  // Into the comoving frame, where the medium is at rest: always under the general
+  // pusher (its stored k is in coordinate components), and in the legacy pushers when the
+  // cell moves.  nufact carries the legacy pushers' opacity convention (Section 6.3).
+  const bool transformed = fr.general || (boosts && bmag > 0.);
+  Real nufact = 1.;
+  if (transformed) {
+    const Real e_lab = pphot->ep[ip];
+    if (fr.general && IsPolarized(pmy_mc->polarized))
+      CoherencyToScatteringStokes(pmcb, pphot, ip); // sip, before the tensor is dropped
+    pmcb->TransformToComoving(pphot, ip, ip);
+    if (!fr.general) nufact = pphot->ep[ip]/e_lab;
+  }
   auto decline = [&]() {
     if (transformed) pmcb->TransformToCoordinate(pphot, ip, ip);
     pmcb->nmrw_decline++;
@@ -509,8 +598,8 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
   const Real D = 1./(3.*chi);
 
   // the cell around the photon, in code length
-  Real W[3], x[3];
-  CellGeometry(pphot, ip, W, x);
+  const Real *W = fr.W;
+  const Real *x = fr.x;
   Real dmin = HUGE_NUMBER;
   for (int m=0; m<3; ++m) dmin = std::min(dmin, std::min(x[m], W[m] - x[m]));
   const Real dmin_cm = dmin*l_cgs;
@@ -677,14 +766,28 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
     if (pphot->acp[ip] > 0.) surv = std::exp(-pphot->acp[ip]*ct);
     pmcb->nmrw_scat += pphot->scp[ip]*ct;
   }
-  if (pmcb->call_moments) pmcb->UpdateMomentsMRW(pphot, ct, 0.5*(e_old + pphot->ep[ip]), ip);
+  if (pmcb->call_moments)
+    pmcb->UpdateMomentsMRW(pphot, ct, 0.5*(e_old + pphot->ep[ip]), fr.beta_tet, gam, ip);
   pphot->wp[ip] *= surv;
 
   // lab displacement: the comoving one plus the advection over the lab time gamma t_c,
   // in the pusher's local orthonormal basis
   const Real adv = (bmag > 0.) ? gam*ct/l_cgs : 0.;
   const Real dx = dpos[0] + beta[0]*adv, dy = dpos[1] + beta[1]*adv, dz = dpos[2] + beta[2]*adv;
-  if (pmcb->topology == MCTOPO_SPHERICAL) {
+  Real dcoord0 = gam*ct/l_cgs; // the lab time elapsed, code length; coordinate time below
+  if (fr.general) {
+    // onto the lab tetrad legs, then to coordinates with the elapsed proper time on the
+    // time leg: the lapse and the shift are in the legs
+    Real utet[4] = {gam*ct/l_cgs, 0., 0., 0.}, dxc[4];
+    const Real db[3] = {dx, dy, dz};
+    for (int i=0; i<3; ++i)
+      for (int a=0; a<3; ++a) utet[a+1] += db[i]*fr.ehat[i][a];
+    TetradToCoordinate(utet, dxc, fr.econ);
+    pphot->x1p[ip] += dxc[1];
+    pphot->x2p[ip] += dxc[2];
+    pphot->x3p[ip] += dxc[3];
+    dcoord0 = dxc[0];
+  } else if (pmcb->topology == MCTOPO_SPHERICAL) {
     const Real r = pphot->x1p[ip];
     const Real cth = std::cos(pphot->x2p[ip]), snt = std::sin(pphot->x2p[ip]);
     const Real cph = std::cos(pphot->x3p[ip]), sph = std::sin(pphot->x3p[ip]);
@@ -716,7 +819,7 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
   }
 
   // time (lab), path and the scatterings the path implies
-  dl = gam*ct/l_cgs;
+  dl = dcoord0;
   pphot->x0p[ip] += dl;
   pphot->dtp[ip] -= dl/c_code;
   pphot->nscp[ip] += static_cast<int>(std::lround(pphot->scp[ip]*ct));
@@ -727,7 +830,11 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
   // frame like the block loop after a scattering, and everything else in lab frame
   const bool newzone = UpdateZone(pphot, ip);
   if (pphot->statp[ip] != EVOLVING) return true;
-  if (newzone || compton) {
+  if (fr.general) {
+    // the general pusher's loop refreshes the opacities after the step; the coherency
+    // tensor is rebuilt for the new direction before the transform back
+    if (IsPolarized(pmy_mc->polarized)) ScatteringStokesToCoherency(pmcb, pphot, ip);
+  } else if (newzone || compton) {
     pphot->acp[ip] = pmcb->AbsorptionOpacity(pmcb, pphot, ip);
     pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb, pphot, ip);
   }

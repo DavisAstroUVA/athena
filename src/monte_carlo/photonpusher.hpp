@@ -24,6 +24,20 @@ class MeshBlock;
 class ParameterInput;
 class MonteCarloBlock;
 class MRWTables;
+
+//! \struct MRWCellFrame
+//! \brief the photon's cell as the random-walk step sees it: a box in the lab
+//!        (Eulerian) frame, with the fluid velocity relative to that frame
+struct MRWCellFrame {
+  Real W[3];         // widths along the box axes, code length
+  Real x[3];         // the photon's offsets from the lower faces, code length
+  Real beta[3];      // fluid velocity along the box axes, units of c
+  Real beta_tet[3];  // the same on the lab tetrad legs (equal for the legacy pushers)
+  Real gam;          // its Lorentz factor
+  Real ehat[3][3];   // box axis i on the lab tetrad legs a: ehat[i][a]
+  Real econ[4][4];   // lab tetrad legs in coordinate components (general pusher)
+  bool general;      // built by the general pusher: displacements go through econ
+};
 class Photon;
 class Coordinate;
 
@@ -93,6 +107,9 @@ public:
   Real FaceDistance(Photon *pphot, int ip);
   //! whether a step is to be tried here; chi the lab extinction in cm^-1
   bool MRWTrigger(Photon *pphot, int ip, Real chi);
+  //! the cell's box and the fluid velocity in the lab frame; false when there is no
+  //! usable frame (inside a horizon, say)
+  virtual bool MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr);
   //! one step; false when it declines and leaves the photon untouched
   bool MRWStep(Photon *pphot, MCRandom *pran, int ip);
   // Resonant-scattering acceleration (general pusher)
@@ -148,6 +165,9 @@ public:
   // functions
   void Move(Photon *pphot, int ips, int ipe);
   void UpdateOpacities(Photon *pphot, MonteCarloBlock *pmcb, int ip);
+  //! the cell in the normal observer's tetrad at the photon, with the fluid's velocity
+  //! relative to that observer (mrw.cpp)
+  bool MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr);
 #if MC_VERLET_DK
   void VerletStep(Photon *pphot, Real step, int ip);
 #endif

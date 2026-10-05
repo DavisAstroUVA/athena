@@ -573,6 +573,42 @@ early-escape effect of Section 6.7 seen through Comptonization, not the neglecte
 contraction.  A face-threshold scan at a Compton-thick setting is the Phase E item that
 sets the default for production.
 
+**General pusher step built** (Section 6.4 as written: `GeneralPusher::MRWFrame` makes the
+box from the cell's coordinate edges in the normal observer's tetrad, with the fluid's
+velocity on its legs; `MRWStep` is otherwise shared).  Tested in flat spacetime with
+`general_pusher = true` on the Cartesian sphere, which needed three repairs outside the
+step: `vel` was allocated only under boosts or polarization, so the general pusher's
+emission transform dereferenced nothing in a static unpolarized run; the sphere
+generator's escape hook backed photons up along `k` as a unit vector, which under the
+general pusher carries the energy; and the general pusher's fixed default affine step of
+1e-3 moved a photon by picometres across a 1e10 cm cell, so the driver sets `varystep`
+and `stepsize = 0.02` with `--general-pusher`.  Static tau 100: the general pusher's
+analog run passes the Green's function tests like the Cartesian one, and the walk
+against it agrees to 0.6 (spectrum) and 0.8 (paths) of the two-sample scale with 44
+percent of the scatterings replaced.
+
+A test-geometry trap found on the way, worth knowing for any gridded sphere with a flow:
+the cells outside the sphere carried the flow's momentum at a density of 1e-10 of the
+sphere's, below the hydro density floor; flooring the density up and keeping the momentum
+turns the freed kinetic energy into heat, 3e9 K at 0.1 c, and the few photons that
+scatter in those cells come out with absurd energies (a 14 percent tail gaining up to
+700 times in a cold-electron test).  The outside cells now carry no velocity and the
+default floor is 1e-6 of the sphere density.  The general pusher saw this where the
+Cartesian pusher did not, for reasons not pursued once the cause was clear; with the
+geometry fixed the two pushers agree.
+
+Final flat-spacetime numbers on the fixed geometry (tau 100 over 8^3 cells, beta 0.1
+along z, 1e4 photons, `accel_tau` 10, `accel_face_tau` 5), each against the run named:
+Cartesian analog against static, mean energy +4.1 percent (the Doppler shift of the
+escapers); general-pusher analog against Cartesian analog, spectrum 0.7 of the two-sample
+scale, mean energy +1.1 percent, paths 1.3; Cartesian walk against Cartesian analog,
+0.7, +0.4 percent, paths 1.6 (1 percent short); general-pusher walk against its analog,
+0.5, -0.8 percent, paths 2.5 (2.3 percent short); the cold-electron pair (theta 1e-5,
+x0 100, recoil only) 1.7 and +0.9 percent between pushers.  The walk replaced 35 percent
+of the scatterings in both pushers here, with 90k to 150k attempts declined for want of
+advection room.  What remains of Phase D is the curved-spacetime validation, which is
+the XRB of Phase E.
+
 ## 7. Phase E: verification
 
 **Sphere, static** (Phase B grid), MRW against analog on the same deck, with and

@@ -392,7 +392,9 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   //     is used rather than only where it was built.
   if (GENERAL_RELATIVITY) {
     uprim.NewAthenaArray(ncells3,ncells2,ncells1,3);
-  } else if (boosts || IsPolarized(pmy_mc->polarized)) {
+  } else if (boosts || IsPolarized(pmy_mc->polarized) || pmy_mc->general_pusher_flag) {
+    // the general pusher's frame transforms read vel in flat spacetime whether or not the
+    // fluid moves, so it exists (at rest) for them too
     vel.NewAthenaArray(ncells3,ncells2,ncells1,4);
     if (!boosts) {
       // Value is constant in time, unlike the fluid velocity, so it is set once rather than
@@ -3165,7 +3167,8 @@ Real MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip, const Real g
 //! \brief the random-walk step's contribution to the lab moments of its cell: the whole
 //!        path ct, isotropic, at one energy.  Exact in expectation over many steps.
 
-void MonteCarloBlock::UpdateMomentsMRW(Photon *pphot, Real ct, Real energy, int ip) {
+void MonteCarloBlock::UpdateMomentsMRW(Photon *pphot, Real ct, Real energy,
+                                       const Real beta[3], Real gam, int ip) {
   if (!mom_flag_lab) return;
   const int type = pphot->type[ip];
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
@@ -3178,15 +3181,11 @@ void MonteCarloBlock::UpdateMomentsMRW(Photon *pphot, Real ct, Real energy, int 
                          " photon destroyed",ip);
     return;
   }
-  // an isotropic comoving field seen from the lab, flat spacetime: E = g^2 (1 + b^2/3) Ec,
+  // an isotropic comoving field seen from the lab (the normal observer's frame in GR),
+  // beta the fluid velocity on that frame's legs: E = g^2 (1 + b^2/3) Ec,
   // F^i = (4/3) g^2 b^i c Ec, P^ij = Ec (d^ij/3 + (4/3) g^2 b^i b^j)
-  Real beta[3] = {0., 0., 0.}, g2 = 1., b2 = 0.;
-  if (boosts && !GENERAL_RELATIVITY && vel.GetSize() > 0) {
-    const Real gam = vel(i3,i2,i1,0);
-    for (int m=0; m<3; ++m) beta[m] = vel(i3,i2,i1,m+1)/gam;
-    b2 = SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]);
-    g2 = gam*gam;
-  }
+  const Real b2 = SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]);
+  const Real g2 = gam*gam;
   moments(type,MCIER,i3,i2,i1) += g2*(1. + b2/3.)*ec;
   const Real fc = 4./3.*g2*ec;
   moments(type,MCIFR1,i3,i2,i1) += fc*beta[0]*MCConstants::c_cgs;

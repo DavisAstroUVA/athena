@@ -146,6 +146,22 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
           metric_valid = false;
         }
       }
+      // MRW acceleration for electron scattering
+      if (acceleration && !resonance && MRWTrigger(pphot,ip,chi)
+          && MRWStep(pphot,pran,ip)) {
+        acon_valid = false;
+        metric_valid = false;
+        if (pphot->statp[ip] != EVOLVING) break;
+        UpdateOpacities(pphot,pmcb,ip);
+        chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
+        oi1 = pphot->i1p[ip]; oi2 = pphot->i2p[ip]; oi3 = pphot->i3p[ip];
+        tauremaining = GetOpticalDepth(pran);
+        pphot->strp[ip] = 0.;
+        step = StepSize(pphot,ip);
+        if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
+        if (ptraj != NULL) ptraj->AddToTrajectory(pphot,ip);
+        continue;
+      }
       if (!accel_success) {// Acceleration not triggered - take standard step
         Real tau_step = chi * l_cgs * step * pphot->ep[ip];
         const Real alpha = StretchFactor(pphot,ip,chi,step * pphot->ep[ip]);
