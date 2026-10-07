@@ -5,8 +5,26 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage[round]{natbib}
-\usepackage{algorithm}
-\usepackage[noend]{algpseudocode}
+% The algorithm and algpseudocode packages are not in every TeX Live; the few
+% commands the two listings use are defined here instead, as a numbered box
+% with an enumerated list.
+\newcounter{algorithm}
+\newenvironment{algorithm}[1][]{%
+  \begin{figure}[htbp]\refstepcounter{algorithm}\centering
+  \begin{minipage}{0.95\textwidth}\hrule\vspace{3pt}%
+  \renewcommand{\caption}[1]{\noindent\textbf{Algorithm \thealgorithm.} ##1\par\vspace{3pt}\hrule\vspace{2pt}}}%
+  {\vspace{3pt}\hrule\end{minipage}\end{figure}}
+\newenvironment{algorithmic}[1][]{\begin{enumerate}\setlength{\itemsep}{1pt}}{\end{enumerate}}
+\newcommand{\State}{\item}
+\newcommand{\Statex}{\item[]}
+\newcommand{\If}[1]{\item \textbf{if} #1 \textbf{then}}
+\newcommand{\EndIf}{\item \textbf{end if}}
+\newcommand{\Return}{\textbf{return} }
+\newcommand{\Function}[2]{\item \textbf{function} \textsc{#1}(#2)}
+\newcommand{\EndFunction}{\item \textbf{end function}}
+\newcommand{\Call}[2]{\textsc{#1}(#2)}
+\newcommand{\Comment}[1]{\hfill$\triangleright$ #1}
+\newlength{\algorithmicindent}\setlength{\algorithmicindent}{1.5em}
 \usepackage{xcolor}
 \usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
 

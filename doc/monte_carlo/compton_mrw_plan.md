@@ -520,7 +520,10 @@ times thicker than the threshold.  Two remedies, in the order they should be tri
    coordinates to the accuracy the sphere step already assumes, and so is the
    tetrad-frame cell of Section 6.4.  Cost: three lookups and one inversion per step.
    No new approximation, so this comes first, after the sphere step's validation.
-2. **A region of similar neighbouring cells** (the user's suggestion) is what buys
+2. **Superseded by `compton_ddmc_plan.md`** (2026-10-06): discrete diffusion Monte
+   Carlo walks cell to cell with each cell's own properties and needs neither a
+   similarity test nor a cell-crossing approximation; the region step below is kept as
+   the record of the idea.  **A region of similar neighbouring cells** is what buys
    efficiency where cells are thinner than the threshold but a block of them is thick.
    It needs a similarity test (extinction within a factor, temperature within a few
    percent, velocity difference small against the Doppler scale that matters), the step

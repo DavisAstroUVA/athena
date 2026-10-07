@@ -368,6 +368,8 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
           kph = -kx * sph + ky * cph;
         }
         //if (ptraj != NULL) ptraj->AddToTrajectory(pphot,ip);
+        // Perform any user work
+        if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
         break;
       } else { // Photon moves to next cell and reduce tauremaining
         // Update moments
@@ -395,6 +397,11 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
 
         tauremaining -= chi_str * l_cgs * dl;
         ApplyStretch(pphot,ip,alpha,chi*l_cgs*dl);
+        // Perform any user work, at the face and before the crossing: a hook that ended
+        // the photon here (an escape surface, say) has the last word, and the crossing
+        // would otherwise hand it to the boundary function
+        if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
+        if (pphot->statp[ip] != EVOLVING) break;
         // move photon to next cell and update angular positions
         MovePhotonToNextZone(pphot,pco,pmcb,face,ascend,ip);
         if ((face == 1) || (face == 3) || (face == 4) || (face == 6))
@@ -408,7 +415,6 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
         kph = -kx * sph + ky * cph;
         //if (ptraj != NULL) ptraj->AddToTrajectory(pphot,ip);
       }
-      if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
 
     } // end while loop
 
