@@ -853,6 +853,10 @@ Mesh::Mesh(ParameterInput *pin, IOWrapper& resfile, int mesh_test) :
     delete [] userdata;
   }
 
+  // every rank holds blocks, as in the constructor for a fresh start; Initialize and the
+  // destructor read this
+  nrankmx = Globals::nranks;
+
   // read the ID list
   listsize = sizeof(LogicalLocation)+sizeof(double)+sizeof(IOWrapperSizeT);
   //allocate the idlist buffer

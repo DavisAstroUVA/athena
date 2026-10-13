@@ -8,6 +8,9 @@
 //! \file photonpusher.hpp
 //! \brief defines abstract base derived classes for moving photons
 
+// C++ headers
+#include <cmath>
+
 // Athena++ headers
 #include "../athena.hpp"
 #include "../mesh/mesh.hpp"
@@ -72,9 +75,24 @@ public:
   bool compton;
   bool time_acc;
 
+  // Path stretching (see MonteCarlo::stretch); stretching_ is false when it is off
+  bool stretching_;
+  Real stretch_, stretch_lnbound_, stretch_taucell_;
+
   // functions
   virtual void Move(Photon *pphot, int ips, int ipe);
   virtual Real GetOpticalDepth(MCRandom *pran);
+  //! compute or apply strech factor
+  Real StretchFactor(Photon *pphot, int ip, Real chi, Real dl_seg);
+  void ApplyStretch(Photon *pphot, int ip, Real alpha, Real tau) {
+    if (alpha != 1.) {
+      const Real d = (alpha - 1.) * tau;
+      pphot->strp[ip] += d;
+      pphot->wp[ip] *= std::exp(d);
+    }
+  }
+  //! smallest width of the photon's current cell, in code length
+  virtual Real CellWidth(Photon *pphot, int ip);
   virtual Real GetExtinctionCoefficient(Real ac, Real sc, bool abs_tau);
   virtual Real ExpTauAbsorption(Real ac, Real dl, bool abs_tau);
   virtual void NextFace(Real dx1, Real dx2, Real dx3, int &face, Real &dx);
@@ -126,6 +144,7 @@ public:
 
   // functions
   void Move(Photon *pphot, int ips, int ipe);
+  Real CellWidth(Photon *pphot, int ip);
 
 };
 

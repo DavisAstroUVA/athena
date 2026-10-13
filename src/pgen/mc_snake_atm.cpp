@@ -29,7 +29,7 @@
 // Units.  The GR equation of state needs p/rho << 1, so the hydro primitives are
 // dimensionless and the Monte Carlo scales them: rho_cgs multiplies the code density and
 // tgas_cgs multiplies p/rho to give the temperature.  Both are derived here from taumin,
-// taumax and temp and written into the input, so a deck specifies the atmosphere the same
+// taumax and temp and written into the input, so an athinput file specifies the atmosphere the same
 // way it would for mc_isoth and cannot get the conversion wrong.  The code density is
 // normalised to one at the top of the atmosphere, which keeps p/rho at its smallest where
 // the density is lowest.

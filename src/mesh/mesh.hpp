@@ -125,6 +125,9 @@ class MeshBlock {
   EquationOfState *peos;
   OrbitalAdvection *porb;
   MonteCarloBlock *pmy_mcb;
+  //! the Monte Carlo generator state read from a restart file, until the
+  //! MonteCarloBlock built for this block restores it; empty otherwise
+  std::string mc_restart_rng;
 
   // functions
   std::size_t GetBlockSizeInBytes();

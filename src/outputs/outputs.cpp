@@ -917,11 +917,11 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
         num_vars_ += 9;
       }
     }
-    // monte carlo scattering sourcterms 
+    // monte carlo scattering sourcterms
     if (output_params.variable.compare("mcscat") == 0){
       for (int n = 0; n < pmcb->nf_scat; ++n) {
         char name[16];
-        std::snprintf(name, sizeof(name), "sscat%d", n);
+        std::snprintf(name, sizeof(name), "Jnu%d", n);
         pod = new OutputData;
         pod->type = "SCALARS";
         pod->name = name;
@@ -933,7 +933,7 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
     if (output_params.variable.compare("mcscat") == 0){
       for (int n = 0; n < pmcb->nf_scat; ++n) {
         char name[16];
-        std::snprintf(name, sizeof(name), "sscat_err%d", n);
+        std::snprintf(name, sizeof(name), "Jnu%d_err", n);
         pod = new OutputData;
         pod->type = "SCALARS";
         pod->name = name;
@@ -959,6 +959,16 @@ void OutputType::LoadOutputData(MeshBlock *pmb) {
       pod->type = "VECTORS";
       pod->name = "RadforceF";
       if (pmb != nullptr) pod->data.InitWithShallowSlice(pmcb->sourceterms,4,MCRF1,3);
+      AppendOutputDataNode(pod);
+      num_vars_+=3;
+    }
+    // its statistical error, one standard error per component
+    if (output_params.variable.compare("mcsrc") == 0 ||
+        output_params.variable.compare("RadforceF_err") == 0) {
+      pod = new OutputData;
+      pod->type = "VECTORS";
+      pod->name = "RadforceF_err";
+      if (pmb != nullptr) pod->data.InitWithShallowSlice(pmcb->sourceterms_error,4,0,3);
       AppendOutputDataNode(pod);
       num_vars_+=3;
     }
@@ -1139,11 +1149,14 @@ void Outputs::MakeOutputs(Mesh *pm, ParameterInput *pin, bool wtflag) {
 //!        overloaded to includ MonteCarlo outputs
 void Outputs::MakeOutputs(Mesh *pm, MonteCarlo *pmc, ParameterInput *pin, bool wtflag) {
 
+  // Monte Carlo spectra and lists first, so that a restart file written in the same
+  // cycle records their file numbers after this output
+  pmc->pmcout->MakeOutputs(wtflag);
   pmc->NormalizeDomainOutputs(true); // normalize MC outputs
   MakeOutputs(pm,pin,wtflag);
-  if (!pmc->dynamic)
-    pmc->NormalizeDomainOutputs(false); // un-normalize
-  pmc->pmcout->MakeOutputs(wtflag);
+  // also in a dynamic run: with cadence > 1 the arrays are held into the next cycles,
+  // whose coupling normalizes them itself
+  pmc->NormalizeDomainOutputs(false); // un-normalize
 }
 
 //----------------------------------------------------------------------------------------

@@ -590,24 +590,3 @@ void TensorToStokes(std::complex<Real> tensor[4][4], Real stokes[4]) {
 
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn void LorentzBoostVector(Real vel[4], Real kold[4])
-//! \brief boost photon momentum vector
-
-void LorentzBoostVector(Real vel[4], Real kold[4]) {
-
-  Real knew[4];
-
-  knew[0] = vel[0] * kold[0];
-  for (int l=1; l<4; l++)
-    knew[0] -= vel[l] * kold[l];
-  for (int m=1; m<4; m++) {
-    knew[m] = kold[m] - vel[m] * kold[0];
-    for (int l=0; l<4; l++) {
-      knew[m] += vel[l]*vel[m]/(1.+vel[0]);
-    }
-  }
-  for (int l=0; l<4; l++)
-    kold[l] = knew[l];
-
-}

@@ -49,6 +49,45 @@ void HDF5ReadRealArray(const char *filename, const char *dataset_name, int rank_
                        const int *start_mem, const int *count_mem,
                        AthenaArray<Real> &array,
                        bool collective, bool noop) {
+  // Open data file
+  hid_t property_list_file = H5Pcreate(H5P_FILE_ACCESS);
+#ifdef MPI_PARALLEL
+  if (collective) {
+    H5Pset_fapl_mpio(property_list_file, MPI_COMM_WORLD, MPI_INFO_NULL);
+  }
+#endif
+  hid_t file = H5Fopen(filename, H5F_ACC_RDONLY, property_list_file);
+  H5Pclose(property_list_file);
+  if (file < 0) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR\nCould not open " << filename << std::endl;
+    ATHENA_ERROR(msg);
+  }
+
+  HDF5ReadRealArray(file, dataset_name, rank_file, start_file, count_file, rank_mem,
+                    start_mem, count_mem, array, collective, noop);
+
+  // Close data file
+  H5Fclose(file);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void HDF5ReadRealArray(hid_t file, const char *dataset_name, int rank_file,
+//!     const int *start_file, const int *count_file, int rank_mem, const int *start_mem,
+//!     const int *count_mem, AthenaArray<Real> &array, bool collective=false,
+//!     bool noop=false)
+//! \brief Read a single dataset from a file the caller has opened, and leaves open.
+//
+// For a caller reading many hyperslabs of one file, such as a snapshot read block by
+// block: opening the file for each read, as the version above does, costs an HDF5 file
+// open per read.
+
+void HDF5ReadRealArray(hid_t file, const char *dataset_name, int rank_file,
+                       const int *start_file, const int *count_file, int rank_mem,
+                       const int *start_mem, const int *count_mem,
+                       AthenaArray<Real> &array,
+                       bool collective, bool noop) {
   // Check that user is not trying to exceed limits of HDF5 array or AthenaArray
   // dimensionality
   if (rank_file > MAX_RANK_FILE) {
@@ -87,22 +126,6 @@ void HDF5ReadRealArray(const char *filename, const char *dataset_name, int rank_
   dims_mem_base[4] = array.GetDim1();
   hsize_t *dims_mem = dims_mem_base + 5 - rank_mem;
 
-  // Open data file
-  hid_t property_list_file = H5Pcreate(H5P_FILE_ACCESS);
-#ifdef MPI_PARALLEL
-  {
-    if (collective) {
-      H5Pset_fapl_mpio(property_list_file, MPI_COMM_WORLD, MPI_INFO_NULL);
-    }
-  }
-#endif
-  hid_t file = H5Fopen(filename, H5F_ACC_RDONLY, property_list_file);
-  H5Pclose(property_list_file);
-  if (file < 0) {
-    std::stringstream msg;
-    msg << "### FATAL ERROR\nCould not open " << filename << std::endl;
-    ATHENA_ERROR(msg);
-  }
   hid_t property_list_transfer = H5Pcreate(H5P_DATASET_XFER);
 #ifdef MPI_PARALLEL
   {
@@ -132,9 +155,6 @@ void HDF5ReadRealArray(const char *filename, const char *dataset_name, int rank_
   H5Sclose(dataspace_file);
   H5Sclose(dataspace_mem);
 
-  // Close data file
-  H5Pclose(property_list_transfer);
-  H5Fclose(file);
   return;
 }
 

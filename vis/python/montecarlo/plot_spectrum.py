@@ -1,7 +1,59 @@
 #! /usr/bin/env python
 
 """
-Plot athena++ spectra as function of frequency, angle, photon energy, etc.
+Plot Athena++ Monte Carlo spectra against photon energy, frequency or wavelength.
+
+    plot_spectrum.py SPEC [SPEC ...] [options]
+
+Reads one or more .spec files written by make_spectrum.py (or by the code's own
+spectrum output) and draws them on one set of axes, saved as a .png named after the
+first input unless --outfile is given.  The luminosity of each spectrum is printed.
+
+What is plotted
+---------------
+--xunit picks the x variable (kev by default, or ev, nu, lambda); the spectrum is
+converted if it was binned in another.  --yunit picks the quantity: nulnu (default),
+lnu, counts, or for polarized spectra polfrac, polangle, q, u, v.  Axes are logarithmic
+by default; --xscale/--yscale, --xmin/--xmax and --ymin/--ymax adjust them, and
+--rebinx N merges N adjacent x bins.
+
+Spectra binned in angle by make_spectrum.py --nmu/--nphi hold one curve per (mu, phi)
+bin.  --imu and --iphi choose which to draw: a bin index, or 'sum' to integrate over
+the angle, and for phi also 'ave' to average over the azimuthal bins.  The defaults,
+--imu sum --iphi sum, give the angle-integrated spectrum, that is nu L_nu.  Several
+values draw several curves.
+
+Examples
+--------
+One spectrum, nu L_nu against keV, saved to xrb.out1.png:
+
+    plot_spectrum.py xrb.out1.spec
+
+With error bars (the spectrum must have been made with make_spectrum.py --yerror):
+
+    plot_spectrum.py xrb.out1.spec --ploterr
+
+Two runs overlaid with legend labels, a linear y axis and set limits:
+
+    plot_spectrum.py scatter_1e8/xrb.out1.spec scatter_1e9/xrb.out1.spec \\
+        --labels "1e8 photons" "1e9 photons" --yscale linear --xmin 1. --xmax 50.
+
+Viewing-angle dependence: three polar bins of an angle-resolved spectrum, averaged
+over azimuth, with the mu of each bin in the legend:
+
+    plot_spectrum.py xrb.out1.spec --imu 0 4 9 --iphi ave --mulegend
+
+Polarization: the polarization fraction, then the polarization angle, in degrees:
+
+    plot_spectrum.py xrb.out1.spec --yunit polfrac --yscale linear
+    plot_spectrum.py xrb.out1.spec --yunit polangle --yscale linear
+
+A blackbody for comparison, with its temperature in K and an overall normalization:
+
+    plot_spectrum.py atm.out1.spec --bbtemp 1.0e7 --bbnorm 1.0e30
+
+--txtfile also writes each file's plotted curves to a .txt file named after it, for
+plotting elsewhere; the error columns are included only with --ploterr.
 """
 
 # python standard modules
@@ -162,10 +214,11 @@ def plot_blackbody(ax, xfaces, xunit, yunit, bbtemp, bbnorm, *, imu=None, iphi=N
     ax.plot(x, y, linestyle='-', label=f"blackbody, T={bbtemp:.3g} K")
 
 
-def main(args):
+def make_figure(args):
     """
     Read each input spectrum with athena_mc.py and plot them on a shared axis, using the
-    options returned by parse_args().
+    options returned by parse_args().  Returns the figure, for a notebook to show or a
+    caller to save.
     """
 
     axis_opts = {key: getattr(args, key) for key in AXIS_OPTS}
@@ -198,7 +251,15 @@ def main(args):
     if ax.get_legend_handles_labels()[0]:
         ax.legend()
 
-    # save plot to outfile
+    return fig
+
+
+def main(args):
+    """
+    Make the figure and save it to args.outfile.
+    """
+
+    fig = make_figure(args)
     fig.savefig(args.outfile)
     plt.close(fig)
 
@@ -208,7 +269,9 @@ def parse_args(argv=None):
     Parse and check command-line options; exits with a usage message on bad input
     """
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    # the raw formatter keeps the examples in the docstring as written in -h
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('infile', nargs='+',
                         help='input photon spectrum filename(s)')
     parser.add_argument('--imu', nargs='+', type=mu_bin, default=['sum'],

@@ -57,7 +57,7 @@ in mu are as much of a check as the amplitude.
 Emission sampling.  Samples are placed uniformly over cells with the emissivity carried in
 the weight, the code's default, and that is the right choice here: emission goes as density
 squared, so the escapers come from a thin skin holding a negligible share of it, and
-placing samples in proportion to emission (equal_weight = true) sends nearly all of them to
+placing samples in proportion to emission (weights = equal) sends nearly all of them to
 the absorbing midplane -- 38 escapers out of 4 million when measured.  The price of the
 default is that escaping weights span decades, so the effective sample size is well below
 the escape count and any *fraction of escaping weight* fluctuates from run to run (the
@@ -187,7 +187,7 @@ def write_athinput(path, iseed, nphot, nx1=32, nx2=512, nx3=8, x2rat=0.993,
          # escapers come from.  true places samples in proportion to emission, and emission
          # goes as density squared, so nearly every sample starts at the absorbing midplane:
          # measured, 38 escapers out of 4 million.  The option is kept for that record.
-         "equal_weight = {0}".format("true" if equal_weight else "false")]
+         "weights = {0}".format("equal" if equal_weight else "emission")]
     if general_pusher:
         o += ["general_pusher = true",
               "stepsize   = {0!r}".format(stepsize),

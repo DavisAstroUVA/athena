@@ -104,6 +104,7 @@ Spectrum::Spectrum(Spectrum *pspec) {
   x2max = pspec->x2max;
   x3max = pspec->x3max;
   last_time = pspec->last_time;
+  last_ttransport = pspec->last_ttransport;
   dt = pspec->dt;
 
   nsrun = 0; // arrays are uninitialized
@@ -1175,6 +1176,7 @@ void PhotonTrajectoryList::ResizeList(int new_len_limit, int new_step_limit) {
 MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
 
   pmy_mc = pmc;
+  pin_ = pin;
   std::stringstream msg;
   InputBlock *pib = pin->pfirst_block;
 
@@ -1237,14 +1239,17 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         pspec = new Spectrum(range,polarized,xlog);
         pspec->pmy_mc = pmc;
         pspec->id = id++;
-        pspec->output_number = 0;
+        pspec->block_name = pib->block_name;
+        pspec->output_number = pin->GetOrAddInteger(pib->block_name, "file_number", 0);
         if (pmc->dynamic) {
           pspec->dt = pin->GetReal(pib->block_name,"dt");
         } else {
-          // input should be in code units
-          pspec->dt = pin->GetOrAddReal("montecarlo","tint",1.);
+          // tint is given in code units but the static run's clock advances by
+          // MonteCarlo::tint, which Initialize has multiplied by time_cgs.
+          pspec->dt = pin->GetOrAddReal("montecarlo","tint",1.) * time_cgs;
         }
         pspec->last_time = pmy_mc->pmy_mesh->time;
+        pspec->last_ttransport = pmc->ttransport;
         // Generate file name
         std::string outn = pib->block_name.substr(6); // 6 because counting starts at 0!
         int outid = atoi(outn.c_str());
@@ -1321,13 +1326,15 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         if (pmc->dynamic) {
           pphlist->dt = pin->GetReal(pib->block_name,"dt");
         } else {
-          // input should be in code units
-          pphlist->dt = pin->GetOrAddReal("montecarlo","tint",1.);
+          // converted as for the spectrum above, and for the same reason
+          pphlist->dt = pin->GetOrAddReal("montecarlo","tint",1.) * time_cgs;
         }
         pphlist->last_time = pmy_mc->pmy_mesh->time;
+        pphlist->last_ttransport = pmc->ttransport;
+        pphlist->block_name = pib->block_name;
+        pphlist->output_number = pin->GetOrAddInteger(pib->block_name, "file_number", 0);
         pphlist->nsrun = 0;
         pphlist->length = 0;
-        pphlist->output_number = 0;
         // Generate file name
         std::string outn = pib->block_name.substr(6); // 6 because counting starts at 0!
         int outid = atoi(outn.c_str());
@@ -1361,7 +1368,8 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         // Initialize photon list
         ptraj->length = 0;
         ptraj->maxstep = 0;
-        ptraj->output_number = 0;
+        ptraj->block_name = pib->block_name;
+        ptraj->output_number = pin->GetOrAddInteger(pib->block_name, "file_number", 0);
         // Generate file name
         std::string outn = pib->block_name.substr(6); // 6 because counting starts at 0!
         int outid = atoi(outn.c_str());
@@ -1498,11 +1506,7 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
   Real fac1 = norms*static_cast<Real>(nmu)*static_cast<Real>(nphi)/2./PI;
   // One normalization for every plane, intensity and Stokes alike, which is what
   // make_spectrum in athena_mc.py does: it builds a single factor and applies it to the
-  // whole intensity array.  The Stokes planes used to be scaled in a separate loop that
-  // omitted tint_out, so Q/U/V came out larger than I by the integration time and Q/I
-  // read off a .spec was not the polarization fraction.  Invisible whenever tint_out
-  // happens to be one, which it is in every test deck here.  Sharing one fac2 makes
-  // the two impossible to get out of step again.
+  // whole intensity array.
   for (int k = 0; k < nphi; ++k) {
     for (int j = 0; j < nmu; ++j) {
       Real mumid = (static_cast<Real>(j)+0.5)/static_cast<Real>(nmu);
@@ -1567,8 +1571,9 @@ void MCOutput::OutputSpectrum(bool wtflag) {
   Real tstart = pmy_mc->pmy_mesh->start_time;
   Real tlim = pmy_mc->pmy_mesh->tlim;
   while (pspect != nullptr) {
-    if ( (time >= pspect->last_time+pspect->dt) || (time == tstart) || (time >= tlim)
-         || wtflag ) {
+    // every cycle of a static run is one interval; see OutputPhotonList
+    bool due = !pmy_mc->dynamic || (time >= pspect->last_time+pspect->dt);
+    if ( due || (time == tstart) || (time >= tlim) || wtflag ) {
       if (Globals::my_rank == 0) {
         pspecout = new Spectrum(pspect);
       }
@@ -1597,7 +1602,10 @@ void MCOutput::OutputSpectrum(bool wtflag) {
         filename.append(".spec");
         // compute integration time in cgs
         Real tint_out;
-        if (pmy_mc->dynamic) {
+        if (pmy_mc->dynamic && pmy_mc->cadence > 1) {
+          // photons were emitted only on the cycles the transport ran
+          tint_out = (pmy_mc->ttransport - pspect->last_ttransport) * time_cgs;
+        } else if (pmy_mc->dynamic) {
           tint_out = (time - pspect->last_time) * time_cgs;
         } else {
           tint_out = pmy_mc->tint;
@@ -1608,9 +1616,11 @@ void MCOutput::OutputSpectrum(bool wtflag) {
       }
       // Update spectra on all blocks
       pspect->output_number++;
+      pin_->SetInteger(pspect->block_name, "file_number", pspect->output_number);
       pspect->ResetSpectrum();
       if (pmy_mc->dynamic) {
         pspect->last_time = time;
+        pspect->last_ttransport = pmy_mc->ttransport;
       }
     }
     pspect = pspect->next;
@@ -1722,23 +1732,36 @@ void MCOutput::OutputPhotonList(bool wtflag) {
   Real time = pmy_mc->pmy_mesh->time;
   Real tstart = pmy_mc->pmy_mesh->start_time;
   Real tlim = pmy_mc->pmy_mesh->tlim;
-  if ( (time >= pphlist->last_time+pphlist->dt) || (time == tstart) || (time >= tlim)
-       || wtflag ) {
+  // A static run transports one tint per cycle and is called here once per cycle, so
+  // every call is an output.  Testing last_time + dt against a time formed as
+  // start_time + n*tint can miss by an ulp and slip a cycle; the cadence test is for
+  // dynamic runs, whose cycles are hydro steps.
+  bool due = !pmy_mc->dynamic || (time >= pphlist->last_time+pphlist->dt);
+  if ( due || (time == tstart) || (time >= tlim) || wtflag ) {
     // Filename() rather than a second copy of this logic: the spill path opens the file
     // before this point and the two names have to agree.
     std::string filename = pphlist->Filename();
-    // compute integration time in cgs
+    // The integration time the list covers, in seconds.  A static run's clock is
+    // already in seconds (its dt is MonteCarlo::tint), so the elapsed time is used as
+    // it is. The fallback covers a write with nothing elapsed.
     Real tint_out;
-    if (pmy_mc->dynamic) {
+    if (pmy_mc->dynamic && pmy_mc->cadence > 1) {
+      // photons were emitted only on the cycles the transport ran
+      tint_out = (pmy_mc->ttransport - pphlist->last_ttransport) * time_cgs;
+    } else if (pmy_mc->dynamic) {
       tint_out = (time - pphlist->last_time) * time_cgs;
+    } else if (time > pphlist->last_time) {
+      tint_out = time - pphlist->last_time;
     } else {
       tint_out = pmy_mc->tint;
     }
     pphlist->WriteList(filename,tint_out);
     pphlist->output_number++;
+    pin_->SetInteger(pphlist->block_name, "file_number", pphlist->output_number);
     // Reset list length and ntot to 0
     // List outputs are not cumulative
     pphlist->last_time = time;
+    pphlist->last_ttransport = pmy_mc->ttransport;
     // Photon lists are always reset to zero upon output
     pphlist->ResetList();
   }
@@ -1763,6 +1786,7 @@ void MCOutput::OutputTrajectoryList() {
   filename.append(".traj");
   ptraj->WriteList(filename);
   ptraj->output_number++;
+  pin_->SetInteger(ptraj->block_name, "file_number", ptraj->output_number);
   // Reset list length to 0
   ptraj->length = 0;
 

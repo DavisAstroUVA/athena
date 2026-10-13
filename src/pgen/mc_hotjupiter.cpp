@@ -173,6 +173,16 @@ void OutflowOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim, F
 void StaticInflowInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim, FaceField &b,
     Real time, Real dt, int il, int iu, int jl, int ju, int kl, int ku, int ngh);
 
+// whether the ionization is updated every cycle from the rate held in
+// ruser_meshblock_data[1]
+bool HoldIonization(MonteCarlo *pmc);
+
+// neutral H density after an implicit photoionization-recombination step of dt
+Real ImplicitNeutralDensity(Real nh, Real na, Real Gamma, Real tempo1e4K, Real dt,
+                            Real time_cgs, int lid);
+// impact-excitation cooling rate [erg/cm^3/s]
+Real ImpactCooling(Real tempo1e4K, Real nh, Real np);
+
 } // end namespace
 
 
@@ -231,9 +241,14 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
 void MeshBlock::InitUserMeshBlockData(ParameterInput *pin) {
 
-  AllocateRealUserMeshBlockDataField(1);
+  AllocateRealUserMeshBlockDataField(2);
   // Array for each component of the tidal gravity acceleration.
   ruser_meshblock_data[0].NewAthenaArray(3,ncells3,ncells2,ncells1);
+  // Photoionization rate per neutral atom (in code time units) from the last transport,
+  // which MeshBlock::UserWorkInLoop applies every cycle when the transport runs at a
+  // cadence > 1
+  ruser_meshblock_data[1].NewAthenaArray(ncells3,ncells2,ncells1);
+  for (int n=0; n<ruser_meshblock_data[1].GetSize(); ++n) ruser_meshblock_data[1](n) = -1.;
 
   AllocateUserOutputVariables(7);
   SetUserOutputVariableName(0, "vol_emis");
@@ -299,7 +314,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   if (nion > 0) {
     ion_str = etype;
     nsamp += nsamptype[etype] = nion;
-    emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "ion_eqwt",true);
+    weight_scheme[etype] = pin->GetOrAddBoolean("problem", "ion_eqwt",true) ? WEIGHTS_EQUAL : WEIGHTS_EMISSION;
     initialize_comoving[etype] = false; // ions initialized in lab frame
     std::string abs_meth = pin->GetOrAddString("problem","ion_str_abs","tau");
     absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
@@ -312,14 +327,14 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
                 << std::endl;
       std::cout << "nion: " << nion << std::endl;
       std::cout << "absortion method: " << abs_meth << std::endl;
-      std::cout << "equal weight: " << emission_eqwt[etype-1] << std::endl;
+      std::cout << "equal weight: " << (weight_scheme[etype-1] == WEIGHTS_EQUAL) << std::endl;
       std::cout << "etype: " << etype-1 << std::endl << std::endl;
     }
   }
   if (nlyastr > 0) {
     lya_str = etype;
     nsamp += nsamptype[etype] = nlyastr;
-    emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "lys_eqwt",true);
+    weight_scheme[etype] = pin->GetOrAddBoolean("problem", "lys_eqwt",true) ? WEIGHTS_EQUAL : WEIGHTS_EMISSION;
     initialize_comoving[etype] = false; // stellar  initialized in lab frame
     std::string abs_meth = pin->GetOrAddString("problem","lya_str_abs","weight");
     absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
@@ -332,14 +347,14 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
                 << std::endl;
       std::cout << "nlyastr: " << nlyastr << std::endl;
       std::cout << "absortion method: " << abs_meth << std::endl;
-      std::cout << "equal weight: " << emission_eqwt[etype-1] << std::endl;
+      std::cout << "equal weight: " << (weight_scheme[etype-1] == WEIGHTS_EQUAL) << std::endl;
       std::cout << "etype: " << etype-1 << std::endl << std::endl;
     }
   }
   if (nlyarec > 0) {
     lya_rec = etype;
     nsamp += nsamptype[etype] = nlyarec;
-    emission_eqwt[etype] = pin->GetOrAddBoolean("problem", "lyr_eqwt",false);
+    weight_scheme[etype] = pin->GetOrAddBoolean("problem", "lyr_eqwt",false) ? WEIGHTS_EQUAL : WEIGHTS_EMISSION;
     initialize_comoving[etype] = true; // recomb. lyman alpha initialized in comoving frame
     std::string abs_meth = pin->GetOrAddString("problem","lya_rec_abs","weight");
     absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
@@ -351,7 +366,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
                 << std::endl;
       std::cout << "nlyarec: " << nlyarec << std::endl;
       std::cout << "absortion method: " << abs_meth << std::endl;
-      std::cout << "equal weight: " << emission_eqwt[etype] << std::endl;
+      std::cout << "equal weight: " << (weight_scheme[etype] == WEIGHTS_EQUAL) << std::endl;
       std::cout << "etype: " << etype << std::endl << std::endl;
     }
   }
@@ -1039,6 +1054,10 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
   //dt = 1.e10;
 
   Real tint = pmy_mc->tint; // in cgs
+
+  // With cadence > 1 only the rate is recorded here; MeshBlock::UserWorkInLoop updates
+  // the ionization and applies the impact cooling on every cycle
+  const bool hold = HoldIonization(pmy_mc);
   for (int k=ks; k<=ke; ++k) {
     for (int j=js; j<=je; ++j) {
       for (int i=is; i<=ie; ++i) {
@@ -1046,7 +1065,6 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
         Real norm = 1./ (tint * pcoord->vol(k,j,i)); // tint, vol in cgs
         // Get temperatures to calculate recombination and impact excitation terms
         Real tempo1e4K = tgas(k,j,i) / 1.e4;
-        Real invtemp = 1/tempo1e4K;
 
         // Do an implicit update of the neutral fraction to solve for the ionization state at the end of this step
         Real rho = pmy_block->phydro->u(IDN,k,j,i); // SWD: Why not use MCBlock rho?
@@ -1066,48 +1084,18 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
           Gamma = absweight / nh * (t_cgs/n_cgs);
         }
 
-        // Calculate the recombination rate, alpha, from the temperature of this cell
-        Real alpha = 2.54e-13 * std::pow(tempo1e4K, -0.8164-0.0208*std::log(tempo1e4K));
-        alpha *= n_cgs * t_cgs; // conver to cgs
-        Real nR = 1. / alpha / dt;
-        Real nC = Gamma / alpha;
-
-        // Calculate the update to the neutral H number density
-        //CMF: see numerical recipes 5.6
-        Real bb = 2*na + nC + nR;
-        Real cc = nh*nR + SQR(na);
-        Real dd = SQR(bb) - 4*cc;
-        Real qq = 0.5*(bb + std::sqrt(dd));
-        Real update = cc/qq;
-
-        // Double-check that the implicit update gives a neutral fraction between 0 and 1 --- NOT guaranteed if dt is large
-        Real neutral_frac = update/na;
-        if (neutral_frac > 1.0000001) {
-          printf("[WARNING] (Block %d) UpdateIonizationFraction: neutral fraction %g is greater than 1\n", pmy_block->lid, neutral_frac);
-          neutral_frac = 1.0;
-        } else if (neutral_frac < 0.0) {
-          printf("[WARNING] (Block %d) UpdateIonizationFraction: neutral fraction %g is less than 0\n", pmy_block->lid, neutral_frac);
-          neutral_frac = 0.0;
+        if (hold) {
+          pmy_block->ruser_meshblock_data[1](k,j,i) = Gamma;
+          continue;
         }
 
-        // check result
-        //if (absweight > 0.0) {
-        //  printf("nh'=%g, na=%g, nh0=%g, alpha=%g, Gamma=%g, dt=%g\n", update, na, nh, alpha, Gamma, dt);
-        //}
-
-        nh = neutral_frac * na;
+        nh = ImplicitNeutralDensity(nh, na, Gamma, tempo1e4K, dt, time_cgs,
+                                    pmy_block->lid);
         np = na - nh;
 
         pmy_block->pscalars->s(0,k,j,i) = nh;
 
-        // calculate impact excitation cooling
-        // see Christie, Arras, Li, 2013, eq.8 and Table 2
-        Real c1s2s = 1.21e-8 * std::pow(invtemp, 0.455) * std::exp(-11.84/tempo1e4K);
-        Real c1s2p = 1.71e-8 * std::pow(invtemp, 0.077) * std::exp(-11.84/tempo1e4K);
-        Real ctot = c1s2s + c1s2p;
-
-        Real eimp = 10.2 * MCConstants::ev_to_erg;
-        Real cool = ctot * nh * np * eimp * SQR(n_cgs);
+        Real cool = ImpactCooling(tempo1e4K, nh, np);
         // Result should be in cgs units multiply vol*tint to offset normalization
         Real vol = pcoord->vol(k,j,i);
         sourceterms(MCRS0,k,j,i) -= cool * vol * tint;
@@ -2234,4 +2222,93 @@ void OutflowOuterX1 (MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 }
 
 
+bool HoldIonization(MonteCarlo *pmc) {
+  return flag_update_nh && pmc->dynamic && pmc->cadence > 1;
+}
+
+Real ImplicitNeutralDensity(Real nh, Real na, Real Gamma, Real tempo1e4K, Real dt,
+                            Real time_cgs, int lid) {
+  // Calculate the recombination rate, alpha, from the temperature of this cell
+  Real alpha = 2.54e-13 * std::pow(tempo1e4K, -0.8164-0.0208*std::log(tempo1e4K));
+  alpha *= n_cgs * time_cgs; // conver to cgs
+  Real nR = 1. / alpha / dt;
+  Real nC = Gamma / alpha;
+
+  // Calculate the update to the neutral H number density
+  //CMF: see numerical recipes 5.6
+  Real bb = 2*na + nC + nR;
+  Real cc = nh*nR + SQR(na);
+  Real dd = SQR(bb) - 4*cc;
+  Real qq = 0.5*(bb + std::sqrt(dd));
+  Real update = cc/qq;
+
+  // Double-check that the implicit update gives a neutral fraction between 0 and 1 --- NOT guaranteed if dt is large
+  Real neutral_frac = update/na;
+  if (neutral_frac > 1.0000001) {
+    printf("[WARNING] (Block %d) UpdateIonizationFraction: neutral fraction %g is greater than 1\n", lid, neutral_frac);
+    neutral_frac = 1.0;
+  } else if (neutral_frac < 0.0) {
+    printf("[WARNING] (Block %d) UpdateIonizationFraction: neutral fraction %g is less than 0\n", lid, neutral_frac);
+    neutral_frac = 0.0;
+  }
+  return neutral_frac * na;
+}
+
+Real ImpactCooling(Real tempo1e4K, Real nh, Real np) {
+  // calculate impact excitation cooling
+  // see Christie, Arras, Li, 2013, eq.8 and Table 2
+  Real invtemp = 1/tempo1e4K;
+  Real c1s2s = 1.21e-8 * std::pow(invtemp, 0.455) * std::exp(-11.84/tempo1e4K);
+  Real c1s2p = 1.71e-8 * std::pow(invtemp, 0.077) * std::exp(-11.84/tempo1e4K);
+  Real ctot = c1s2s + c1s2p;
+
+  Real eimp = 10.2 * MCConstants::ev_to_erg;
+  return ctot * nh * np * eimp * SQR(n_cgs);
+}
+
 } // end namespace
+
+//----------------------------------------------------------------------------------------
+//! \fn void MeshBlock::UserWorkInLoop()
+//! \brief implicit update of the neutral density over the step just taken from the held
+//! photoionization rate and the current temperature; followed by impact-excitation
+//! cooling
+
+void MeshBlock::UserWorkInLoop() {
+  MonteCarloBlock *pmcb = pmy_mcb;
+  if (pmcb == nullptr || !HoldIonization(pmcb->pmy_mc)) return;
+  const AthenaArray<Real> &gamma = ruser_meshblock_data[1];
+  const Real dt = pmy_mesh->dt;
+  const Real gm1 = peos->GetGamma() - 1.;
+  const Real edot_cgs_inv = pmcb->time_cgs / (pmcb->rho_cgs * SQR(pmcb->vel_cgs));
+  const Real kb_cgs = MCConstants::kb_cgs, mp_cgs = MCConstants::mp_cgs;
+  for (int k=ks; k<=ke; ++k) {
+    for (int j=js; j<=je; ++j) {
+      for (int i=is; i<=ie; ++i) {
+        if (gamma(k,j,i) < 0.) continue;
+        // temperature as GetIonizationTemperature forms it, from the current state
+        Real rho = phydro->u(IDN,k,j,i);
+        Real mmw = 1./(2. - pscalars->r(0,k,j,i));
+        Real tgas = phydro->w(IPR,k,j,i) * mmw * mp_cgs / rho / kb_cgs
+                    * SQR(pmcb->vel_cgs);
+        if (tgas < pmcb->tfloor_cgs) tgas = pmcb->tfloor_cgs;
+        Real tempo1e4K = tgas / 1.e4;
+
+        Real nh = ImplicitNeutralDensity(pscalars->s(0,k,j,i), rho,
+                                         gamma(k,j,i), tempo1e4K, dt,
+                                         pmcb->time_cgs, lid);
+        Real np = rho - nh;
+        pscalars->s(0,k,j,i) = nh;
+        pscalars->r(0,k,j,i) = nh / rho;
+
+        Real cool = ImpactCooling(tempo1e4K, nh, np);
+        user_out_var(5,k,j,i) += cool;
+        if (pmcb->coupled) {
+          const Real de = dt * edot_cgs_inv * cool;
+          phydro->u(IEN,k,j,i) -= de;
+          phydro->w(IPR,k,j,i) -= gm1 * de;
+        }
+      }
+    }
+  }
+}

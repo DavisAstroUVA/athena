@@ -344,6 +344,12 @@ MeshBlock::MeshBlock(int igid, int ilid, Mesh *pm, ParameterInput *pin,
     os += ruser_meshblock_data[n].GetSizeInBytes();
   }
 
+  // Monte Carlo random-number state, restored when the MonteCarloBlock is built
+  if (MONTE_CARLO_ENABLED) {
+    mc_restart_rng.assign(&(mbdata[os]), MCRandom::kRestartBytes);
+    os += MCRandom::kRestartBytes;
+  }
+
   return;
 }
 
@@ -467,6 +473,8 @@ std::size_t MeshBlock::GetBlockSizeInBytes() {
     size += iuser_meshblock_data[n].GetSizeInBytes();
   for (int n=0; n<nreal_user_meshblock_data_; n++)
     size += ruser_meshblock_data[n].GetSizeInBytes();
+
+  if (MONTE_CARLO_ENABLED) size += MCRandom::kRestartBytes;
 
   return size;
 }

@@ -33,6 +33,10 @@ namespace {
   // Global variables
   bool tnorm;
   Real logemin, logemax;
+  // Helium nuclei per hydrogen nucleus, <problem>/heabund; the same key sets
+  // MonteCarloBlock::heabund, so the number densities here, the free-free opacity, and
+  // the library's default temperature inversion all describe one mixture.
+  Real heabund = 0.09;
   std::string emission_type;
   // frequency table parameters
   int nfre, nrho, ntem;
@@ -56,7 +60,6 @@ namespace {
 
   //functions
   Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
-  Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap);
   Real Planck(Real temp, Real nu);
   Real TableEmission(MonteCarloBlock *pmcb, int k, int j, int i, int etype);
   Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
@@ -101,6 +104,7 @@ int getindex(std::vector<float> vec, float val){
 void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
 
   nuser_var = 3;
+  heabund = pin->GetOrAddReal("problem", "heabund", heabund);
   emission_type = pin->GetOrAddString("montecarlo","emission","none");
   // The opacity and emission tables of the table path are file-scope arrays indexed by
   // local block id and sized to the blocks this rank starts with, so they do not survive
@@ -778,28 +782,6 @@ Real TableOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   return opac;
 }
 
-Real IntegrateEmission(Real temp, Real num, Real nup, Real am, Real ap) {
-
-  int n = 20;
-  Real h_cgs = 6.62607015e-27;
-  Real dlnu = std::log(nup/num)/static_cast<Real>(n);
-  Real dadnu = (ap-am)/(nup-num);
-  Real lnu = std::log(num);
-  Real sum = Planck(temp,num)*am*dlnu/h_cgs/2.;
-  // Interior nodes run to n-1: the composite trapezoid rule over n intervals weights
-  // nodes 1..n-1 fully and the two endpoints by a half.
-  for(int i=1; i<n; ++i) {
-    lnu += dlnu;
-    Real nu = std::exp(lnu);
-    Real alpha = dadnu*(nu-num)+am;
-    sum += Planck(temp,nu)*alpha*dlnu/h_cgs;
-  }
-  sum += Planck(temp,nup)*ap*dlnu/h_cgs/2.;
-  //if (sum < 0)
-  //  printf("sum: %g %g %g %g\n",num,nup,am,ap);
-  return sum;
-}
-
 Real Planck(Real temp, Real nu) {
 
   Real h_cgs = 6.62607015e-27;
@@ -860,7 +842,6 @@ Real SampleEmissivity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
 Real FreeFreeOpacity(Real tgas, Real rho, Real energy) {
   Real ffnrm = 3.692146e8;
-  Real heabund = 0.09; //hardcode for now (should be parameter)
   Real mp = 1.67262192369e-24;
   Real h = 6.62607015e-27;
   Real kb = 1.380649e-16;
@@ -877,7 +858,6 @@ Real FreeFreeOpacity(Real tgas, Real rho, Real energy) {
 
 void GetNel(MonteCarloBlock *pmcb) {
 
-  Real heabund = 0.09; //hardcode for now (should be parameter)
   Real mp = 1.67262192369e-24;
 
   for (int k=pmcb->ks; k<=pmcb->ke; ++k) {

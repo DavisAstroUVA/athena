@@ -301,7 +301,7 @@ cannot depend on the mesh.  200000 photons, sigma = 206:
 
 ### The trap this test fell into first
 
-The same comparison run **without** `<montecarlo>/equal_weight = true` shows +15 and -16
+The same comparison run **without** `<montecarlo>/weights = equal` shows +15 and -16
 sigma deviations, and looks exactly like a transport bug at the interface: antisymmetric,
 reproducible, and surviving controls for resolution, for the problem generator, and for
 geometry (a transparent medium agrees to 0.6 sigma, so photons do cross level jumps and
@@ -313,7 +313,7 @@ emitted *energy* per block is still right, because `ComputeEmissionArray` folds 
 volume into the per-cell emission array and the photon weight is drawn from it -- but a
 refined block emits as many photons as a coarse one while carrying an eighth of the
 energy.  So `nesc/ntot` is a photon-count fraction, not an energy fraction, and it is
-simply not mesh-invariant.  With `equal_weight = true` every photon carries `em_tot/ntot`,
+simply not mesh-invariant.  With `weights = equal` every photon carries `em_tot/ntot`,
 counts track energy, and the discrepancy vanishes.
 
 Two things follow.  Any mesh-convergence check on this code has to be energy-weighted or

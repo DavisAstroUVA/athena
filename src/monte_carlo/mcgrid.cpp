@@ -486,7 +486,7 @@ void MCGridFile::ValidateStructure() const {
   // The file records the coordinate system its run was configured with.  That fixes the
   // grid topology but not the spacetime, and the two names need not match: an
   // AthenaK-derived snapshot of a Kerr-Schild Cartesian run is labelled "cartesian", with
-  // the spin recorded only in the embedded input deck, and this module reads it in a
+  // the spin recorded only in the embedded athinput file, and this module reads it in a
   // gr_user build.  So compare topologies rather than strings, and say nothing when
   // either name implies no topology of its own.
   if (coordinates != std::string(COORDINATE_SYSTEM)) {
@@ -667,7 +667,7 @@ void MCGridFile::ValidateFaces() const {
 //----------------------------------------------------------------------------------------
 //! \fn void MCGridFile::SetRealExact(ParameterInput *pin, const char *block,
 //!                                   const char *name, Real value)
-//! \brief store a Real in the input deck without losing precision.
+//! \brief store a Real in the athinput file without losing precision.
 //!
 //! ParameterInput::SetReal formats through a default ostringstream, which keeps only 6
 //! significant digits.  That is harmless for the grid extent but not for x1rat: the mesh

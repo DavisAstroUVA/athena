@@ -15,6 +15,7 @@
 // C++ headers
 #include <algorithm>  // max
 #include <cctype>     // tolower
+#include <chrono>     // steady_clock
 #include <iostream>   // cout
 #include <sstream>
 #include <string>
@@ -260,7 +261,49 @@ const char *GetMCSnapshotVarsName(MCSnapshotVars v) {
 //! \fn void MCReadSnapshotBlock(MeshBlock *pmb, ParameterInput *pin)
 //! \brief fill this block's primitives, and the cell-centred field, from the snapshot
 
+namespace {
+  // The snapshot is opened once per rank, at its first block, and closed after its last.
+  struct OpenSnapshot {
+    std::string filename;
+    bool collective = false;
+    Catalogue cat;
+#ifdef HDF5OUTPUT
+    hid_t file = -1;
+#endif
+    bool is_open = false;
+  };
+  OpenSnapshot snapshot;
+
+  // Time this rank has spent reading the snapshot, summed over its blocks, and the number
+  // of reads that took.  Reported once by rank 0 after its last block, so a slow read
+  // shows up in the log.
+  double snapshot_read_seconds = 0.0;
+  long long snapshot_reads = 0;
+
+#ifdef HDF5OUTPUT
+  hid_t OpenSnapshotFile(const std::string &filename, bool collective) {
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+#ifdef MPI_PARALLEL
+    if (collective) H5Pset_fapl_mpio(fapl, MPI_COMM_WORLD, MPI_INFO_NULL);
+#else
+    (void)collective;
+#endif
+    hid_t file = H5Fopen(filename.c_str(), H5F_ACC_RDONLY, fapl);
+    H5Pclose(fapl);
+    if (file < 0) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MCReadSnapshotBlock" << std::endl
+          << "Could not open " << filename << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    return file;
+  }
+#endif
+}  // namespace
+
 void MCReadSnapshotBlock(MeshBlock *pmb, ParameterInput *pin, int max_blocks_per_rank) {
+  const std::chrono::steady_clock::time_point read_start =
+      std::chrono::steady_clock::now();
   std::stringstream msg;
 
   // Which file.  <problem>/input_filename is the long-standing key; a run that already
@@ -288,7 +331,23 @@ void MCReadSnapshotBlock(MeshBlock *pmb, ParameterInput *pin, int max_blocks_per
   }
 
   const bool collective = pin->GetOrAddBoolean("problem", "collective", false);
-  const Catalogue cat = ReadCatalogue(filename);
+  if (!snapshot.is_open || snapshot.filename != filename) {
+    if (snapshot.is_open) {
+      // a second snapshot before the first was finished with; not expected
+#ifdef HDF5OUTPUT
+      H5Fclose(snapshot.file);
+#endif
+      snapshot.is_open = false;
+    }
+    snapshot.filename = filename;
+    snapshot.collective = collective;
+    snapshot.cat = ReadCatalogue(filename);
+#ifdef HDF5OUTPUT
+    snapshot.file = OpenSnapshotFile(filename, collective);
+#endif
+    snapshot.is_open = true;
+  }
+  const Catalogue &cat = snapshot.cat;
 
   // Locate what we need.  Explicit <problem> keys override the name search, for a file
   // whose variables are spelled in some third way.
@@ -348,10 +407,11 @@ void MCReadSnapshotBlock(MeshBlock *pmb, ParameterInput *pin, int max_blocks_per
   int nread = 0;
   const VarRef *src[5] = {&dens, &vel1, &vel2, &vel3, &energy};
   const int dst[5] = {IDN, IVX, IVY, IVZ, IPR};
+#ifdef HDF5OUTPUT
   for (int n = 0; n < 5; ++n) {
     start_file[0] = src[n]->index;
     start_mem[0] = dst[n];
-    HDF5ReadRealArray(filename.c_str(), src[n]->dataset.c_str(), 5, start_file,
+    HDF5ReadRealArray(snapshot.file, src[n]->dataset.c_str(), 5, start_file,
                       count_file, 4, start_mem, count_mem, ph->w, collective);
     ++nread;
   }
@@ -390,7 +450,7 @@ void MCReadSnapshotBlock(MeshBlock *pmb, ParameterInput *pin, int max_blocks_per
     for (int n = 0; n < 3; ++n) {
       start_file[0] = bsrc[n]->index;
       start_mem[0] = n;
-      HDF5ReadRealArray(filename.c_str(), bsrc[n]->dataset.c_str(), 5, start_file,
+      HDF5ReadRealArray(snapshot.file, bsrc[n]->dataset.c_str(), 5, start_file,
                         count_file, 4, start_mem, count_mem, pmb->pfield->bcc,
                         collective);
       ++nread;
@@ -418,7 +478,7 @@ void MCReadSnapshotBlock(MeshBlock *pmb, ParameterInput *pin, int max_blocks_per
         std::cout << "  scalar " << n << " = " << sn.name << std::endl;
       start_file[0] = sn.index;
       start_mem[0] = n;
-      HDF5ReadRealArray(filename.c_str(), sn.dataset.c_str(), 5, start_file, count_file,
+      HDF5ReadRealArray(snapshot.file, sn.dataset.c_str(), 5, start_file, count_file,
                         4, start_mem, count_mem, pmb->pscalars->r, collective);
       ++nread;
     }
@@ -435,7 +495,7 @@ void MCReadSnapshotBlock(MeshBlock *pmb, ParameterInput *pin, int max_blocks_per
         for (int n = 0; n < nread; ++n) {
           start_file[0] = 0;
           start_mem[0] = 0;
-          HDF5ReadRealArray(filename.c_str(), src[0]->dataset.c_str(), 5, start_file,
+          HDF5ReadRealArray(snapshot.file, src[0]->dataset.c_str(), 5, start_file,
                             count_file, 4, start_mem, count_mem, ph->w, collective,
                             true);
         }
@@ -445,4 +505,21 @@ void MCReadSnapshotBlock(MeshBlock *pmb, ParameterInput *pin, int max_blocks_per
 #else
   (void)max_blocks_per_rank;
 #endif
+
+  // Done with the file once this rank's last block is read
+  if (pmb->lid == pmb->pmy_mesh->nblocal - 1) {
+    H5Fclose(snapshot.file);
+    snapshot.is_open = false;
+  }
+#endif  // HDF5OUTPUT
+
+  snapshot_read_seconds += std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - read_start).count();
+  snapshot_reads += nread;
+  if (Globals::my_rank == 0 && pmb->lid == pmb->pmy_mesh->nblocal - 1) {
+    std::cout << "  snapshot read on rank 0: " << pmb->pmy_mesh->nblocal << " blocks, "
+              << snapshot_reads << " reads from one open of the file, "
+              << snapshot_read_seconds << " s" << (collective ? ", collective" : "")
+              << std::endl;
+  }
 }

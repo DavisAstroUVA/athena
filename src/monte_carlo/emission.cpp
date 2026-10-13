@@ -6,6 +6,9 @@
 //!  \file emission.cpp
 //!  \brief implementation of photon emission functions
 
+// C++ headers
+#include <algorithm>  // min, max
+
 // Athena++ headers
 #include "montecarlo.hpp"
 #include "../defs.hpp"
@@ -42,14 +45,54 @@ void PhotonEmitFreeFree(MonteCarloBlock *pmcb, Photon *pphot, Real lemin, Real l
   Real kb_cgs = 1.380649e-16;
   MCRandom *pran = pmcb->pran;
 
-  // Scheme in which packets are drawn from a uniform distribution in log E
-  // requires weight = exp(-x) note log(10)=2.30258509299
-  Real dev = exp((lemax-lemin)*pran->uniform()+lemin);
+  // The energy is drawn in ln E and the weight carries e^{-x} times the ln E measure.
+  // With an escape table (weights = biased, bias_energy) group l is drawn in proportion
+  // to its overlap d_l with [lemin, lemax] times m_l = (1 - xi) + xi p_l/<p>, where p_l
+  // is the cell's escape probability in the group, <p> its d-weighted mean and
+  // xi = bias_energy_mix, and the measure is divided by m_l.  Samples concentrate at
+  // energies that can leave the gas while the expected weight is unchanged, and no
+  // sample carries more than 1/(1 - xi) times the flat measure.
+  Real y, measure = lemax - lemin;
+  const int ng = pmcb->pmy_mc->nescape;
+  bool drawn = false;
+  if (ng > 0 && pmcb->pmy_mc->bias_energy && pmcb->escape_prob.GetSize() > 0) {
+    const AthenaArray<Real> &lne = pmcb->pmy_mc->escape_lne;
+    const Real xi = pmcb->pmy_mc->bias_energy_mix;
+    const int kt = pphot->i3p[ip]-pmcb->ks, jt = pphot->i2p[ip]-pmcb->js,
+              it = pphot->i1p[ip]-pmcb->is;
+    Real dsum = 0., psum = 0.;
+    for (int l=0; l<ng; ++l) {
+      Real d = std::min(lne(l+1),lemax) - std::max(lne(l),lemin);
+      if (d > 0.) {
+        dsum += d;
+        psum += d * pmcb->escape_prob(kt,jt,it,l);
+      }
+    }
+    if (dsum > 0. && psum > 0.) {
+      // sum over l of d_l m_l is dsum, so u is drawn on [0, dsum)
+      const Real pmean = psum / dsum;
+      Real u = dsum * pran->uniform(), cum = 0., lo = lemin, hi = lemax, q = dsum, m = 1.;
+      for (int l=0; l<ng; ++l) {
+        Real glo = std::max(lne(l),lemin), ghi = std::min(lne(l+1),lemax);
+        if (ghi <= glo) continue;
+        m = (1. - xi) + xi * pmcb->escape_prob(kt,jt,it,l) / pmean;
+        q = (ghi-glo) * m; lo = glo; hi = ghi;
+        if (u < cum + q) break;
+        cum += q;
+      }
+      Real frac = std::min(std::max((u-cum)/q, 0.), 1.);
+      y = lo + (hi-lo)*frac;
+      measure = dsum / m;
+      drawn = true;
+    }
+  }
+  if (!drawn) y = lemin + measure*pran->uniform();
+  Real dev = exp(y);
   pphot->ep[ip] = dev;
   Real x = dev / (kb_cgs * pmcb->tgas(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]));
 
   // Initialize weight
-  pphot->wp[ip] *= exp(-x) * (lemax-lemin);
+  pphot->wp[ip] *= exp(-x) * measure;
 
   if (IsPolarized(pmcb->pmy_mc->polarized)) {
     // Initialize Stokes vector
