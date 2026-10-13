@@ -96,6 +96,43 @@ Photon::~Photon() {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void Photon::PrintPhoton(int ip, bool sph_to_car)
+//! \brief print key photon properties with conversion from (assumed) spherical to cartesian
+
+void Photon::PrintPhoton(int ip, bool sph_to_car) const {
+  Real rr = x1p[ip];
+  Real th = x2p[ip];
+  Real ph = x3p[ip];
+  Real sint = std::sin(th);
+  Real cost = std::cos(th);
+  Real sinp = std::sin(ph);
+  Real cosp = std::cos(ph);
+  Real xx = rr * sint * cosp;
+  Real yy = rr * sint * sinp;
+  Real zz = rr * cost;
+
+  Real kr = k1p[ip];
+  Real kt = k2p[ip];
+  Real kp = k3p[ip];
+  Real kx = kr * sint * cosp;
+  kx += kt * cost * cosp;
+  kx -= kp * sinp;
+  Real ky = kr * sint * sinp;
+  ky += kt * cost * sinp;
+  ky += kp * cosp;
+  Real kz = kr * cost;
+  kz -= kt * sint;
+
+  PrintPhoton(ip);
+  if (sph_to_car) {
+    std::cout << "Cartesian conversion: " << std::endl;
+    std::cout << "x: " << xx << ", " << yy << ", " << zz << ", " << std::endl;
+    std::cout << "k: " << kx << ", " << ky << ", " << kz << ", " << std::endl;
+    std::cout << "----------------------------" << std::endl;
+  }
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void Photon::PrintPhoton(std::stringstream msg, int ip)
 //! \brief print key photon properites with message
 

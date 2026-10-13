@@ -54,6 +54,7 @@ int ion_str = -1, lya_str = -1, lya_rec = -1;
 // parameters for hydro integration /grid initialization
 Real n_cgs; // code units for number density
 Real P_cgs;
+Real t_cgs;
 Real rin, rout; // inner and outer limits of coordinate system
 Real gm_planet, gm_star, sep, psi, rstar;
 Real temp0, nbase, a2;
@@ -80,6 +81,7 @@ Real chromo_temp, sigmamin;
 bool flag_incident_from_z;
 bool flag_incident_from_r;
 bool flag_finite_star;
+bool flag_init_line_center;
 bool flag_pow_law;
 bool flag_lya_abs;
 bool flag_core_skipping;
@@ -187,7 +189,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   Real rho_cgs = pin->GetOrAddReal("problem","rho_cgs",1.);
   n_cgs = rho_cgs / MCConstants::mp_cgs;
   P_cgs = rho_cgs * SQR(vel_cgs);
-  Real time_cgs = l_cgs / vel_cgs;
+  t_cgs = l_cgs / vel_cgs;
 
   // Gravity source term configuration
   gm_planet = pin->GetReal("problem", "GM");
@@ -355,8 +357,12 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   }
 
   EnrollUserSourcetermUpdate(UpdateSourceTerms);
-  // Photon user variables for incident and outgoing direction vector and position
-  nuser_var = 2;
+  // Photon user variables
+  // 0 = scattering number
+  // 1 = elapsed wall time
+  // 2,3,4,5 = initial theta, phi on star and planet
+  // 6 = initial energy
+  nuser_var = 7;
 
   // Enroll user functions for handling MC transport
   EnrollUserScatteringFunction(ResonantScattering);
@@ -388,8 +394,6 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     EnrollUserWorkInMove(CoreSkipping);
   }
 
-  flag_init_escaped = pin->GetOrAddBoolean("problem", "init_escaped", false);
-
   // sampling from an input stellar spectrum
   flag_sample_lya = pin->GetOrAddBoolean("problem", "sample_lya", false);
   if (flag_sample_lya) {
@@ -402,6 +406,9 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     }
   }
 
+  // diagnostics
+  flag_init_escaped = pin->GetOrAddBoolean("problem", "init_escaped", false);
+  flag_init_line_center = pin->GetOrAddBoolean("problem", "init_line_center", false);
 
 }
 
@@ -681,6 +688,9 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
     int j = pphot->i2p[ip];
     int k = pphot->i3p[ip];
 
+    // account for Doppler shift from stellar rotation
+    Real e_shift = 0.0;
+
     // Choose photon position and direction based on the emission geometry
     switch (emis_geometry) {
 
@@ -841,6 +851,17 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
             kth /= lsp;
             kph /= lsp;
 
+            // Doppler shift from apparent stellar rotation (slow rotator)
+            Real omega = std::sqrt((gm_star+gm_planet)/(sep*sep*sep)) / t_cgs;
+            Real v_sp = omega * ( xsp * sinths*sinphs - ysp * sinths*cosphs ) * rstar * l_cgs / lsp;
+            e_shift = 1. + (v_sp / c_cgs);
+            //printf("v_sp=%g\n", v_sp);
+
+            // user variables
+            pphot->user[2][ip] = ths;
+            pphot->user[3][ip] = phs;
+            pphot->user[4][ip] = thp;
+            pphot->user[5][ip] = php;
            // printf("niters=%d, theta=%g, phi=%g\n", niters, th, ph);
 
           } // end while
@@ -945,6 +966,15 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
             }
             pphot->ep[ip] = energy;
           }
+
+          if (flag_init_line_center) {
+            pphot->ep[ip] = energy_lya;
+          }
+          pphot->user[6][ip] = pphot->ep[ip];
+
+          // add any extra Doppler shift from initialization
+          pphot->ep[ip] *= e_shift;
+
         } else {
           // Photon is emitted via recombination - should have line center energy
           pphot->ep[ip] = energy_lya;
@@ -1033,12 +1063,12 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
           std::cout << "WARNING: neutral density is <= 0 in UpdateIonizationFraction, setting Gamma to 0.0" << std::endl;
           Gamma = 0.0;
         } else {
-          Gamma = absweight / nh * (time_cgs/n_cgs);
+          Gamma = absweight / nh * (t_cgs/n_cgs);
         }
 
         // Calculate the recombination rate, alpha, from the temperature of this cell
         Real alpha = 2.54e-13 * std::pow(tempo1e4K, -0.8164-0.0208*std::log(tempo1e4K));
-        alpha *= n_cgs * time_cgs; // conver to cgs
+        alpha *= n_cgs * t_cgs; // conver to cgs
         Real nR = 1. / alpha / dt;
         Real nC = Gamma / alpha;
 

@@ -39,6 +39,7 @@ public:
   // public functions
   //void RemoveOneParticle(int k);
   void PrintPhoton(const std::string &msg, int ip) const;
+  void PrintPhoton(int ip, bool sph_to_car) const;
 
   //! pack/unpack the stored wavevector as a genuine contravariant four-vector.  The
   //! spatial components are stored either as a dimensional k^i or as a unit direction,
