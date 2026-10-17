@@ -649,29 +649,22 @@ the other way, bands 31 to 44 percent lower at 0.5.  The cause is in
 cosine, not of the distance to the face ahead, so a photon near a face steps across it
 charged the opacity and frequency shift of the cell it left.  Fixed by capping the step
 at the straight-line distance to the nearest face (`FaceStep`), after which `stepsize`
-governs only the integration inside a cell; the production value of 0.1 carries a
-systematic of about 3 percent in the escaping fraction, and the balancer is a run with
-no code change.  Both are worth more on this grid than the random walk.
+governs only the integration inside a cell.
 
-With the cap, on the flat gridded sphere under the general pusher, `stepsize` 0.5 and
-0.02 give the same run to the last digit (the geodesic is straight and every draw is per
-flight, so the step can no longer enter), both within 1.5 of the two-sample scale of the
-uncapped run, and the moving-medium and walk cases are unchanged.  The first version of
-the cap nudged the photon across the face by a fraction of the remaining distance, which
-for a photon a rounding error inside a face is below the position's resolution, and the
-photon stepped there forever; the margin is a fixed fraction of the cell crossing.  The
-XRB check is the short deck at 0.1 and 0.5 with the cap: the escaping fractions should
-now agree, and their common value against the uncapped 0.05 run is the size of the
-systematic the production runs carry.
-
-The stratified gate (`tst/montecarlo/disk_atmosphere`, 1e6 and 4e6 photons, one rank)
-passes the same way for both pushers on the capped code: the polarization norm falls at
-order 0.40 (general) and 0.36 (legacy) against the expected 0.5, 0.065 and 0.063 at 4e6
-photons; the grazing band has the right sign in both and is under-powered at this count
-in both; the general pusher's face-on band sits 2.1 sigma above Feautrier, the legacy
-0.7 below, which is within what the plan for the polar axis records for the general
-pusher.  The general pusher took 5.5 times the legacy pusher's time at its default
-`stepsize` 0.5, which is the per-step cost the XRB pays everywhere.
+**That diagnosis was wrong** (2026-10-17).  The capped short decks on andes
+(`d01_emis_lb0.05cap`, `d01_emis_lb0.5cap`, same seed) gave 47,243 and 42,874 escapers
+against 47,213 and 42,888 uncapped, and steps per scattering rose by under 1 percent: the
+cap almost never binds on the XRB, since a photon entering a cell starts on a face and
+fixed fractions of the crossing land on the far face, not past it.  The trend is linear
+in the step (zero-step extrapolation about 47.7k), so production at 0.1 is about 2.5
+percent short in the escaping fraction and 0.05 about 1 percent.  The suspected cause,
+not yet tested, is the one-point quadrature of the optical depth: each step is charged
+with the extinction at its start, while the comoving frequency changes along the step
+through the metric and the flow; the trapezoid rule with the end-of-step extinction,
+which the integrator's cached end-of-step metric makes one extra opacity evaluation, is
+the fix to try.  The cap stays: it is right where steps start mid-cell (the sphere test
+became exactly step-independent with it) and the regressions pass.  On the flat sphere
+the opacity does not vary along a step, which is why the step size could not show there.
 
 The balancer run (`d01_accel2_lb`, `lb_initial = photons`) moved 7,612 of 7,680 blocks
 in 120 s and left the busiest rank, 255, at 3.89 times its fair share with 11.7 s, the
