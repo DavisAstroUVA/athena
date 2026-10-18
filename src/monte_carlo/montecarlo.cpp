@@ -10,15 +10,14 @@
 #include <algorithm>  // min, max
 #include <cmath>      // floor
 #include <limits>     // numeric_limits
-#include <cstdio>
 #include <fstream>
 #include <chrono>      // steady_clock, for the transport wall time
 #include <ctime>       // clock(), CLOCKS_PER_SEC
 #include <iostream>
 #include <random>
 #include <stdexcept>  // runtime_error
-// C++ headers
 #include <cstdint>  // uint64_t
+#include <cstdio>   // snprintf
 #include <cstring>  // strcmp, memcpy, memset
 #include <string>
 #include <vector>
@@ -163,6 +162,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   kgreens_file = pin->GetOrAddString("montecarlo","kgreens_file","");
   kgreens = nullptr;
   mrw = nullptr;
+  optab = nullptr;
   if (acceleration) mrw = new MRWTables;
   accel_report = pin->GetOrAddBoolean("montecarlo","accel_report",false);
   verbose = pin->GetOrAddBoolean("montecarlo", "verbose", true);
@@ -235,6 +235,14 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 
   // Initialize Emmision parameters and methods
   InitializeEmission(pin);
+
+  // The multigroup opacity table, read before the problem generator's hook below, which
+  // may size its escape groups on it, and before any block is built
+  if (emission_flag == EMISTABLE
+      || pin->GetOrAddString("montecarlo","absorption","none") == "table") {
+    optab = new OpacityTable;
+    optab->Read(pin);
+  }
 
   // Set default size parameters
   max_phots_init = pin->GetOrAddInteger("montecarlo","max_phots_init",10000);
@@ -378,6 +386,7 @@ MonteCarlo::~MonteCarlo() {
 
   delete kgreens;
   delete mrw;
+  delete optab;
   delete pmcout;
   delete pexch;
 #ifdef MPI_PARALLEL
@@ -400,6 +409,8 @@ enum AbsorptionOpacityFlag GetAbsorptionOpacityFlag(std::string input_string) {
     return ABSFF;
   } else if (input_string == "dust") {
     return ABSDUST;
+  } else if (input_string == "table") {
+    return ABSTABLE;
   } else {
     std::stringstream msg;
     msg << "### FATAL ERROR in GetAbsorptionOpacityFlag" << std::endl
@@ -501,6 +512,8 @@ enum EmissionFlag GetEmissionFlag(std::string input_string) {
     return EMISBB;
   } else if (input_string == "multi") {
     return MULTI;
+  } else if (input_string == "table") {
+    return EMISTABLE;
   } else {
     std::stringstream msg;
     msg << "### FATAL ERROR in GetEmissionFlag" << std::endl
@@ -1069,6 +1082,14 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
     absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
     emission_geometry[0] = EMISVOL; // Must be volumetric
     emission_array = true; // allocate memory for array
+  } else if (emission_flag ==  EMISTABLE) {
+    GetEmission[0] = GetEmissionTable;
+    nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
+    weight_scheme[0] = GetWeightScheme(pin);
+    initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
+    absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
+    emission_geometry[0] = EMISVOL; // Must be volumetric
+    emission_array = true; // allocate memory for array
   } else if (emission_flag ==  EMISBB) {
     GetEmission[0] = GetEmissionBlackbody;
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
@@ -1522,8 +1543,11 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] = 0;
     int64_t declined[MonteCarloBlock::NMRWDECLINE];
     for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) declined[b] = 0;
+    int64_t tabc[MonteCarloBlock::NTABCOUNT];
+    for (int b=0; b<MonteCarloBlock::NTABCOUNT; ++b) tabc[b] = 0;
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
+      for (int b=0; b<MonteCarloBlock::NTABCOUNT; ++b) tabc[b] += pmcb->tab_count[b];
       nsplit += pmcb->nsplit;
       nroul += pmcb->nroul;
       nmrw += pmcb->nmrw;
@@ -1559,6 +1583,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,declined,MonteCarloBlock::NMRWDECLINE,MPI_INT64_T,MPI_SUM,
                   MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,tabc,MonteCarloBlock::NTABCOUNT,MPI_INT64_T,MPI_SUM,
+                  MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sum,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sq,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
   #endif
@@ -1588,6 +1614,25 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   << ", outside Kompaneets " << declined[MRW_DECLINE_COMPTON]
                   << ", no budget " << declined[MRW_DECLINE_BUDGET] << ", other "
                   << declined[MRW_DECLINE_OTHER] << ")" << std::endl;
+      if (optab != nullptr) {
+        // Which cells the table served and which fell off its grid: this decides whether
+        // a run used the tabulated opacity or the analytic one
+        const int64_t nt = tabc[MonteCarloBlock::TABCOUNT_TABLE];
+        const int64_t nf = tabc[MonteCarloBlock::TABCOUNT_FREEFREE];
+        const int64_t nc = tabc[MonteCarloBlock::TABCOUNT_CUT];
+        const int64_t ncell = nt + nf + nc;
+        char pct[16];
+        std::snprintf(pct, sizeof(pct), "%.2f",
+                      (ncell > 0) ? 100.*static_cast<Real>(nf)/static_cast<Real>(ncell) : 0.);
+        std::cout << "opacity table: " << nt << " cells from the table, " << nf
+                  << " off-grid using free-free (" << pct << "%)";
+        if (nc > 0) std::cout << ", " << nc << " masked";
+        std::cout << std::endl;
+        if (nf > 0)
+          std::cout << "               off-grid in density: "
+                    << tabc[MonteCarloBlock::TABCOUNT_OFF_RHO] << ", in temperature: "
+                    << tabc[MonteCarloBlock::TABCOUNT_OFF_TEMP] << std::endl;
+      }
       if (accel_report) {
         // the share of the analog scatterings by the optical half-width of their cell
         int64_t tot = 0;
@@ -1899,6 +1944,8 @@ void MonteCarlo::SetupBlockFromFluid(MonteCarloBlock *pmcb) {
   pmcb->GetTemperature();
   pmcb->GetNumberDensity();
   pmcb->ComputeFreeFreePrefactor();
+  // after the number densities: a problem generator's number-density hook may mask cells
+  pmcb->BuildOpacityTables();
   if (boosts) {
     pmcb->GetVelocity();
     pmcb->ComputeTransformations();

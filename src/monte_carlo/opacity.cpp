@@ -429,3 +429,19 @@ Real XsecVoigt(Real nu, Real tgas) {
   Real sigmatot = pre * lineprofile;
   return sigmatot;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn Real TableAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip)
+//! \brief the tabulated absorption extinction [1/cm] at the photon's energy
+//
+// Edge reading: linear in log E between the two nodes that bracket the energy, clamped
+// to the ends of the table.
+
+Real TableAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
+  int k;
+  Real xk;
+  pmcb->pmy_mc->optab->EnergyNode(pphot->ep[ip], k, xk);
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  return (1.-xk) * pmcb->TableExtinction(i3,i2,i1,k)
+         + xk * pmcb->TableExtinction(i3,i2,i1,k+1);
+}

@@ -359,6 +359,8 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     AbsorptionOpacity = FreeFreeAbsorptionOpacity;
   } else if (absorption_opac == ABSDUST) {
     AbsorptionOpacity = DustAbsorptionOpacity;
+  } else if (absorption_opac == ABSTABLE) {
+    AbsorptionOpacity = TableAbsorptionOpacity;
   }
   // Get number of species
   nspec = pin->GetOrAddInteger("problem","nspec",2);
@@ -478,6 +480,21 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     accel_mask.NewAthenaArray(ncells3,ncells2,ncells1);
     for (int n=0; n<accel_mask.GetSize(); ++n) accel_mask(n) = 1;
   }
+  if (pmy_mc->optab != nullptr) {
+    // Tabulated opacities: the mask covers the ghosts like rho so a problem generator
+    // can index it the same way; the tables themselves cover the active cells only.
+    const int nf = pmy_mc->optab->nfre;
+    tab_mask.NewAthenaArray(ncells3,ncells2,ncells1);
+    for (int n=0; n<tab_mask.GetSize(); ++n) tab_mask(n) = 1;
+    tab_cell.resize(static_cast<std::size_t>(nx1)*nx2*nx3);
+    tab_emis_tot.NewAthenaArray(nx3,nx2,nx1);
+    if (pmy_mc->optab->cell_storage) {
+      tab_abs.NewAthenaArray(nx3,nx2,nx1,nf);
+      tab_emis_cum.NewAthenaArray(nx3,nx2,nx1,nf);
+    }
+    tab_scratch_.resize(2*nf);
+    for (int n=0; n<NTABCOUNT; ++n) tab_count[n] = 0;
+  }
 
  // Create user monte carlo block data
   InitUserMonteCarloBlockData(pin);
@@ -525,6 +542,10 @@ MonteCarloBlock::~MonteCarloBlock() {
   if (importance.GetSize() > 0) importance.DeleteAthenaArray();
   if (escape_prob.GetSize() > 0) escape_prob.DeleteAthenaArray();
   if (accel_mask.GetSize() > 0) accel_mask.DeleteAthenaArray();
+  if (tab_mask.GetSize() > 0) tab_mask.DeleteAthenaArray();
+  if (tab_emis_tot.GetSize() > 0) tab_emis_tot.DeleteAthenaArray();
+  if (tab_abs.GetSize() > 0) tab_abs.DeleteAthenaArray();
+  if (tab_emis_cum.GetSize() > 0) tab_emis_cum.DeleteAthenaArray();
 }
 
 //----------------------------------------------------------------------------------------
@@ -2078,10 +2099,15 @@ void MonteCarloBlock::WeightWindow(Photon *pphot, int ip) {
 //! \fn void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip)
 //! \brief a sample below the minimum weight survives with probability roulette and
 //! carries 1/roulette times its weight, or is absorbed; the expected weight is unchanged
+//
+// A sample whose weight is exactly zero is absorbed without a draw: there is nothing to
+// amplify, and a zero-weight survivor would go on to the scattering step, which with
+// scattering = none destroys it.  Weight absorption with no scattering takes every
+// sample through here at its first interaction.
 
 void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip) {
   const Real p = pmy_mc->roulette;
-  if (p > 0. && pran->uniform() < p)
+  if (pphot->wp[ip] > 0. && p > 0. && pran->uniform() < p)
     pphot->wp[ip] /= p;
   else
     pphot->statp[ip] = ABSORBED;

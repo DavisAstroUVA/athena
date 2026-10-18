@@ -11,6 +11,7 @@
 
 // Athena++ headers
 #include "montecarlo.hpp"
+#include "mcutils.hpp"  // mcbisect
 #include "../defs.hpp"
 #include "../mesh/mesh.hpp"
 #include "../coordinates/coordinates.hpp"
@@ -328,4 +329,83 @@ void GetZonePositionCartesianFace(Photon *pphot, MCRandom *pran, MCCoord *pcoord
       break;
   }
 
+}
+//----------------------------------------------------------------------------------------
+//! \fn Real GetEmissionTable(MonteCarloBlock *pmcb, int k, int j, int i, int etype)
+//! \brief the cell's tabulated emission [erg/cm^3/s], from BuildOpacityTables
+
+Real GetEmissionTable(MonteCarloBlock *pmcb, int k, int j, int i, int etype) {
+  return pmcb->tab_emis_tot(k-pmcb->ks, j-pmcb->js, i-pmcb->is);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip)
+//! \brief energy from the cell's tabulated emission spectrum, isotropic direction
+//
+// The energy is drawn from the cumulative emission over the nodes with isotropic
+// direction.  With an escape table (weights = biased, bias_energy) the node interval is
+// drawn in proportion to its photon share s_l times m_l = (1 - xi) + xi p_l/<p>, with
+// p_l the cell's escape probability in the interval, <p> the share-weighted mean and
+// xi = bias_energy_mix, and the weight is divided by m_l; the shares sum to one, so that
+// the m_l-weighted shares do too, and the weight factor is bounded at 1/(1 - xi);
+// See PhotonEmitFreeFree.
+
+void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
+  MCRandom *pran = pmcb->pran;
+  const OpacityTable *t = pmcb->pmy_mc->optab;
+  const int nfre = t->nfre;
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+
+  Real dev = pran->uniform();
+  const Real *prob;
+  const Real tot = pmcb->TableEmissionCumulative(i3, i2, i1, prob);
+  Real energy;
+  bool drawn = false;
+  if (tot <= 0.) {
+    // A non-emitting cell can still be drawn, since cells are picked uniformly and only
+    // then weighted.  There is no spectrum to sample and the photon carries zero weight,
+    // so take the lowest tabulated energy rather than divide by a zero bin width.
+    energy = t->egrid(0);
+    drawn = true;
+  } else if (pmcb->pmy_mc->nescape > 0 && pmcb->pmy_mc->bias_energy
+             && pmcb->escape_prob.GetSize() > 0) {
+    const Real *pe = &(pmcb->escape_prob(i3-pmcb->ks,i2-pmcb->js,i1-pmcb->is,0));
+    const Real xi = pmcb->pmy_mc->bias_energy_mix;
+    Real pmean = 0.;
+    for (int l=0; l<nfre-1; ++l) pmean += (prob[l+1]-prob[l])*pe[l];
+    if (pmean > 0.) {
+      Real cum = 0., q = 0., m = 1.;
+      int l = 0;
+      for (l=0; l<nfre-1; ++l) {
+        m = (1. - xi) + xi*pe[l]/pmean;
+        q = (prob[l+1]-prob[l])*m;
+        if (dev < cum + q || l == nfre-2) break;
+        cum += q;
+      }
+      Real a = (q > 0.) ? std::min(std::max((dev-cum)/q, 0.), 1.) : 0.;
+      pphot->wp[ip] /= m;
+      energy = std::exp(a*std::log(t->egrid(l+1)) + (1.-a)*std::log(t->egrid(l)));
+      drawn = true;
+    }
+  }
+  if (!drawn) {
+    const int i = mcbisect(dev, const_cast<Real*>(prob), nfre);
+    const Real a = (dev-prob[i])/(prob[i+1]-prob[i]);
+    const Real a1 = 1.-a;
+    // Log interpolation within the interval: the node grid is log-spaced, so drawing
+    // linearly in energy inside an interval puts the sample systematically high.
+    energy = std::exp(a*std::log(t->egrid(i+1)) + a1*std::log(t->egrid(i)));
+  }
+  pphot->ep[ip] = energy;
+
+  // isotropic direction; k0p carries the energy
+  Real phi = 2. * PI * pran->uniform();
+  Real cphi = cos(phi);
+  Real sphi = sin(phi);
+  Real cth = 2. * pran->uniform() - 1.;
+  Real sth = std::sqrt(1. - SQR(cth));
+  pphot->k0p[ip] = pphot->ep[ip];
+  pphot->k1p[ip] = sth*cphi;
+  pphot->k2p[ip] = sth*sphi;
+  pphot->k3p[ip] = cth;
 }
