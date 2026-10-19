@@ -346,8 +346,9 @@ void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip) {
 namespace {
 
 // Electron and ion number densities.  The ion density is what the free-free emission and
-// opacity read as species(1).  Where the table's grey Rosseland mean falls below the
-// Thomson value of ionized gas and T < 1e5 K the gas is taken as neutral.
+// opacity read as species(1).  With table_ne the electron density is the table's; else
+// the gas is taken as neutral where the table's grey Rosseland mean falls below the
+// Thomson value of ionized gas and T < 1e5 K.
 void GetNel(MonteCarloBlock *pmcb) {
 
   Real mp = 1.67262192369e-24;
@@ -363,6 +364,11 @@ void GetNel(MonteCarloBlock *pmcb) {
         pmcb->species(0,k,j,i) = nh + 2. * nhe;
 
         Real tgas = pmcb->tgas(k,j,i);
+        if (t->table_ne) {
+          // the free electrons per atom of the table
+          pmcb->species(0,k,j,i) = t->ElectronDensity(tgas, rho);
+          continue;
+        }
         Real ld = log10(rho);
         Real lt = log10(tgas);
         Real xi = (ld - t->lmind) / t->dld;

@@ -609,6 +609,11 @@ void GetNel(MonteCarloBlock *pmcb) {
         pmcb->species(0,k,j,i) = nh + 2. * nhe;
 
         Real tgas = pmcb->tgas(k,j,i);
+        if (t->table_ne) {
+          // the free electrons per atom of the table
+          pmcb->species(0,k,j,i) = t->ElectronDensity(tgas, rho);
+          continue;
+        }
         Real ld = log10(rho);
         Real lt = log10(tgas);
         Real xi = (ld - t->lmind) / t->dld;

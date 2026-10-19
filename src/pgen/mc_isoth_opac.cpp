@@ -40,6 +40,8 @@ namespace {
                   const PhotonFrameState &s);
   void AverageEnergy(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
                   const PhotonFrameState &s);
+  void ElectronJ(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+                 const PhotonFrameState &s);
 }
 
 
@@ -245,9 +247,10 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin){
 
   nuser_var = 1;
-  AllocateUserMoments(2);
+  AllocateUserMoments(3);
   EnrollUserMoment(0, JMeanOpacity, "kapJ");
   EnrollUserMoment(1, AverageEnergy, "eave");
+  EnrollUserMoment(2, ElectronJ, "nelJ");
 
   // The tabulated opacities are the module's (emission = table, absorption = table,
   // <montecarlo>/opacity_file)
@@ -281,6 +284,20 @@ void JMeanOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
   // energy and path length come from the frame this moment was enrolled with
   Real weight = pphot->wp[ip]*s.e*s.dl/MCConstants::c_cgs;
   pmcb->moments_user(imom,i3,i2,i1) += weight*pphot->acp[ip];
+
+}
+
+// n_e-weighted J: in a cell nelJ / Er is the cell's electron density, whatever the
+// sampling noise of Er, which is what the electron-density test reads
+void ElectronJ(MonteCarloBlock *pmcb, Photon *pphot, int ip, int imom,
+               const PhotonFrameState &s) {
+
+  int i1 = pphot->i1p[ip];
+  int i2 = pphot->i2p[ip];
+  int i3 = pphot->i3p[ip];
+
+  Real weight = pphot->wp[ip]*s.e*s.dl/MCConstants::c_cgs;
+  pmcb->moments_user(imom,i3,i2,i1) += weight*pmcb->species(0,i3,i2,i1);
 
 }
 

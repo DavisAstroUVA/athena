@@ -21,6 +21,10 @@
 //   grey Rosseland (ntem rows of nrho), grey Planck (same)
 //   Rosseland group means, nfre blocks of (ntem rows of nrho), including scattering
 //   Planck group means, nfre blocks, absorption only; all in cm^2/g
+// The free electrons per atom, <montecarlo>/nfree_file (tops_regrid.py's _nfree.txt):
+//   comment lines (one of them "# Abar = <A>  Z_full = <Z>"), nT, nrho, T [keV], rho,
+//   nT rows of nrho values of N_free; the grids must be the main table's.  With
+//   table_ne the electron density of every cell is rho N_free / (Abar m_u).
 // The energy axis must be uniform in log; the temperature and density axes may be
 // uniform or not (a cell's bracket comes from the uniform-spacing formula corrected by a
 // walk, which costs nothing on a uniform axis).
@@ -81,6 +85,8 @@ class OpacityTable {
 
   //! read the file and the options
   void Read(ParameterInput *pin);
+  //! read the free electrons per atom (called by Read when nfree_file is given)
+  void ReadNFree(const std::string &fname);
 
   // grids
   int nfre, ntem, nrho;
@@ -92,6 +98,12 @@ class OpacityTable {
   bool uniform_t, uniform_rho;  // axes uniform in log (to 1e-6 of the spacing)
   // tables, kappa in cm^2/g: (group, item, irho); the log of a positive Planck value
   AthenaArray<Real> plan, lplan, ross, gray_ross, gray_plan;
+  // free electrons per atom (item, irho) and the mean atomic weight [m_u] of the file
+  AthenaArray<Real> nfree;
+  Real abar;
+  bool have_nfree;       // an nfree_file was read
+  bool table_ne;         // <montecarlo>/table_ne: electron density from N_free
+  Real nfree_min_, nfree_max_;  // range of the file, for the report
 
   // options
   TableGroupReading groups;
@@ -122,6 +134,11 @@ class OpacityTable {
   Real FreeFree(Real temp, Real rho, Real energy) const;
   //! its Planck mean over [elo, ehi] [1/cm]
   Real FreeFreeGroupMean(Real elo, Real ehi, Real temp, Real rho) const;
+  //! free electrons per atom of a cell: bilinear in the cell's bracket, which is the
+  //! main table's, clamped at the grid's edges
+  Real NFree(const TableCell &cell) const;
+  //! the electron density [1/cm^3] of gas at (temp, rho) from N_free
+  Real ElectronDensity(Real temp, Real rho) const;
   //! B_nu(T) [cgs]
   static Real PlanckNu(Real temp, Real nu);
   //! B_nu / (h nu) integrated over [elo, ehi] [photons/cm^2/s/sr]

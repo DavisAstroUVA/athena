@@ -16,6 +16,8 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <cstdlib>  // atof
+#include <cstring>  // strstr
 #include <string>
 #include <vector>
 
@@ -33,6 +35,7 @@ constexpr Real c_cgs = 2.99792458e10;
 constexpr Real kb_cgs = 1.380649e-16;
 constexpr Real keverg = 1.602176634e-9;
 constexpr Real mp_cgs = 1.67262192369e-24;
+constexpr Real mu_cgs = 1.66053906660e-24;  // atomic mass unit
 constexpr Real ffnrm = 3.692146e8;
 constexpr Real zeta3x2 = 2.4041138063191885;  // 2 zeta(3), int_0^inf x^2/(e^x-1) dx
 
@@ -73,7 +76,8 @@ void BuildPlanckTable() {
   pl_lnp[0] = std::log(p);
   for (int i=1; i<NPL; ++i) {
     const Real la = pl_lnx[0] + dl*(i-1), lb = la + dl, lm = 0.5*(la + lb);
-    p += (integrand(std::exp(la)) + 4.*integrand(std::exp(lm)) + integrand(std::exp(lb)))*dl/6./zeta3x2;
+    p += (integrand(std::exp(la)) + 4.*integrand(std::exp(lm))
+          + integrand(std::exp(lb)))*dl/6./zeta3x2;
     pl_lnx[i] = lb;
     pl_lnp[i] = std::log(std::min(p, 1.));
   }
@@ -115,7 +119,8 @@ OpacityTable::OpacityTable() :
     nfre(0), ntem(0), nrho(0), uniform_t(false), uniform_rho(false),
     groups(TABLE_GROUPS_MEAN), offgrid(TABLE_OFFGRID_FREEFREE),
     above(TABLE_ABOVE_FREEFREE), emax(0.), cell_storage(true), gray_to_freefree(false),
-    fill_freefree(false), heabund(0.09), ngray_rows(0), ngroups(0), nabs(0) {}
+    fill_freefree(false), heabund(0.09), ngray_rows(0), ngroups(0), nabs(0), abar(1.),
+    have_nfree(false), table_ne(false) {}
 
 //----------------------------------------------------------------------------------------
 //! \fn void OpacityTable::Read(ParameterInput *pin)
@@ -185,7 +190,8 @@ void OpacityTable::Read(ParameterInput *pin) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-          << "<montecarlo>/table_storage = " << mode << "; use cell or global" << std::endl;
+          << "<montecarlo>/table_storage = " << mode << "; use cell or global"
+          << std::endl;
       ATHENA_ERROR(msg);
     }
     mode = pin->GetOrAddString("montecarlo", "table_gray", "keep");
@@ -196,13 +202,22 @@ void OpacityTable::Read(ParameterInput *pin) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-          << "<montecarlo>/table_gray = " << mode << "; use keep or freefree" << std::endl;
+          << "<montecarlo>/table_gray = " << mode << "; use keep or freefree"
+          << std::endl;
       ATHENA_ERROR(msg);
     }
   }
   emax = pin->GetOrAddReal("montecarlo", "table_emax", 0.) * keverg;  // keV in the file
   fill_freefree = pin->GetOrAddBoolean("montecarlo", "table_fill_freefree", false);
   heabund = pin->GetOrAddReal("problem", "heabund", 0.09);
+  table_ne = pin->GetOrAddBoolean("montecarlo", "table_ne", false);
+  const std::string nfree_name = pin->GetOrAddString("montecarlo", "nfree_file", "");
+  if (table_ne && nfree_name.empty()) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
+        << "table_ne needs <montecarlo>/nfree_file" << std::endl;
+    ATHENA_ERROR(msg);
+  }
 
   FILE *file = fopen(fname.c_str(), "r");
   if (file == NULL) {
@@ -335,6 +350,8 @@ void OpacityTable::Read(ParameterInput *pin) {
     for (int g=0; g<nfre; ++g) gedge(g) = egrid(g);
   }
 
+  if (!nfree_name.empty()) ReadNFree(nfree_name);
+
   if (Globals::my_rank == 0) {
     std::cout << "Opacity table " << fname << ": " << nfre << " groups "
               << egrid(0)/keverg << " to " << gedge(ngroups)/keverg << " keV"
@@ -348,7 +365,117 @@ void OpacityTable::Read(ParameterInput *pin) {
               << "; groups read as "
               << ((groups == TABLE_GROUPS_MEAN) ? "means" : "edges") << ", storage "
               << (cell_storage ? "cell" : "global") << std::endl;
+    if (have_nfree)
+      std::cout << "  free electrons per atom from " << nfree_name << ": Abar = " << abar
+                << ", N_free " << nfree_min_ << " to " << nfree_max_
+                << (table_ne ? "; sets the electron density" : "") << std::endl;
   }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void OpacityTable::ReadNFree(const std::string &fname)
+//! \brief read the free electrons per atom on the main table's (T, rho) grid
+
+void OpacityTable::ReadNFree(const std::string &fname) {
+  FILE *file = fopen(fname.c_str(), "r");
+  if (file == NULL) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in OpacityTable::ReadNFree" << std::endl
+        << "cannot open <montecarlo>/nfree_file = " << fname << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  // Comment lines first; the one with "Abar =" carries the mean atomic weight.
+  abar = 0.;
+  char line[1024];
+  int ch;
+  while ((ch = fgetc(file)) == '#') {
+    if (fgets(line, sizeof(line), file) == NULL) break;
+    const char *pos = std::strstr(line, "Abar =");
+    if (pos != NULL) abar = std::atof(pos + 6);
+  }
+  if (ch != EOF) ungetc(ch, file);
+  if (abar <= 0.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in OpacityTable::ReadNFree" << std::endl
+        << fname << ": no \"# Abar = <value>\" line in the header" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  int nt = 0, nr = 0, nread = 0;
+  nread += fscanf(file, "%d", &nt);
+  nread += fscanf(file, "%d", &nr);
+  if (nread != 2 || nt != ntem || nr != nrho) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in OpacityTable::ReadNFree" << std::endl
+        << fname << ": " << nt << " temperatures and " << nr << " densities, the opacity "
+        << "table has " << ntem << " and " << nrho << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  // the grids, which must be the main table's to the file's five digits
+  for (int j=0; j<ntem; ++j) {
+    Real tk;
+    nread += fscanf(file, "%lf", &tk);
+    if (std::abs(tk*keverg/kb_cgs/tgrid(j) - 1.) > 1.e-3) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in OpacityTable::ReadNFree" << std::endl
+          << fname << ": temperature " << j << " is " << tk*keverg/kb_cgs << " K, the "
+          << "opacity table's is " << tgrid(j) << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+  for (int i=0; i<nrho; ++i) {
+    Real r;
+    nread += fscanf(file, "%lf", &r);
+    if (std::abs(r/rgrid(i) - 1.) > 1.e-3) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in OpacityTable::ReadNFree" << std::endl
+          << fname << ": density " << i << " is " << r << ", the opacity table's is "
+          << rgrid(i) << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+  nfree.NewAthenaArray(ntem, nrho);
+  nfree_min_ = 1.e99;
+  nfree_max_ = 0.;
+  for (int j=0; j<ntem; ++j) {
+    for (int i=0; i<nrho; ++i) {
+      nread += fscanf(file, "%lf", &(nfree(j,i)));
+      nfree_min_ = std::min(nfree_min_, nfree(j,i));
+      nfree_max_ = std::max(nfree_max_, nfree(j,i));
+    }
+  }
+  fclose(file);
+  if (nread != 2 + ntem + nrho + ntem*nrho) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in OpacityTable::ReadNFree" << std::endl
+        << fname << ": read " << nread << " values, expected "
+        << 2 + ntem + nrho + ntem*nrho << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  have_nfree = true;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real OpacityTable::NFree(const TableCell &cell) const
+//! \brief free electrons per atom at a cell's bracket: bilinear in (log T, log rho), the
+//! weights clamped to the grid for a cell off it
+
+Real OpacityTable::NFree(const TableCell &cell) const {
+  const int ii = cell.irho, jj = cell.item;
+  const Real xi = std::min(std::max(cell.xi, 0.), 1.);
+  const Real xj = std::min(std::max(cell.xj, 0.), 1.);
+  return (1.-xi)*((1.-xj)*nfree(jj,ii) + xj*nfree(jj+1,ii))
+         + xi*((1.-xj)*nfree(jj,ii+1) + xj*nfree(jj+1,ii+1));
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real OpacityTable::ElectronDensity(Real temp, Real rho) const
+//! \brief n_e = rho N_free / (Abar m_u) at (temp, rho)
+
+Real OpacityTable::ElectronDensity(Real temp, Real rho) const {
+  TableCell cell;
+  bool off_rho, off_temp;
+  Locate(temp, rho, cell, off_rho, off_temp);
+  return rho*NFree(cell)/(abar*mu_cgs);
 }
 
 //----------------------------------------------------------------------------------------

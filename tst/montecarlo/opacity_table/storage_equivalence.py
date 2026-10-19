@@ -53,6 +53,10 @@ CONFIGS = {
         'mean_compton': ('compton', 'table', 'table', {'table_gray': 'freefree'}),
         'mean_none_ext': ('none', 'table', 'table',
                           {'table_gray': 'freefree', 'table_emax': '100.'}),
+        # electron density from the table's free electrons per atom: needs a table with
+        # an nfree file beside it (--snapshot-dir /home/swd8g/opacity_table
+        # --table out_uniform_nfreq32_solabun.txt)
+        'mean_ne': ('thomson', 'table', 'table', {'table_ne': 'true', 'nfree_file': 'auto'}),
     },
     'readhdf_gr': {
         # the synthetic Kerr-Schild torus of make_ks_snapshot.py (--snapshot-dir holds it
@@ -96,6 +100,7 @@ def main():
     configs = CONFIGS[args.pgen]
     names = args.configs or sorted(configs)
     workdir = os.path.abspath(args.workdir)
+    nfree = table[:-4] + '_nfree.txt'
 
     allok = True
     for name in names:
@@ -106,6 +111,10 @@ def main():
             d = os.path.join(workdir, args.pgen, name, mode)
             dirs[mode] = d
             keys = dict(extra, table_storage=mode)
+            if keys.get('nfree_file') == 'auto':
+                if not os.path.exists(nfree):
+                    sys.exit('{} needs {}'.format(name, nfree))
+                keys['nfree_file'] = os.path.basename(nfree)
             if args.pgen == 'readhdf':
                 u.link_inputs(d, snapshot, table)
                 ath = os.path.join(d, 'athinput.readhdf')
@@ -119,6 +128,8 @@ def main():
                                             keys)
             else:
                 u.link_inputs(d, table)
+                if os.path.exists(nfree):
+                    u.link_inputs(d, nfree)
                 ath = os.path.join(d, 'athinput.mciso')
                 u.write_isoth_opac_athinput(ath, args.table, args.nphot, args.iseed,
                                             scattering, emission, absorption, keys)

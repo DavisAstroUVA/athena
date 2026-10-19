@@ -2531,10 +2531,10 @@ void MonteCarloBlock::GetNumberDensity() {
     return;
   }
 
-  // For all other cases, the default assumes a composition of hydrogen and helium with
-  // <problem>/heabund helium nuclei per hydrogen nucleus, fully ionized, and computes
-  // the electron and ion number densities.  This is used for electron scattering and
-  // free-free emission/absorption.  species(1) carries sum(Z^2 n_ion).
+  // table_ne = true -> the electron density comes from the opacity table's
+  // free electrons per atom, rho N_free / (Abar m_u), which falls below full ionization
+  // where the gas is cool; the ion density stays that of the ionized mixture.
+  const bool table_ne = (pmy_mc->optab != nullptr) && pmy_mc->optab->table_ne;
 
   Real mp = 1.67262192369e-24;
 
@@ -2546,7 +2546,10 @@ void MonteCarloBlock::GetNumberDensity() {
         Real nh = rho(k,j,i) / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
         species(1,k,j,i) = nh + 4. * nhe; // nion
-        species(0,k,j,i) = nh + 2. * nhe; // nel
+        if (table_ne)
+          species(0,k,j,i) = pmy_mc->optab->ElectronDensity(tgas(k,j,i), rho(k,j,i));
+        else
+          species(0,k,j,i) = nh + 2. * nhe; // nel
       }
     }
   }

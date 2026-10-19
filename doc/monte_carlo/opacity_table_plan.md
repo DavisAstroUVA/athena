@@ -1,6 +1,6 @@
 # Table opacities as a module option: plan
 
-**Status (2026-10-18): Phases 1 and 2 built and passing; Phases 3 to 6 not started.** Work goes
+**Status (2026-10-18): Phases 1 to 3 built and passing; Phases 4 to 6 not started.** Work goes
 on the `opacity_table` branch in the `athena-opacity` worktree. Each phase ends with its
 tests passing and the status block here updated.
 
@@ -61,7 +61,22 @@ under analog Planck sampling has a heavy tail (a Wien-tail photon's contribution
 as E^4 at an E^-3 opacity while the counts fall as e^-x), so it needs a million photons
 for a few percent, whereas the free-free sampler's flat-in-ln E draw has no such tail;
 and the free-free sampler's window must stop near 60 kT, since samples of no weight at
-hundreds of kT walk astronomically far in a closed box. Decisions taken (2026-10-18): the present `mc_readhdf*` reading is
+hundreds of kT walk astronomically far in a closed box.
+
+Phase 3 as built: `nfree_file` (read by `OpacityTable::ReadNFree`, grids checked
+against the main table's, Abar from the header) and `table_ne`; `ElectronDensity(T, rho)`
+is bilinear in the cell's bracket; the default `GetNumberDensity` and the readers'
+`GetNel` use it when `table_ne` is on, the ion density stays that of the ionized
+mixture, and the free-free fallback of off-grid cells keeps full ionization (a
+departure from the plan's wording, deliberate: those cells are hot or empty, and the
+fallback has no cell state). `mc_isoth_opac` gained the `nelJ` user moment, whose ratio
+to Er is the cell's n_e exactly. Test `ne_table.py` on the solar TOPS table and its
+nfree file at five (T, rho) points on and between nodes, where N_free runs from 0.77 to
+1.10: the run's n_e matches rho N_free / (Abar m_u) to 1e-5 (the opacity table's
+four-digit temperature grid sets the bracket) and the run without `table_ne` the
+ionized H/He value to 1e-7; on the free-free table's nfree file (full ionization) the
+two agree. `storage_equivalence.py` has a `mean_ne` configuration. Decisions taken
+(2026-10-18): the present `mc_readhdf*` reading is
 the `edge` mode and `mc_isoth_opac`'s variant is retired untested; `table_ne` is off by
 default; the thermalized high band is built in Phase 4; the regrid script is changed to
 write the Rosseland absorption and checked; both storage modes of 3.6 are built.
