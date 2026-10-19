@@ -332,7 +332,7 @@ void GetZonePositionCartesianFace(Photon *pphot, MCRandom *pran, MCCoord *pcoord
 }
 //----------------------------------------------------------------------------------------
 //! \fn Real GetEmissionTable(MonteCarloBlock *pmcb, int k, int j, int i, int etype)
-//! \brief the cell's tabulated emission [erg/cm^3/s], from BuildOpacityTables
+//! \brief the cell's tabulated emission [photons/cm^3/s], from BuildOpacityTables
 
 Real GetEmissionTable(MonteCarloBlock *pmcb, int k, int j, int i, int etype) {
   return pmcb->tab_emis_tot(k-pmcb->ks, j-pmcb->js, i-pmcb->is);
@@ -342,19 +342,21 @@ Real GetEmissionTable(MonteCarloBlock *pmcb, int k, int j, int i, int etype) {
 //! \fn void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip)
 //! \brief energy from the cell's tabulated emission spectrum, isotropic direction
 //
-// The energy is drawn from the cumulative emission over the nodes with isotropic
-// direction.  With an escape table (weights = biased, bias_energy) the node interval is
-// drawn in proportion to its photon share s_l times m_l = (1 - xi) + xi p_l/<p>, with
-// p_l the cell's escape probability in the interval, <p> the share-weighted mean and
-// xi = bias_energy_mix, and the weight is divided by m_l; the shares sum to one, so that
-// the m_l-weighted shares do too, and the weight factor is bounded at 1/(1 - xi);
-// See PhotonEmitFreeFree.
+// The group is drawn from the cell's cumulative emission (one uniform) and the energy
+// within it by OpacityTable::DrawEnergy, then the direction (two more).  With an escape
+// table (weights = biased, bias_energy) the group is drawn in proportion to its photon
+// share s_l times m_l = (1 - xi) + xi p_l/<p>, with p_l the cell's escape probability in
+// the group, <p> the share-weighted mean and xi = bias_energy_mix, and the weight is
+// divided by m_l; the shares sum to one, so the m_l-weighted shares do too, and the
+// weight factor is bounded at 1/(1 - xi); see PhotonEmitFreeFree.  That path takes one
+// escape group per table group, which the problem generator sets up.
 
 void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   MCRandom *pran = pmcb->pran;
-  const OpacityTable *t = pmcb->pmy_mc->optab;
-  const int nfre = t->nfre;
+  const OpacityTable *tab = pmcb->pmy_mc->optab;
+  const int ng = tab->ngroups;
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  const Real temp = pmcb->tgas(i3,i2,i1);
 
   Real dev = pran->uniform();
   const Real *prob;
@@ -365,36 +367,33 @@ void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
     // A non-emitting cell can still be drawn, since cells are picked uniformly and only
     // then weighted.  There is no spectrum to sample and the photon carries zero weight,
     // so take the lowest tabulated energy rather than divide by a zero bin width.
-    energy = t->egrid(0);
+    energy = tab->gedge(0);
     drawn = true;
   } else if (pmcb->pmy_mc->nescape > 0 && pmcb->pmy_mc->bias_energy
              && pmcb->escape_prob.GetSize() > 0) {
     const Real *pe = &(pmcb->escape_prob(i3-pmcb->ks,i2-pmcb->js,i1-pmcb->is,0));
     const Real xi = pmcb->pmy_mc->bias_energy_mix;
     Real pmean = 0.;
-    for (int l=0; l<nfre-1; ++l) pmean += (prob[l+1]-prob[l])*pe[l];
+    for (int l=0; l<ng; ++l) pmean += (prob[l+1]-prob[l])*pe[l];
     if (pmean > 0.) {
       Real cum = 0., q = 0., m = 1.;
       int l = 0;
-      for (l=0; l<nfre-1; ++l) {
+      for (l=0; l<ng; ++l) {
         m = (1. - xi) + xi*pe[l]/pmean;
         q = (prob[l+1]-prob[l])*m;
-        if (dev < cum + q || l == nfre-2) break;
+        if (dev < cum + q || l == ng-1) break;
         cum += q;
       }
       Real a = (q > 0.) ? std::min(std::max((dev-cum)/q, 0.), 1.) : 0.;
       pphot->wp[ip] /= m;
-      energy = std::exp(a*std::log(t->egrid(l+1)) + (1.-a)*std::log(t->egrid(l)));
+      energy = tab->DrawEnergy(l, a, temp);
       drawn = true;
     }
   }
   if (!drawn) {
-    const int i = mcbisect(dev, const_cast<Real*>(prob), nfre);
+    const int i = mcbisect(dev, const_cast<Real*>(prob), ng+1);
     const Real a = (dev-prob[i])/(prob[i+1]-prob[i]);
-    const Real a1 = 1.-a;
-    // Log interpolation within the interval: the node grid is log-spaced, so drawing
-    // linearly in energy inside an interval puts the sample systematically high.
-    energy = std::exp(a*std::log(t->egrid(i+1)) + a1*std::log(t->egrid(i)));
+    energy = tab->DrawEnergy(i, a, temp);
   }
   pphot->ep[ip] = energy;
 

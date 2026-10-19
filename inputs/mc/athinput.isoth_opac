@@ -64,7 +64,7 @@ absorption = table         # table | freefree
 polarized  = false
 abs_method = weight
 opacity_file  = out_opacity_table_nfreq32.txt  # tops_regrid.py layout
-table_groups  = edge       # edge: the readers' old reading of the group means
+table_groups  = mean       # mean: piecewise constant per group; edge: value at the lower bound
 table_gray    = freefree   # rows of the old tables gray in every group -> free-free
 table_storage = cell       # cell: per-cell arrays; global: interpolate per call
 

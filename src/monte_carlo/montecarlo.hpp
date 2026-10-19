@@ -661,12 +661,12 @@ public:
   AthenaArray<int> tab_mask;
   //! each active cell's place on the (T, rho) grid, [TableIndex(kt,jt,it)]
   std::vector<TableCell> tab_cell;
-  //! the cell's total emission [erg/cm^3/s], (kt,jt,it)
+  //! the cell's total emission [photons/cm^3/s], (kt,jt,it)
   AthenaArray<Real> tab_emis_tot;
-  //! cell storage only: extinction at every node [1/cm] and the normalized cumulative
-  //! emission over the nodes, (kt,jt,it,l)
+  //! cell storage only: the nabs extinctions [1/cm] and the ngroups+1 values of the
+  //! normalized cumulative emission of each cell, (kt,jt,it,l)
   AthenaArray<Real> tab_abs, tab_emis_cum;
-  //! global storage scratch: nfre extinctions then nfre cumulative values
+  //! global storage scratch: nabs extinctions then ngroups+1 cumulative values
   std::vector<Real> tab_scratch_;
   //! cells by source over the last build: table, free-free fallback, masked; and the
   //! off-grid counts by axis (a cell can be off both)
@@ -675,9 +675,9 @@ public:
   int64_t tab_count[NTABCOUNT];
   int TableIndex(int kt, int jt, int it) const { return (kt*nx2 + jt)*nx1 + it; }
   void BuildOpacityTables();
-  //! extinction at node l of cell (i3,i2,i1) [1/cm]
+  //! extinction l of cell (i3,i2,i1) [1/cm]: group l (mean reading) or node l (edge)
   Real TableExtinction(int i3, int i2, int i1, int l) const;
-  //! the cell's normalized cumulative emission over the nodes; returns the total
+  //! the cell's normalized cumulative emission over its groups; returns the total
   Real TableEmissionCumulative(int i3, int i2, int i1, const Real *&cum);
 
   // Set flags
@@ -897,9 +897,9 @@ inline void MonteCarloBlock::AccumulateMoments(AthenaArray<Real> &mom, int type,
 
 //----------------------------------------------------------------------------------------
 //! \fn Real MonteCarloBlock::TableExtinction(int i3, int i2, int i1, int l) const
-//! \brief extinction at node l of an active cell: stored in cell storage, interpolated
-//! from the rank's table in global storage.  Inline because the absorption opacity calls
-//! it per interaction, and per step under the general pusher.
+//! \brief extinction l of an active cell: stored in cell storage, interpolated from the
+//! rank's table in global storage.  Inline because the absorption opacity calls it per
+//! interaction, and per step under the general pusher.
 
 inline Real MonteCarloBlock::TableExtinction(int i3, int i2, int i1, int l) const {
   const int kt = i3-ks, jt = i2-js, it = i1-is;
@@ -915,10 +915,10 @@ inline Real MonteCarloBlock::TableExtinction(int i3, int i2, int i1, int l) cons
     ATHENA_ERROR(msg);
   }
 #endif
-  const OpacityTable *t = pmy_mc->optab;
-  if (t->cell_storage) return tab_abs(kt,jt,it,l);
-  return t->NodeExtinction(l, tab_cell[TableIndex(kt,jt,it)], tgas(i3,i2,i1),
-                           rho(i3,i2,i1));
+  const OpacityTable *tab = pmy_mc->optab;
+  if (tab->cell_storage) return tab_abs(kt,jt,it,l);
+  return tab->Extinction(l, tab_cell[TableIndex(kt,jt,it)], tgas(i3,i2,i1),
+                       rho(i3,i2,i1));
 }
 
 #endif // MONTECARLO_HPP

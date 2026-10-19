@@ -483,16 +483,16 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   if (pmy_mc->optab != nullptr) {
     // Tabulated opacities: the mask covers the ghosts like rho so a problem generator
     // can index it the same way; the tables themselves cover the active cells only.
-    const int nf = pmy_mc->optab->nfre;
+    const int nabs = pmy_mc->optab->nabs, ncum = pmy_mc->optab->ngroups+1;
     tab_mask.NewAthenaArray(ncells3,ncells2,ncells1);
     for (int n=0; n<tab_mask.GetSize(); ++n) tab_mask(n) = 1;
     tab_cell.resize(static_cast<std::size_t>(nx1)*nx2*nx3);
     tab_emis_tot.NewAthenaArray(nx3,nx2,nx1);
     if (pmy_mc->optab->cell_storage) {
-      tab_abs.NewAthenaArray(nx3,nx2,nx1,nf);
-      tab_emis_cum.NewAthenaArray(nx3,nx2,nx1,nf);
+      tab_abs.NewAthenaArray(nx3,nx2,nx1,nabs);
+      tab_emis_cum.NewAthenaArray(nx3,nx2,nx1,ncum);
     }
-    tab_scratch_.resize(2*nf);
+    tab_scratch_.resize(nabs + ncum);
     for (int n=0; n<NTABCOUNT; ++n) tab_count[n] = 0;
   }
 

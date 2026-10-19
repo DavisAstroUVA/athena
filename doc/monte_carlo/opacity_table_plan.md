@@ -1,6 +1,6 @@
 # Table opacities as a module option: plan
 
-**Status (2026-10-18): Phase 1 built and passing; Phases 2 to 6 not started.** Work goes
+**Status (2026-10-18): Phases 1 and 2 built and passing; Phases 3 to 6 not started.** Work goes
 on the `opacity_table` branch in the `athena-opacity` worktree. Each phase ends with its
 tests passing and the status block here updated.
 
@@ -30,7 +30,38 @@ with weight absorption), so a tenth survived at zero weight, reached the no-scat
 handler and were counted destroyed with a warning each; a zero-weight sample is now
 absorbed without a draw, which leaves the random stream of every scattering run
 unchanged (the Thomson and Compton equivalences still hold) and the `none` case no
-longer identical to the pre-module binary. Decisions taken (2026-10-18): the present `mc_readhdf*` reading is
+longer identical to the pre-module binary.
+
+Phase 2 as built: `table_groups = mean` is the default (piecewise constant per group,
+emission kappa_g times the photon Planck integral over the group from a tabulated
+cumulative, `PlanckPhotonCumulative`, energies within a group from B_nu/(h nu));
+`table_above = freefree|clamp|none` and `table_emax` (keV) with the free-free extension
+groups above the table; the uniform axes are detected and reported, and the (T, rho)
+bracket comes from the uniform-spacing guess corrected by a walk, so a non-uniform
+temperature grid needs no separate path. The emission, like the free-free one, is a
+photon rate (the weights are photon numbers). Tool: `make_ff_table.py` (exact Planck
+and Rosseland group means of the module's free-free opacity with Thomson scattering,
+plus the N_free file). Tests: `ff_table.py` on a 60 x 31 free-free table over five
+temperatures (1e4 to 1e8 K) and three densities (1e-12 to 1e-6, snapped to interior
+nodes): the mean reading's photon rate agrees with the analytic integral to 1e-6 at
+every point, every group energy is within the sampling noise of the free-free integral,
+and the closed box's energy density and window Planck mean are within 3.4% of Planck;
+the edge reading's photon rate agrees with its own trapezoid integral to 1e-6 and its
+window Planck mean comes out 0.60 to 0.65 of the true one (the F1 deficit), and at
+1e8 K, where kT sits at its top node, it emits 0.6 of the energy. With `--emax-ext 100`
+the extension (41 groups to 133 keV) passes the same checks at 1e7 and 1e8 K.
+The same table on the old 69-row non-uniform temperature grid passes at three
+temperatures. `ff_atmosphere.py` (Thomson atmosphere to depth 100, table against
+free-free, equal-weight sampling) agrees in total luminosity within its sampling error
+at 1e5, 1e6 and 1e7 K and in 31 or 32 of 32 groups within the two-stream estimate of
+the discretization plus 3%. `storage_equivalence.py` holds `cell` and `global`
+byte-identical for the mean reading with and without the extension, on both readers
+(biased weights included) and the atmosphere generator. Two things the tests taught: the closed box's energy density
+under analog Planck sampling has a heavy tail (a Wien-tail photon's contribution grows
+as E^4 at an E^-3 opacity while the counts fall as e^-x), so it needs a million photons
+for a few percent, whereas the free-free sampler's flat-in-ln E draw has no such tail;
+and the free-free sampler's window must stop near 60 kT, since samples of no weight at
+hundreds of kT walk astronomically far in a closed box. Decisions taken (2026-10-18): the present `mc_readhdf*` reading is
 the `edge` mode and `mc_isoth_opac`'s variant is retired untested; `table_ne` is off by
 default; the thermalized high band is built in Phase 4; the regrid script is changed to
 write the Rosseland absorption and checked; both storage modes of 3.6 are built.

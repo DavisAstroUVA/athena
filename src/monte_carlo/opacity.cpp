@@ -434,14 +434,35 @@ Real XsecVoigt(Real nu, Real tgas) {
 //! \fn Real TableAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip)
 //! \brief the tabulated absorption extinction [1/cm] at the photon's energy
 //
-// Edge reading: linear in log E between the two nodes that bracket the energy, clamped
-// to the ends of the table.
+// Mean reading: the value of the group holding the energy; below the bottom edge the
+// first group's, above the top edge (extension groups included) what table_above says:
+// the last group's, the analytic free-free at the energy, or nothing.  Edge reading:
+// linear in log E between the two nodes that bracket the energy, clamped to the ends.
 
 Real TableAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
-  int k;
-  Real xk;
-  pmcb->pmy_mc->optab->EnergyNode(pphot->ep[ip], k, xk);
+  const OpacityTable *tab = pmcb->pmy_mc->optab;
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
-  return (1.-xk) * pmcb->TableExtinction(i3,i2,i1,k)
-         + xk * pmcb->TableExtinction(i3,i2,i1,k+1);
+  const Real energy = pphot->ep[ip];
+  if (tab->groups == TABLE_GROUPS_EDGE) {
+    int k;
+    Real xk;
+    tab->EnergyNode(energy, k, xk);
+    return (1.-xk) * pmcb->TableExtinction(i3,i2,i1,k)
+           + xk * pmcb->TableExtinction(i3,i2,i1,k+1);
+  }
+  const int g = tab->GroupIndex(energy);
+  if (g >= 0) return pmcb->TableExtinction(i3,i2,i1,g);
+  if (g == -1) return pmcb->TableExtinction(i3,i2,i1,0);
+  switch (tab->above) {
+    case TABLE_ABOVE_CLAMP:
+      return pmcb->TableExtinction(i3,i2,i1,tab->ngroups-1);
+    case TABLE_ABOVE_FREEFREE: {
+      const int kt = i3-pmcb->ks, jt = i2-pmcb->js, it = i1-pmcb->is;
+      if (pmcb->tab_cell[pmcb->TableIndex(kt,jt,it)].source == TABLE_SRC_CUT)
+        return TABLE_CUT_VALUE;
+      return tab->FreeFree(pmcb->tgas(i3,i2,i1), pmcb->rho(i3,i2,i1), energy);
+    }
+    default:
+      return 0.;
+  }
 }

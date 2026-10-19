@@ -127,11 +127,11 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
 
   EnrollUserGetNumberDensity(GetNel);
   if (biased) {
-    // one escape group per node interval of the opacity table, which is what
-    // PhotonEmitTable's energy-group draw assumes
-    nescape = optab->nfre-1;
+    // one escape group per group of the opacity table, which is what PhotonEmitTable's
+    // energy-group draw assumes
+    nescape = optab->ngroups;
     escape_lne.NewAthenaArray(nescape+1);
-    for (int l=0; l<=nescape; ++l) escape_lne(l) = std::log(optab->egrid(l));
+    for (int l=0; l<=nescape; ++l) escape_lne(l) = std::log(optab->gedge(l));
   }
 }
 
@@ -378,8 +378,10 @@ void FillEscapeLocal(MonteCarloBlock *pmcb) {
         const Real temp = pmcb->tgas(k,j,i), rhoc = pmcb->rho(k,j,i);
         for (int l=0; l<ng; ++l) {
           Real alpha_a;
-          if (table)
+          if (table && pmc->optab->groups == TABLE_GROUPS_EDGE)
             alpha_a = 0.5*(pmcb->TableExtinction(k,j,i,l) + pmcb->TableExtinction(k,j,i,l+1));
+          else if (table)
+            alpha_a = pmcb->TableExtinction(k,j,i,l);
           else
             alpha_a = FreeFreeOpacity(temp, rhoc, std::exp(0.5*(lne(l)+lne(l+1))));
           const Real alpha_s = sigma_t*ne;

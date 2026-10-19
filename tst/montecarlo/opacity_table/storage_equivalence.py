@@ -34,6 +34,9 @@ CONFIGS = {
                       {'table_groups': 'edge', 'table_gray': 'freefree'}),
         'edge_compton': ('compton', 'table', 'table',
                          {'table_groups': 'edge', 'table_gray': 'freefree'}),
+        'mean_thomson': ('thomson', 'table', 'table', {'table_gray': 'freefree'}),
+        'mean_compton_ext': ('compton', 'table', 'table',
+                             {'table_gray': 'freefree', 'table_emax': '100.'}),
     },
     'isoth_opac': {
         'edge_compton': ('compton', 'table', 'table',
@@ -47,6 +50,9 @@ CONFIGS = {
                         {'table_groups': 'edge', 'table_gray': 'freefree'}),
         'edge_ffabs': ('none', 'table', 'freefree',
                        {'table_groups': 'edge', 'table_gray': 'freefree'}),
+        'mean_compton': ('compton', 'table', 'table', {'table_gray': 'freefree'}),
+        'mean_none_ext': ('none', 'table', 'table',
+                          {'table_gray': 'freefree', 'table_emax': '100.'}),
     },
     'readhdf_gr': {
         # the synthetic Kerr-Schild torus of make_ks_snapshot.py (--snapshot-dir holds it
@@ -57,6 +63,9 @@ CONFIGS = {
         'edge_compton_biased': ('compton', 'table', 'table',
                                 {'table_groups': 'edge', 'table_gray': 'freefree',
                                  'weights': 'biased'}),
+        'mean_compton_biased': ('compton', 'table', 'table',
+                                {'table_gray': 'freefree', 'weights': 'biased',
+                                 'table_emax': '100.'}),
     },
 }
 
