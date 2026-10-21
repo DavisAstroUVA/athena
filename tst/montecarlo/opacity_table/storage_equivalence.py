@@ -57,6 +57,13 @@ CONFIGS = {
         # an nfree file beside it (--snapshot-dir /home/swd8g/opacity_table
         # --table out_uniform_nfreq32_solabun.txt)
         'mean_ne': ('thomson', 'table', 'table', {'table_ne': 'true', 'nfree_file': 'auto'}),
+        # the two-band split, plain and with the high band thermalized (same table)
+        'mean_twoband': ('thomson', 'table', 'table',
+                         {'table_ne': 'true', 'nfree_file': 'auto', 'two_band': 'true',
+                          'abs_method': 'prob'}),
+        'mean_twoband_thick': ('compton', 'table', 'table',
+                               {'table_ne': 'true', 'nfree_file': 'auto', 'two_band': 'true',
+                                'two_band_thick': '10.', 'abs_method': 'prob'}),
     },
     'readhdf_gr': {
         # the synthetic Kerr-Schild torus of make_ks_snapshot.py (--snapshot-dir holds it

@@ -349,7 +349,8 @@ Real GetEmissionTable(MonteCarloBlock *pmcb, int k, int j, int i, int etype) {
 // the group, <p> the share-weighted mean and xi = bias_energy_mix, and the weight is
 // divided by m_l; the shares sum to one, so the m_l-weighted shares do too, and the
 // weight factor is bounded at 1/(1 - xi); see PhotonEmitFreeFree.  That path takes one
-// escape group per table group, which the problem generator sets up.
+// escape group per table group, which the problem generator sets up.  With two_band the
+// band rank is drawn last (one more uniform).
 
 void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   MCRandom *pran = pmcb->pran;
@@ -362,6 +363,7 @@ void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   const Real *prob;
   const Real tot = pmcb->TableEmissionCumulative(i3, i2, i1, prob);
   Real energy;
+  int grp = 0;
   bool drawn = false;
   if (tot <= 0.) {
     // A non-emitting cell can still be drawn, since cells are picked uniformly and only
@@ -387,6 +389,7 @@ void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
       Real a = (q > 0.) ? std::min(std::max((dev-cum)/q, 0.), 1.) : 0.;
       pphot->wp[ip] /= m;
       energy = tab->DrawEnergy(l, a, temp);
+      grp = l;
       drawn = true;
     }
   }
@@ -394,8 +397,29 @@ void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
     const int i = mcbisect(dev, const_cast<Real*>(prob), ng+1);
     const Real a = (dev-prob[i])/(prob[i+1]-prob[i]);
     energy = tab->DrawEnergy(i, a, temp);
+    grp = i;
   }
   pphot->ep[ip] = energy;
+  if (pmcb->table_two_band) {
+    // The band: the high one with probability w chi_h / chi_P, the share of the group's
+    // emission it carries, and the rank uniform within the band's part of [0, 1); none
+    // in the high band where it is thermalized, since that emission is not transported.
+    Real chi, chi_h, chi_l, w;
+    bool thick;
+    pmcb->TableBands(i3, i2, i1, grp, chi, chi_h, chi_l, w, thick);
+    const Real v = pran->uniform();
+    Real u = v;
+    if (w < 1.) {
+      if (thick) {
+        u = w + (1.-w)*v;
+      } else {
+        const Real ph = w*chi_h/(w*chi_h + (1.-w)*chi_l);
+        u = (v < ph) ? w*v/ph : w + (1.-w)*(v-ph)/(1.-ph);
+      }
+    }
+    pphot->ubp[ip] = u;
+    pphot->grpp[ip] = grp;
+  }
 
   // isotropic direction; k0p carries the energy
   Real phi = 2. * PI * pran->uniform();

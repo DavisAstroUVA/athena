@@ -21,6 +21,8 @@
 //   grey Rosseland (ntem rows of nrho), grey Planck (same)
 //   Rosseland group means, nfre blocks of (ntem rows of nrho), including scattering
 //   Planck group means, nfre blocks, absorption only; all in cm^2/g
+//   optionally the Rosseland absorption, nfre blocks: the Rosseland group means without
+//   the scattering of the table's own model (tops_regrid.py --rossabs)
 // The free electrons per atom, <montecarlo>/nfree_file (tops_regrid.py's _nfree.txt):
 //   comment lines (one of them "# Abar = <A>  Z_full = <Z>"), nT, nrho, T [keV], rho,
 //   nT rows of nrho values of N_free; the grids must be the main table's.  With
@@ -28,6 +30,23 @@
 // The energy axis must be uniform in log; the temperature and density axes may be
 // uniform or not (a cell's bracket comes from the uniform-spacing formula corrected by a
 // walk, which costs nothing on a uniform axis).
+//
+// Two-band split (<montecarlo>/two_band, mean reading with table_ne): each table group is
+// split into a high band, frequency fraction w with absorption kappa_h, and a low band,
+// fraction 1-w with kappa_l, with the cell's scattering s in both, such that
+//   w kappa_h + (1-w) kappa_l = kappa_P   and   [w/(kappa_h+s) + (1-w)/(kappa_l+s)]^-1 = kappa_R,
+// so that emission uses the Planck mean and diffusion the Rosseland one with Kirchhoff's
+// law holding in each band.  The closure is w = two_band_w, falling back to kappa_l = 0
+// where that would need kappa_l < 0 (two_band_closure = gap0 takes kappa_l = 0 always),
+// and the Rosseland absorption is floored at two_band_floor times s; a group whose
+// Rosseland absorption reaches its Planck mean stays one band.  A photon carries a band
+// rank u (Photon::ubp): u < w(cell) puts it in the high band of its group, the same
+// frequencies in every cell; u is redrawn after every electron scattering and whenever
+// the photon's group changes.  Where the high band is optically thick across the cell,
+// rho kappa_h W > two_band_thick (0 = never), it is in equilibrium with the gas and is
+// not transported: its emission is dropped and the low band receives instead what the
+// high band would have passed to it by scattering, w kappa_h p_s (1-w)/(1 - w p_s) with
+// p_s = s/(kappa_h + s), and a photon in the high band there is absorbed on the spot.
 //
 // Group reading (<montecarlo>/table_groups):
 //   mean  the k-th Planck value is the opacity throughout group k, [E_k, E_k+1), the top
@@ -55,6 +74,7 @@ class ParameterInput;
 enum TableGroupReading {TABLE_GROUPS_MEAN = 0, TABLE_GROUPS_EDGE = 1};
 enum TableOffGrid {TABLE_OFFGRID_FREEFREE = 0, TABLE_OFFGRID_CLAMP = 1};
 enum TableAbove {TABLE_ABOVE_CLAMP = 0, TABLE_ABOVE_FREEFREE = 1, TABLE_ABOVE_NONE = 2};
+enum TableClosure {TABLE_CLOSURE_W = 0, TABLE_CLOSURE_GAP0 = 1};
 
 //! \struct TableCell
 //! \brief where a cell sits on the (T, rho) grid: the lower bracket indices, the
@@ -96,14 +116,21 @@ class OpacityTable {
   // log10 bounds and spacings
   Real lmine, lmaxe, dle, lmint, lmaxt, dlt, lmind, lmaxd, dld;
   bool uniform_t, uniform_rho;  // axes uniform in log (to 1e-6 of the spacing)
-  // tables, kappa in cm^2/g: (group, item, irho); the log of a positive Planck value
-  AthenaArray<Real> plan, lplan, ross, gray_ross, gray_plan;
+  // tables, kappa in cm^2/g: (group, item, irho); the logs of positive values
+  AthenaArray<Real> plan, lplan, ross, lross, gray_ross, gray_plan;
+  // the Rosseland absorption block, when the file has one
+  bool have_rossabs;
+  AthenaArray<Real> rossabs, lrossabs;
   // free electrons per atom (item, irho) and the mean atomic weight [m_u] of the file
   AthenaArray<Real> nfree;
   Real abar;
   bool have_nfree;       // an nfree_file was read
   bool table_ne;         // <montecarlo>/table_ne: electron density from N_free
   Real nfree_min_, nfree_max_;  // range of the file, for the report
+  // the two-band split
+  bool two_band;
+  Real tb_w0, tb_floor, tb_thick;
+  TableClosure tb_closure;
 
   // options
   TableGroupReading groups;
@@ -130,6 +157,18 @@ class OpacityTable {
   //! Planck group value l for a cell on the grid [cm^2/g]: log-log bilinear, linear
   //! where a corner is not positive
   Real PlanckNode(int l, const TableCell &cell) const;
+  //! the same for the Rosseland group mean (with the file's scattering) and for the
+  //! Rosseland absorption block
+  Real RosselandNode(int l, const TableCell &cell) const;
+  Real RossAbsNode(int l, const TableCell &cell) const;
+  //! the two-band split of one group from its Planck mean kP, Rosseland absorption kRa
+  //! and the scattering s to be used with it, all per gram
+  void Split(Real kP, Real kRa, Real s, Real &w, Real &kh, Real &kl) const;
+  //! the bands of extinction l of a cell [1/cm]: the Planck value chi, the high and low
+  //! band values and the high-band fraction (1 where the group is one band); sg is the
+  //! cell's scattering per gram for the group
+  void Bands(int l, const TableCell &cell, Real temp, Real rho, Real sg, Real &chi,
+             Real &chi_h, Real &chi_l, Real &w) const;
   //! free-free extinction [1/cm] of fully ionized H + He at one energy
   Real FreeFree(Real temp, Real rho, Real energy) const;
   //! its Planck mean over [elo, ehi] [1/cm]

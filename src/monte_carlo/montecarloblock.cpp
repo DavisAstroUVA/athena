@@ -491,10 +491,18 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     if (pmy_mc->optab->cell_storage) {
       tab_abs.NewAthenaArray(nx3,nx2,nx1,nabs);
       tab_emis_cum.NewAthenaArray(nx3,nx2,nx1,ncum);
+      if (pmy_mc->optab->two_band) {
+        tab_abs_hi.NewAthenaArray(nx3,nx2,nx1,nabs);
+        tab_abs_lo.NewAthenaArray(nx3,nx2,nx1,nabs);
+        tab_w.NewAthenaArray(nx3,nx2,nx1,nabs);
+        tab_thick.NewAthenaArray(nx3,nx2,nx1,nabs);
+      }
     }
-    tab_scratch_.resize(nabs + ncum);
+    tab_scratch_.resize(5*nabs + ncum);
     for (int n=0; n<NTABCOUNT; ++n) tab_count[n] = 0;
   }
+  table_two_band = (pmy_mc->optab != nullptr) && pmy_mc->optab->two_band;
+  nabs_first = 0;
 
  // Create user monte carlo block data
   InitUserMonteCarloBlockData(pin);
@@ -546,6 +554,10 @@ MonteCarloBlock::~MonteCarloBlock() {
   if (tab_emis_tot.GetSize() > 0) tab_emis_tot.DeleteAthenaArray();
   if (tab_abs.GetSize() > 0) tab_abs.DeleteAthenaArray();
   if (tab_emis_cum.GetSize() > 0) tab_emis_cum.DeleteAthenaArray();
+  if (tab_abs_hi.GetSize() > 0) tab_abs_hi.DeleteAthenaArray();
+  if (tab_abs_lo.GetSize() > 0) tab_abs_lo.DeleteAthenaArray();
+  if (tab_w.GetSize() > 0) tab_w.DeleteAthenaArray();
+  if (tab_thick.GetSize() > 0) tab_thick.DeleteAthenaArray();
 }
 
 //----------------------------------------------------------------------------------------
@@ -791,6 +803,7 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
+        if (pphot->nscp[ip] == 0 && pphot->nmvp[ip] <= 1) nabs_first++;
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == DESTROYED) {
         ndes++;
@@ -945,9 +958,12 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         }
       }
 
-      // Update the absorption and scattering extinction coefficients
-      // if scattering can change sample energy.
-      if (!coherent_scattering) {
+      // Update the absorption and scattering extinction coefficients if scattering can
+      // change the sample's energy, or its band: with two_band the electron's thermal
+      // Doppler shift moves the photon between the lines and the gaps of its group, so
+      // the band rank is redrawn and the absorption follows.
+      if (table_two_band) pphot->ubp[ip] = pran->uniform();
+      if (!coherent_scattering || table_two_band) {
         pphot->acp[ip] = AbsorptionOpacity(this,pphot,ip);
         pphot->scp[ip] = ScatteringOpacity(this,pphot,ip);
       }
@@ -991,6 +1007,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
+        if (pphot->nscp[ip] == 0 && pphot->nmvp[ip] <= 1) nabs_first++;
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == DESTROYED) {
         pphot->RemoveOneParticle(ip);

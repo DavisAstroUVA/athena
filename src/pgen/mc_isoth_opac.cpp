@@ -105,6 +105,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   // Monte Carlo inverts from this pressure is the one written here.
   Real rideal = MonteCarloBlock::GasConstant(pin->GetOrAddReal("problem","heabund",0.09));
   Real tgas = pin->GetReal("problem","temp");
+  // <problem>/tgrad: the temperature rises linearly across the x3 range by this fraction
+  // of temp, for a diffusion test through a slab
+  Real tgrad = pin->GetOrAddReal("problem","tgrad",0.);
+  Real zlo = pin->GetReal("mesh","x3min"), zhi = pin->GetReal("mesh","x3max");
   // Set initial conditions
   if (COORDINATE_SYSTEM == "cartesian") {
     // density varies in the z direction
@@ -113,13 +117,14 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
       Real x1 = pcoord->x3v(k);
       if (!constdens) rho = DensityProfile(x1,xlow,xhigh,taumin,taumax,kappaes);
       if ((k == ks) || (k == ke)) printf("min/max dens: %g\n",rho);
+      const Real tcell = tgas*(1. + tgrad*(x1 - 0.5*(zlo + zhi))/(zhi - zlo));
       for (int j=js; j<=je; j++) {
         for (int i=is; i<=ie; i++) {
           phydro->u(IDN,k,j,i) = rho;
           phydro->u(IM1,k,j,i) = rho*vel1;
           phydro->u(IM2,k,j,i) = rho*vel2;
           phydro->u(IM3,k,j,i) = rho*vel3;
-          phydro->u(IEN,k,j,i) = rideal*rho*tgas/(gamma-1.0);
+          phydro->u(IEN,k,j,i) = rideal*rho*tcell/(gamma-1.0);
         }
       }
     }

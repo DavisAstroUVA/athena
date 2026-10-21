@@ -130,7 +130,7 @@ public:
   static int ik0p, ik1p, ik2p, ik3p;
   static int idk0p, idk1p, idk2p, idk3p;
   static int iep, iwp, iscp, iacp;
-  static int istrp, itaup, iwrefp;
+  static int istrp, itaup, iwrefp, iubp, igrpp;
   static int isip, isqp, isup, isvp;
   static int iuserp;
   static int ipolp;
@@ -142,6 +142,9 @@ public:
   //! photon property so that it rides along in the MPI buffers and survives a transfer to
   //! another block; `capmove` retires a photon whose free flight runs past the cap.
   std::vector<int> &nmvp;
+  //! table opacities with two_band: the group the absorption was last evaluated in, so
+  //! that a change of group (Compton, Doppler or gravitational shift) redraws the band
+  std::vector<int> &grpp;
   std::vector<int> &i1p, &i2p, &i3p;
   std::vector<Real> &x0p, &x1p, &x2p, &x3p;
   std::vector<Real> &k0p, &k1p, &k2p, &k3p;
@@ -158,6 +161,9 @@ public:
   //! weight over the cell's window centre at emission; the weight window keeps this
   //! ratio within its bounds as the photon moves between cells and energy groups
   std::vector<Real> &wrefp;
+  //! table opacities with two_band: the band rank in [0, 1); below the cell's high-band
+  //! fraction the photon is in the high band of its group
+  std::vector<Real> &ubp;
   std::vector<Real> &sip, &sqp, &sup, &svp;
   std::vector<Real> &dtp;
   std::vector<Real> *user;     //!>   user variable arrays

@@ -69,6 +69,10 @@ table_gray    = freefree   # rows of the old tables gray in every group -> free-
 table_storage = cell       # cell: per-cell arrays; global: interpolate per call
 #nfree_file   = out_uniform_nfreq32_solabun_nfree.txt  # free electrons per atom
 #table_ne     = true        # electron density from it
+#two_band     = true        # Planck emission, Rosseland diffusion (needs table_ne)
+#two_band_w   = 0.01        # high-band frequency fraction
+#two_band_thick = 10        # thermalize the high band where rho kappa_h W exceeds this
+#abs_method   = prob        # analog absorption; weight follows dead samples with two bands
 
 <problem>
 temp       = 3.e5          # K

@@ -160,6 +160,9 @@ Real DustScatteringOpacity(MonteCarloBlock *pmcb,  Photon *pphot, int ip);
 Real TableAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
 void GenerateComptonTable(int io);
 Real ComptonCrossSection(Real energy, Real theta);
+//! the thermal Compton cross section [cm^2] at photon energy edim = E/(m_e c^2) and
+//! electron temperature theta = kT/(m_e c^2), from the table GenerateComptonTable built
+Real ComptonSigma(Real edim, Real theta);
 Real Maxwell(Real theta, Real gamma);
 Real KleinNishina(Real x);
 Real ResLinePre();
@@ -666,8 +669,16 @@ public:
   //! cell storage only: the nabs extinctions [1/cm] and the ngroups+1 values of the
   //! normalized cumulative emission of each cell, (kt,jt,it,l)
   AthenaArray<Real> tab_abs, tab_emis_cum;
-  //! global storage scratch: nabs extinctions then ngroups+1 cumulative values
+  //! cell storage with two_band: the high and low band extinctions, the high-band
+  //! fraction (1 where the group is one band) and whether the high band is thermalized
+  AthenaArray<Real> tab_abs_hi, tab_abs_lo, tab_w;
+  AthenaArray<int> tab_thick;
+  bool table_two_band;  // optab->two_band, read per interaction
+  //! global storage scratch: 5 nabs values then ngroups+1 cumulative values
   std::vector<Real> tab_scratch_;
+  //! samples absorbed in their first step, before any scattering: with two_band the
+  //! cost of the high band's emission in cells where it is not thermalized
+  int64_t nabs_first;
   //! cells by source over the last build: table, free-free fallback, masked; and the
   //! off-grid counts by axis (a cell can be off both)
   enum {TABCOUNT_TABLE = 0, TABCOUNT_FREEFREE = 1, TABCOUNT_CUT = 2, TABCOUNT_OFF_RHO = 3,
@@ -679,6 +690,15 @@ public:
   Real TableExtinction(int i3, int i2, int i1, int l) const;
   //! the cell's normalized cumulative emission over its groups; returns the total
   Real TableEmissionCumulative(int i3, int i2, int i1, const Real *&cum);
+  //! the bands of group l of cell (i3,i2,i1): the Planck extinction, the high and low
+  //! band extinctions, the high-band fraction, and whether the high band is thermalized
+  void TableBands(int i3, int i2, int i1, int l, Real &chi, Real &chi_h, Real &chi_l,
+                  Real &w, bool &thick);
+  //! the cell's scattering per gram for group g: Thomson or thermal Compton on
+  //! species(0), zero for other scattering choices
+  Real TableScatteringPerGram(int g, int i3, int i2, int i1) const;
+  //! the cell's size [cm], the cube root of its volume
+  Real TableCellWidth(int i3, int i2, int i1) const;
 
   // Set flags
 

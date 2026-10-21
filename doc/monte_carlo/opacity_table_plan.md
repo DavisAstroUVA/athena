@@ -1,6 +1,6 @@
 # Table opacities as a module option: plan
 
-**Status (2026-10-18): Phases 1 to 3 built and passing; Phases 4 to 6 not started.** Work goes
+**Status (2026-10-19): Phases 1 to 4 built; Phases 5 and 6 not started.** Work goes
 on the `opacity_table` branch in the `athena-opacity` worktree. Each phase ends with its
 tests passing and the status block here updated.
 
@@ -75,8 +75,46 @@ nfree file at five (T, rho) points on and between nodes, where N_free runs from 
 1.10: the run's n_e matches rho N_free / (Abar m_u) to 1e-5 (the opacity table's
 four-digit temperature grid sets the bracket) and the run without `table_ne` the
 ionized H/He value to 1e-7; on the free-free table's nfree file (full ionization) the
-two agree. `storage_equivalence.py` has a `mean_ne` configuration. Decisions taken
-(2026-10-18): the present `mc_readhdf*` reading is
+two agree. `storage_equivalence.py` has a `mean_ne` configuration.
+
+Phase 4 as built (2026-10-19): `two_band`, `two_band_w`, `two_band_floor`,
+`two_band_closure`, `two_band_thick`; `OpacityTable::Split` (the handoff's closed form),
+`Bands`, the Rosseland tables and the optional Rosseland absorption block; per-cell
+`tab_abs_hi`, `tab_abs_lo`, `tab_w`, `tab_thick` in cell storage and the same per call in
+global storage; `Photon::ubp` (band rank) and `grpp` (group of the last absorption);
+the redraw after every scattering (the absorption is refreshed after a coherent
+scattering too) and on a change of group; the band at emission; the thermalized high
+band of 3.5 (emission to the low band with the scattering leakage, the high band's own
+value absorbing on the spot); the random-walk step declines; the split's moments are
+checked at every build; the report counts absorbed samples that died in their first
+step. `tops_regrid.py` is copied into `vis/python/montecarlo/problem_specific/opacity_table/`
+with `--rossabs` (a further nfre blocks after the Planck means) and `--digits`; the
+reader takes the block when present. On the TOPS table the block and the subtraction
+agree to 1e-3 in the median but differ by more than 1% in a third of the two-band
+(group, T, rho) cells and disagree on one band or two in 11%, which is the
+ill-conditioning the handoff foresaw, so tables for two-band runs should be written
+with `--rossabs`. `mc_isoth_opac` gained `tgrad`. Tools: `make_picket_table.py`
+(every group the same two bands, exact targets). Tests: `twoband_box.py` on the TOPS
+table at four line-dominated cells, where the emission rate under the split and under
+the thermalized high band matches the analytic integral to 1e-4 and the group energies
+the sampling noise, and the thermalized run's closed box is Planck in the transported
+field; `rosseland_slab.py` on the picket table (kappa_h = 300, kappa_l = 1, w = 0.01,
+Thomson 0.35, a slab ten depths across with T rising by half), where the single-band
+run carries 1.08 +- 0.03 of the Planck-only flux (0.34 of the Rosseland one), the
+two-band run 0.98 +- 0.02 of the Rosseland flux and the thermalized run 0.96 +- 0.02, with
+76% and 10% of the absorbed samples dying in their first step; `storage_equivalence.py`
+configurations `mean_twoband` and `mean_twoband_thick`, byte-identical. What the runs showed, in the handoff's example
+cell (2e4 K, 1e-15): with the split alone 100% of the absorbed samples die in their
+first step, and the equilibrium field rests on no sample at all; with the high band
+thermalized the field is Planck to 0.4% at a million photons and 8% of the samples die
+in place (the ones scattered back into the high band). With `abs_method = weight` and
+the default `minweight` a sample in a scattering-dominated low band is followed through
+hundreds of scatterings at no weight, so the tests use `prob`. Not built: the
+two-band Feautrier atmosphere (a picket table and the slab give sharper checks of the
+Rosseland limit, and the free-free atmosphere test covers the scattering coupling of a
+single band), the `two_band_decorrelate` knob, and the closure sensitivity run (the
+picket table recovers the split exactly for any w0; the sensitivity question belongs
+to the TOPS science runs of Phase 5). Decisions taken (2026-10-18): the present `mc_readhdf*` reading is
 the `edge` mode and `mc_isoth_opac`'s variant is retired untested; `table_ne` is off by
 default; the thermalized high band is built in Phase 4; the regrid script is changed to
 write the Rosseland absorption and checked; both storage modes of 3.6 are built.

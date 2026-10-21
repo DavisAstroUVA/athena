@@ -119,8 +119,9 @@ OpacityTable::OpacityTable() :
     nfre(0), ntem(0), nrho(0), uniform_t(false), uniform_rho(false),
     groups(TABLE_GROUPS_MEAN), offgrid(TABLE_OFFGRID_FREEFREE),
     above(TABLE_ABOVE_FREEFREE), emax(0.), cell_storage(true), gray_to_freefree(false),
-    fill_freefree(false), heabund(0.09), ngray_rows(0), ngroups(0), nabs(0), abar(1.),
-    have_nfree(false), table_ne(false) {}
+    fill_freefree(false), heabund(0.09), ngray_rows(0), ngroups(0), nabs(0),
+    have_rossabs(false), abar(1.), have_nfree(false), table_ne(false), two_band(false),
+    tb_w0(0.01), tb_floor(0.003), tb_thick(0.), tb_closure(TABLE_CLOSURE_W) {}
 
 //----------------------------------------------------------------------------------------
 //! \fn void OpacityTable::Read(ParameterInput *pin)
@@ -211,6 +212,33 @@ void OpacityTable::Read(ParameterInput *pin) {
   fill_freefree = pin->GetOrAddBoolean("montecarlo", "table_fill_freefree", false);
   heabund = pin->GetOrAddReal("problem", "heabund", 0.09);
   table_ne = pin->GetOrAddBoolean("montecarlo", "table_ne", false);
+  two_band = pin->GetOrAddBoolean("montecarlo", "two_band", false);
+  tb_w0 = pin->GetOrAddReal("montecarlo", "two_band_w", 0.01);
+  tb_floor = pin->GetOrAddReal("montecarlo", "two_band_floor", 0.003);
+  tb_thick = pin->GetOrAddReal("montecarlo", "two_band_thick", 0.);
+  {
+    const std::string closure = pin->GetOrAddString("montecarlo", "two_band_closure", "w");
+    if (closure == "w") {
+      tb_closure = TABLE_CLOSURE_W;
+    } else if (closure == "gap0") {
+      tb_closure = TABLE_CLOSURE_GAP0;
+    } else {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
+          << "<montecarlo>/two_band_closure = " << closure << "; use w or gap0"
+          << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+  if (two_band && (groups != TABLE_GROUPS_MEAN || !table_ne || tb_w0 <= 0. || tb_w0 >= 1.
+                   || tb_floor <= 0.)) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
+        << "two_band needs table_groups = mean, table_ne = true (the split uses the "
+        << "scattering of the cell's electrons), 0 < two_band_w < 1 and two_band_floor > 0"
+        << std::endl;
+    ATHENA_ERROR(msg);
+  }
   const std::string nfree_name = pin->GetOrAddString("montecarlo", "nfree_file", "");
   if (table_ne && nfree_name.empty()) {
     std::stringstream msg;
@@ -274,6 +302,28 @@ void OpacityTable::Read(ParameterInput *pin) {
   for (int k=0; k<nfre; ++k)
     for (int j=0; j<ntem; ++j)
       for (int i=0; i<nrho; ++i) nread += fscanf(file, "%lf", &(plan(k,j,i)));
+  // a further block is the Rosseland absorption
+  {
+    Real first;
+    if (fscanf(file, "%lf", &first) == 1) {
+      rossabs.NewAthenaArray(nfre, ntem, nrho);
+      lrossabs.NewAthenaArray(nfre, ntem, nrho);
+      rossabs(0,0,0) = first;
+      int nr = 1;
+      for (int k=0; k<nfre; ++k)
+        for (int j=0; j<ntem; ++j)
+          for (int i=0; i<nrho; ++i)
+            if (k+j+i > 0) nr += fscanf(file, "%lf", &(rossabs(k,j,i)));
+      if (nr != nfre*ntem*nrho) {
+        std::stringstream msg;
+        msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
+            << fname << ": a fifth block of " << nr << " values follows the Planck means; "
+            << "a Rosseland absorption block would hold " << nfre*ntem*nrho << std::endl;
+        ATHENA_ERROR(msg);
+      }
+      have_rossabs = true;
+    }
+  }
   fclose(file);
   const int nexpect = 3 + nfre + ntem + nrho + 2*ntem*nrho + 2*nfre*ntem*nrho;
   if (nread != nexpect) {
@@ -327,10 +377,17 @@ void OpacityTable::Read(ParameterInput *pin) {
       }
     }
   }
-  for (int k=0; k<nfre; ++k)
-    for (int j=0; j<ntem; ++j)
-      for (int i=0; i<nrho; ++i)
+  lross.NewAthenaArray(nfre, ntem, nrho);
+  for (int k=0; k<nfre; ++k) {
+    for (int j=0; j<ntem; ++j) {
+      for (int i=0; i<nrho; ++i) {
         lplan(k,j,i) = (plan(k,j,i) > 0.) ? std::log(plan(k,j,i)) : 0.;
+        lross(k,j,i) = (ross(k,j,i) > 0.) ? std::log(ross(k,j,i)) : 0.;
+        if (have_rossabs)
+          lrossabs(k,j,i) = (rossabs(k,j,i) > 0.) ? std::log(rossabs(k,j,i)) : 0.;
+      }
+    }
+  }
 
   // the group structure, see the header
   if (groups == TABLE_GROUPS_MEAN) {
@@ -365,6 +422,12 @@ void OpacityTable::Read(ParameterInput *pin) {
               << "; groups read as "
               << ((groups == TABLE_GROUPS_MEAN) ? "means" : "edges") << ", storage "
               << (cell_storage ? "cell" : "global") << std::endl;
+    if (have_rossabs) std::cout << "  with a Rosseland absorption block" << std::endl;
+    if (two_band)
+      std::cout << "  two-band split: w = " << tb_w0
+                << ((tb_closure == TABLE_CLOSURE_GAP0) ? " (gap0 closure)" : "")
+                << ", floor " << tb_floor << " kappa_es, high band thermalized above "
+                << tb_thick << std::endl;
     if (have_nfree)
       std::cout << "  free electrons per atom from " << nfree_name << ": Abar = " << abar
                 << ", N_free " << nfree_min_ << " to " << nfree_max_
@@ -546,6 +609,94 @@ Real OpacityTable::PlanckNode(int l, const TableCell &cell) const {
                     + xi *((1.-xj)*lplan(l,jj,ii+1) + xj*lplan(l,jj+1,ii+1)));
   }
   return (1.-xi)*((1.-xj)*k00 + xj*k10) + xi*((1.-xj)*k01 + xj*k11);
+}
+
+namespace {
+// log-log bilinear where every corner is positive, linear otherwise
+Real Bilinear(const AthenaArray<Real> &v, const AthenaArray<Real> &lv, int l,
+              const TableCell &cell) {
+  const int ii = cell.irho, jj = cell.item;
+  const Real xi = cell.xi, xj = cell.xj;
+  const Real k00 = v(l,jj  ,ii  ), k10 = v(l,jj+1,ii  );
+  const Real k01 = v(l,jj  ,ii+1), k11 = v(l,jj+1,ii+1);
+  if ((k00 > 0.) && (k10 > 0.) && (k01 > 0.) && (k11 > 0.)) {
+    return std::exp((1.-xi)*((1.-xj)*lv(l,jj,ii) + xj*lv(l,jj+1,ii))
+                    + xi *((1.-xj)*lv(l,jj,ii+1) + xj*lv(l,jj+1,ii+1)));
+  }
+  return (1.-xi)*((1.-xj)*k00 + xj*k10) + xi*((1.-xj)*k01 + xj*k11);
+}
+}  // namespace
+
+Real OpacityTable::RosselandNode(int l, const TableCell &cell) const {
+  return Bilinear(ross, lross, l, cell);
+}
+
+Real OpacityTable::RossAbsNode(int l, const TableCell &cell) const {
+  return Bilinear(rossabs, lrossabs, l, cell);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void OpacityTable::Split(Real kP, Real kRa, Real s, Real &w, Real &kh,
+//!                               Real &kl) const
+//! \brief the two-band split of a group, per gram
+//
+// With R = Ra + s and Pt = kP + s: no line structure (R >= Pt) is one band.  The gap0
+// closure (kl = 0) gives kh = kP R / Ra - s and w = kP / kh.  The w closure fixes w = w0:
+// with a = kh + s, w0 a^2 + a [R (1 - 2 w0) - Pt] + R w0 Pt = 0, the larger root, and
+// kl = (Pt - w0 a)/(1 - w0) - s; where that is negative the cell falls back to gap0.
+
+void OpacityTable::Split(Real kP, Real kRa, Real s, Real &w, Real &kh, Real &kl) const {
+  const Real ra = std::max(kRa, tb_floor*s);
+  const Real r = ra + s, pt = kP + s;
+  if (r >= pt*(1. - 1.e-9) || kP <= 0.) {
+    w = 1.;
+    kh = kl = kP;
+    return;
+  }
+  const Real kh_g = kP*r/ra - s;
+  const Real w_g = (kh_g > 0.) ? kP/kh_g : 1.;
+  if (tb_closure == TABLE_CLOSURE_W) {
+    const Real w0 = tb_w0;
+    const Real b = pt - r*(1. - 2.*w0);
+    const Real d = std::max(b*b - 4.*w0*w0*r*pt, 0.);
+    const Real a = (b + std::sqrt(d))/(2.*w0);
+    const Real kl_w = (pt - w0*a)/(1. - w0) - s;
+    if (kl_w >= 0.) {
+      w = w0;
+      kh = a - s;
+      kl = kl_w;
+      return;
+    }
+  }
+  w = w_g;
+  kh = kh_g;
+  kl = 0.;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void OpacityTable::Bands(int l, const TableCell &cell, Real temp, Real rho,
+//!                               Real sg, Real &chi, Real &chi_h, Real &chi_l,
+//!                               Real &w) const
+//! \brief the bands of extinction l of a cell [1/cm]
+//
+// One band (w = 1, chi_h = chi_l = chi) unless two_band is on, the reading is by group
+// means, the group is one of the table's and the cell is on the grid.  The Rosseland
+// absorption is the file's block when it has one, else the Rosseland mean less the
+// cell's scattering.
+
+void OpacityTable::Bands(int l, const TableCell &cell, Real temp, Real rho, Real sg,
+                         Real &chi, Real &chi_h, Real &chi_l, Real &w) const {
+  chi = Extinction(l, cell, temp, rho);
+  chi_h = chi_l = chi;
+  w = 1.;
+  if (!two_band || groups != TABLE_GROUPS_MEAN || l >= nfre
+      || cell.source != TABLE_SRC_TABLE) return;
+  const Real kp = PlanckNode(l, cell);
+  const Real kra = have_rossabs ? RossAbsNode(l, cell) : RosselandNode(l, cell) - sg;
+  Real kh, kl;
+  Split(kp, kra, sg, w, kh, kl);
+  chi_h = kh*rho;
+  chi_l = kl*rho;
 }
 
 //----------------------------------------------------------------------------------------
@@ -732,8 +883,13 @@ void MonteCarloBlock::BuildOpacityTables() {
   const OpacityTable *tab = pmy_mc->optab;
   if (tab == nullptr) return;
   for (int n=0; n<NTABCOUNT; ++n) tab_count[n] = 0;
+  const int nabs = tab->nabs;
   Real *chi = &tab_scratch_[0];
-  Real *cum = &tab_scratch_[tab->nabs];
+  Real *chi_h = &tab_scratch_[nabs];
+  Real *chi_l = &tab_scratch_[2*nabs];
+  Real *wb = &tab_scratch_[3*nabs];
+  Real *chi_eff = &tab_scratch_[4*nabs];
+  Real *cum = &tab_scratch_[5*nabs];
   for (int k=ks; k<=ke; ++k) {
     for (int j=js; j<=je; ++j) {
       for (int i=is; i<=ie; ++i) {
@@ -758,8 +914,49 @@ void MonteCarloBlock::BuildOpacityTables() {
         }
         Real *chi_c = tab->cell_storage ? &tab_abs(kt,jt,it,0) : chi;
         Real *cum_c = tab->cell_storage ? &tab_emis_cum(kt,jt,it,0) : cum;
-        for (int l=0; l<tab->nabs; ++l) chi_c[l] = tab->Extinction(l, cell, temp, rhoc);
-        Real tot = tab->EmissionCumulative(chi_c, temp, cum_c);
+        if (!table_two_band) {
+          for (int l=0; l<nabs; ++l) chi_c[l] = tab->Extinction(l, cell, temp, rhoc);
+        } else {
+          // The bands of every group, and the emission each group carries: its Planck
+          // extinction, or with the high band thermalized the low band's own plus what
+          // the high band hands it by scattering.  The split's two moments are checked
+          // here, the one place every cell passes through at a known cost.
+          const Real width = TableCellWidth(k,j,i);
+          for (int l=0; l<nabs; ++l) {
+            const Real sg = TableScatteringPerGram(l,k,j,i);
+            tab->Bands(l, cell, temp, rhoc, sg, chi_c[l], chi_h[l], chi_l[l], wb[l]);
+            bool thick = false;
+            if (wb[l] < 1.) {
+              const Real w = wb[l];
+              const Real kp = chi_c[l]/rhoc, kh = chi_h[l]/rhoc, kl = chi_l[l]/rhoc;
+              const Real p_err = std::abs(w*kh + (1.-w)*kl - kp);
+              if (p_err > 1.e-8*kp) {
+                std::stringstream msg;
+                msg << "### FATAL ERROR in MonteCarloBlock::BuildOpacityTables" << std::endl
+                    << "two-band split of group " << l << " at T = " << temp << ", rho = "
+                    << rhoc << " misses the Planck mean by " << p_err/kp << std::endl;
+                ATHENA_ERROR(msg);
+              }
+              thick = (tab->tb_thick > 0.) && (chi_h[l]*width > tab->tb_thick);
+            }
+            if (wb[l] >= 1.) {
+              chi_eff[l] = chi_c[l];
+            } else if (!thick) {
+              chi_eff[l] = wb[l]*chi_h[l] + (1.-wb[l])*chi_l[l];
+            } else {
+              const Real chi_s = sg*rhoc;
+              const Real ps = chi_s/(chi_h[l] + chi_s);
+              chi_eff[l] = (1.-wb[l])*(chi_l[l] + wb[l]*chi_h[l]*ps/(1. - wb[l]*ps));
+            }
+            if (tab->cell_storage) {
+              tab_abs_hi(kt,jt,it,l) = chi_h[l];
+              tab_abs_lo(kt,jt,it,l) = chi_l[l];
+              tab_w(kt,jt,it,l) = wb[l];
+              tab_thick(kt,jt,it,l) = thick ? 1 : 0;
+            }
+          }
+        }
+        Real tot = tab->EmissionCumulative(table_two_band ? chi_eff : chi_c, temp, cum_c);
         // A masked cell emits TABLE_CUT_VALUE outright, whatever the Planck function at
         // its temperature made of the cut extinction; its cumulative array, normalized
         // from that shape, still gives the sampler a valid distribution for the
@@ -786,13 +983,81 @@ Real MonteCarloBlock::TableEmissionCumulative(int i3, int i2, int i1, const Real
     cum = &tab_emis_cum(kt,jt,it,0);
     return tab_emis_tot(kt,jt,it);
   }
+  const int nabs = tab->nabs;
   Real *chi = &tab_scratch_[0];
-  Real *cum_s = &tab_scratch_[tab->nabs];
+  Real *cum_s = &tab_scratch_[5*nabs];
   const TableCell &cell = tab_cell[TableIndex(kt,jt,it)];
   const Real temp = tgas(i3,i2,i1), rhoc = rho(i3,i2,i1);
-  for (int l=0; l<tab->nabs; ++l) chi[l] = tab->Extinction(l, cell, temp, rhoc);
+  if (!table_two_band) {
+    for (int l=0; l<nabs; ++l) chi[l] = tab->Extinction(l, cell, temp, rhoc);
+  } else {
+    // the effective emitting extinction of each group, as BuildOpacityTables forms it
+    for (int l=0; l<nabs; ++l) {
+      Real chi_p, chi_h, chi_l, w;
+      bool thick;
+      TableBands(i3,i2,i1,l,chi_p,chi_h,chi_l,w,thick);
+      if (w >= 1.) {
+        chi[l] = chi_p;
+      } else if (!thick) {
+        chi[l] = w*chi_h + (1.-w)*chi_l;
+      } else {
+        const Real chi_s = TableScatteringPerGram(l,i3,i2,i1)*rhoc;
+        const Real ps = chi_s/(chi_h + chi_s);
+        chi[l] = (1.-w)*(chi_l + w*chi_h*ps/(1. - w*ps));
+      }
+    }
+  }
   Real tot = tab->EmissionCumulative(chi, temp, cum_s);
   if (cell.source == TABLE_SRC_CUT) tot = TABLE_CUT_VALUE;
   cum = cum_s;
   return tot;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::TableBands(int i3, int i2, int i1, int l, Real &chi,
+//!                                      Real &chi_h, Real &chi_l, Real &w, bool &thick)
+//! \brief the bands of group l of a cell: stored in cell storage, computed in global
+
+void MonteCarloBlock::TableBands(int i3, int i2, int i1, int l, Real &chi, Real &chi_h,
+                                 Real &chi_l, Real &w, bool &thick) {
+  const OpacityTable *tab = pmy_mc->optab;
+  const int kt = i3-ks, jt = i2-js, it = i1-is;
+  if (tab->cell_storage) {
+    chi = tab_abs(kt,jt,it,l);
+    chi_h = tab_abs_hi(kt,jt,it,l);
+    chi_l = tab_abs_lo(kt,jt,it,l);
+    w = tab_w(kt,jt,it,l);
+    thick = (tab_thick(kt,jt,it,l) != 0);
+    return;
+  }
+  const TableCell &cell = tab_cell[TableIndex(kt,jt,it)];
+  const Real temp = tgas(i3,i2,i1), rhoc = rho(i3,i2,i1);
+  tab->Bands(l, cell, temp, rhoc, TableScatteringPerGram(l,i3,i2,i1), chi, chi_h, chi_l,
+             w);
+  thick = (w < 1.) && (tab->tb_thick > 0.)
+          && (chi_h*TableCellWidth(i3,i2,i1) > tab->tb_thick);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::TableScatteringPerGram(int g, int i3, int i2, int i1) const
+//! \brief the cell's scattering per gram in group g, as the transport will see it
+
+Real MonteCarloBlock::TableScatteringPerGram(int g, int i3, int i2, int i1) const {
+  const Real sigma_t = 6.65248e-25, kmec2 = 1.68638e-10, mec2 = 8.18711e-7;
+  const Real nel = species(0,i3,i2,i1), rhoc = rho(i3,i2,i1);
+  if (scattering_meth == SCATTHOM || scattering_meth == SCATISO) return sigma_t*nel/rhoc;
+  if (scattering_meth == SCATCOMP) {
+    const OpacityTable *tab = pmy_mc->optab;
+    const Real ec = std::sqrt(tab->gedge(g)*tab->gedge(g+1));
+    return ComptonSigma(ec/mec2, kmec2*tgas(i3,i2,i1))*nel/rhoc;
+  }
+  return 0.;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::TableCellWidth(int i3, int i2, int i1) const
+//! \brief the cell's size [cm], the cube root of its volume
+
+Real MonteCarloBlock::TableCellWidth(int i3, int i2, int i1) const {
+  return l_cgs*std::cbrt(pcoord->vol(i3,i2,i1));
 }

@@ -804,6 +804,7 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
     // initialize counters to zero
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
     pmcb->nsplit = pmcb->nroul = 0;
+  pmcb->nabs_first = 0;
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
@@ -1430,6 +1431,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // reset counters
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb-> nrem = 0;
     pmcb->nsplit = pmcb->nroul = 0;
+  pmcb->nabs_first = 0;
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
@@ -1454,6 +1456,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       MonteCarloBlock *pmcb = my_blocks(nb);
       pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = 0;
       pmcb->nsplit = pmcb->nroul = 0;
+      pmcb->nabs_first = 0;
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
@@ -1537,7 +1540,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // bytes past it.
     int64_t ntot = 0;
     int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0, nsplit = 0, nroul = 0;
-    int64_t nmrw = 0, nmrw_decline = 0;
+    int64_t nmrw = 0, nmrw_decline = 0, nabs_first = 0;
     Real wesc_sum = 0., wesc_sq = 0., nmrw_scat = 0.;
     int64_t scat_hist[MonteCarloBlock::NSCATBINS];
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] = 0;
@@ -1548,6 +1551,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
       for (int b=0; b<MonteCarloBlock::NTABCOUNT; ++b) tabc[b] += pmcb->tab_count[b];
+      nabs_first += pmcb->nabs_first;
       nsplit += pmcb->nsplit;
       nroul += pmcb->nroul;
       nmrw += pmcb->nmrw;
@@ -1585,6 +1589,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,tabc,MonteCarloBlock::NTABCOUNT,MPI_INT64_T,MPI_SUM,
                   MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nabs_first,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sum,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sq,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
   #endif
@@ -1632,6 +1637,16 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
           std::cout << "               off-grid in density: "
                     << tabc[MonteCarloBlock::TABCOUNT_OFF_RHO] << ", in temperature: "
                     << tabc[MonteCarloBlock::TABCOUNT_OFF_TEMP] << std::endl;
+        if (optab->two_band && nabs > 0) {
+          // samples that never left their first step: under two bands, the high-band
+          // emission of cells where it is not thermalized
+          char pct2[16];
+          std::snprintf(pct2, sizeof(pct2), "%.1f",
+                        100.*static_cast<Real>(nabs_first)/static_cast<Real>(nabs));
+          std::cout << "two band: " << nabs_first << " of " << nabs
+                    << " absorbed samples died in their first step (" << pct2 << "%)"
+                    << std::endl;
+        }
       }
       if (accel_report) {
         // the share of the analog scatterings by the optical half-width of their cell
@@ -2065,6 +2080,7 @@ MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
   SetupBlockFromFluid(pmcb);
   pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
   pmcb->nsplit = pmcb->nroul = 0;
+  pmcb->nabs_first = 0;
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
