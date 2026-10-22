@@ -502,6 +502,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     for (int n=0; n<NTABCOUNT; ++n) tab_count[n] = 0;
   }
   table_two_band = (pmy_mc->optab != nullptr) && pmy_mc->optab->two_band;
+  table_decorrelate = table_two_band ? pmy_mc->optab->tb_decorrelate : 0.;
   nabs_first = 0;
 
  // Create user monte carlo block data

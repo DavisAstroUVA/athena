@@ -438,6 +438,11 @@ void PhotonPusher::MovePhotonToNextZone(Photon *pphot, MCCoord *pco, MonteCarloB
     int &i1 = pphot->i1p[ip];
     int &i2 = pphot->i2p[ip];
     int &i3 = pphot->i3p[ip];
+    // two_band_decorrelate: the new cell's lines unrelated to the old cell's with this
+    // probability, so the band rank is redrawn before the absorption is read
+    if (pmy_mcb->table_decorrelate > 0.
+        && pmy_mcb->pran->uniform() < pmy_mcb->table_decorrelate)
+      pphot->ubp[ip] = pmy_mcb->pran->uniform();
     if (pmy_mcb->boosts || false) {
       // Shift photon energy to comoving frame
       //Real shift = pmy_mcb->LorentzTransformFrequencyShift(pphot,ip);
@@ -537,6 +542,11 @@ bool PhotonPusher::UpdateZone(Photon *pphot, int ip) {
     }
   }
   // Returns true if cell changes, false otherwise
+  // two_band_decorrelate: the new cell's lines unrelated to the old cell's with this
+  // probability (the general pusher refreshes the absorption at its next step)
+  if (update && pmy_mcb->table_decorrelate > 0.
+      && pmy_mcb->pran->uniform() < pmy_mcb->table_decorrelate)
+    pphot->ubp[ip] = pmy_mcb->pran->uniform();
   return update;
 
 }

@@ -5,7 +5,7 @@ The module's table opacities against the generator-owned ones they replaced.
 mc_readhdf is run on the small isothermal-atmosphere snapshot twice with the same seed:
 once with a binary built from a tree that predates the port (emission = user,
 absorption = user, <problem>/opacity_filename, the tables inside the generator), once
-with the ported tree (emission = table, absorption = table, <montecarlo>/opacity_file,
+with the ported tree (emission = table, absorption = table, <opacitytable>/opacity_file,
 table_groups = edge, table_gray = freefree).  The two must give byte-identical photon
 lists and identical moment files: the port keeps the arithmetic and the order of the
 random draws, so nothing weaker than identity is expected.  PASS/FAIL.

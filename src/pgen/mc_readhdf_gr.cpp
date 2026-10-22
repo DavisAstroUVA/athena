@@ -47,7 +47,7 @@ namespace {
   // Floor on the sampled escape probability.  It bounds the largest weight at
   // ave/pesc_min
   Real pesc_min = 1.e-10;
-  // emission = table: the module's tabulated opacities (<montecarlo>/opacity_file) supply
+  // emission = table: the module's tabulated opacities (<opacitytable>/opacity_file) supply
   // the emission and absorption; this generator masks the cells above tcut, sets the
   // electron density and builds the escape tables on them
   bool table = false;
@@ -93,7 +93,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
       std::stringstream msg;
       msg << "### FATAL ERROR in MonteCarlo::InitUserMonteCarloData" << std::endl
           << "mc_readhdf_gr has no user emission or absorption; use "
-          << "emission = table and absorption = table with <montecarlo>/opacity_file"
+          << "emission = table and absorption = table with <opacitytable>/opacity_file"
           << std::endl;
       ATHENA_ERROR(msg);
     }
@@ -587,7 +587,7 @@ void GetNelFloor(MonteCarloBlock *pmcb) {
 void GetNel(MonteCarloBlock *pmcb) {
 
   Real mp = 1.67262192369e-24;
-  const OpacityTable *t = pmcb->pmy_mc->optab;
+  const OpacityTable *tab = pmcb->pmy_mc->optab;
 
   for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
     for (int j=pmcb->js; j<=pmcb->je; ++j) {
@@ -609,41 +609,41 @@ void GetNel(MonteCarloBlock *pmcb) {
         pmcb->species(0,k,j,i) = nh + 2. * nhe;
 
         Real tgas = pmcb->tgas(k,j,i);
-        if (t->table_ne) {
+        if (tab->table_ne) {
           // the free electrons per atom of the table
-          pmcb->species(0,k,j,i) = t->ElectronDensity(tgas, rho);
+          pmcb->species(0,k,j,i) = tab->ElectronDensity(tgas, rho);
           continue;
         }
         Real ld = log10(rho);
         Real lt = log10(tgas);
-        Real xi = (ld - t->lmind) / t->dld;
+        Real xi = (ld - tab->lmind) / tab->dld;
         int ii = std::floor(xi);
         if (ii < 0) {
           ii = 0;
-        } else if (ii > t->nrho-2) {
-          ii = t->nrho-2;
+        } else if (ii > tab->nrho-2) {
+          ii = tab->nrho-2;
         }
         xi -= static_cast<Real>(ii);
-        Real xj = (lt - t->lmint) / t->dlt;
+        Real xj = (lt - tab->lmint) / tab->dlt;
         int jj = std::floor(xj);
         if (jj < 0)
           jj = 0;
-        if (jj > t->ntem-2)
-          jj = t->ntem-2;
-        while ((jj<t->ntem-2) && (t->tgrid(jj+1) < tgas)){
+        if (jj > tab->ntem-2)
+          jj = tab->ntem-2;
+        while ((jj<tab->ntem-2) && (tab->tgrid(jj+1) < tgas)){
           jj++;
         }
-        while ((jj>0) && (t->tgrid(jj) > tgas)){
+        while ((jj>0) && (tab->tgrid(jj) > tgas)){
           jj--;
         }
         if(jj < 0) {
           pmcb->species(0,k,j,i) = 0.; //below T grid, assume neutral
           continue;
         }
-        xj = (tgas-t->tgrid(jj))/(t->tgrid(jj+1)-t->tgrid(jj));
-        Real ross = (1.-xi)*( (1.-xj)*t->gray_ross(jj,ii)
-                +xj*t->gray_ross(jj+1,ii) ) + xi*( (1.-xj)*t->gray_ross(jj,ii+1)
-                +xj*t->gray_ross(jj+1,ii+1) );
+        xj = (tgas-tab->tgrid(jj))/(tab->tgrid(jj+1)-tab->tgrid(jj));
+        Real ross = (1.-xi)*( (1.-xj)*tab->gray_ross(jj,ii)
+                +xj*tab->gray_ross(jj+1,ii) ) + xi*( (1.-xj)*tab->gray_ross(jj,ii+1)
+                +xj*tab->gray_ross(jj+1,ii+1) );
         if ((tgas < 1.e5) && (ross < 0.34)) {
           pmcb->species(0,k,j,i) = 0.; // assume neutral
         }

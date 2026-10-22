@@ -19,8 +19,15 @@ SNAPSHOT_GR = 'ks_torus.athdf'  # from make_ks_snapshot.py
 TABLE = 'out_opacity_table_nfreq32.txt'
 
 
+# the keys the code reads from <opacitytable>; every other key of extra goes to <montecarlo>
+TABLE_KEYS = ('opacity_file', 'table_groups', 'table_above', 'table_emax', 'table_offgrid',
+              'table_gray', 'table_fill_freefree', 'table_storage', 'nfree_file', 'table_ne',
+              'two_band', 'two_band_w', 'two_band_floor', 'two_band_closure',
+              'two_band_thick', 'two_band_decorrelate')
+
+
 def mc_block(nphot, iseed, scattering, emission, absorption, extra):
-    """the <montecarlo> block; extra is a dict of further keys"""
+    """the <montecarlo> block and, when extra holds table keys, the <opacitytable> block"""
     lines = ['<montecarlo>',
              'nphot      = {:d}'.format(nphot),
              'iseed      = {:d}'.format(iseed),
@@ -29,8 +36,11 @@ def mc_block(nphot, iseed, scattering, emission, absorption, extra):
              'absorption = ' + absorption,
              'polarized  = false',
              'abs_method = weight']
+    table = []
     for k, v in extra.items():
-        lines.append('{} = {}'.format(k, v))
+        (table if k in TABLE_KEYS else lines).append('{} = {}'.format(k, v))
+    if table:
+        lines += ['', '<opacitytable>'] + table
     return '\n'.join(lines) + '\n'
 
 
@@ -40,7 +50,7 @@ def write_readhdf_athinput(path, snapshot, table, nphot, iseed, scattering='thom
     """
     mc_readhdf on the snapshot: the small isothermal atmosphere (64x64x128 cells, eight
     blocks).  table_key = 'problem' writes the table under <problem>/opacity_filename, the
-    key the pre-module generator read; 'montecarlo' writes <montecarlo>/opacity_file.
+    key the pre-module generator read; 'montecarlo' writes <opacitytable>/opacity_file.
     """
     extra = dict(extra or {})
     if table_key == 'montecarlo':

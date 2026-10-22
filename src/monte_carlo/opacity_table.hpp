@@ -9,7 +9,7 @@
 //! \brief tabulated multigroup opacities (emission = table, absorption = table)
 //
 // One OpacityTable per rank, owned by MonteCarlo: the (group, temperature, density)
-// tables of the file named by <montecarlo>/opacity_file, read once.  Each
+// tables of the file named by <opacitytable>/opacity_file, read once.  Each
 // MonteCarloBlock caches where its cells sit on the (T, rho) grid and, in cell storage
 // mode, the extinction per group and the cumulative emission spectrum of every cell; in
 // global storage mode those are recomputed from this table at every call through the
@@ -23,7 +23,7 @@
 //   Planck group means, nfre blocks, absorption only; all in cm^2/g
 //   optionally the Rosseland absorption, nfre blocks: the Rosseland group means without
 //   the scattering of the table's own model (tops_regrid.py --rossabs)
-// The free electrons per atom, <montecarlo>/nfree_file (tops_regrid.py's _nfree.txt):
+// The free electrons per atom, <opacitytable>/nfree_file (tops_regrid.py's _nfree.txt):
 //   comment lines (one of them "# Abar = <A>  Z_full = <Z>"), nT, nrho, T [keV], rho,
 //   nT rows of nrho values of N_free; the grids must be the main table's.  With
 //   table_ne the electron density of every cell is rho N_free / (Abar m_u).
@@ -31,14 +31,14 @@
 // uniform or not (a cell's bracket comes from the uniform-spacing formula corrected by a
 // walk, which costs nothing on a uniform axis).
 //
-// Two-band split (<montecarlo>/two_band, mean reading with table_ne): each table group is
+// Two-band split (<opacitytable>/two_band, mean reading with table_ne): each table group is
 // split into a high band, frequency fraction w with absorption kappa_h, and a low band,
-// fraction 1-w with kappa_l, with the cell's scattering s in both, such that
-//   w kappa_h + (1-w) kappa_l = kappa_P   and   [w/(kappa_h+s) + (1-w)/(kappa_l+s)]^-1 = kappa_R,
+// fraction 1-w with kappa_l, with the cell's scattering kappa_s in both, such that
+//   w kappa_h + (1-w) kappa_l = kappa_P,  [w/(kappa_h+kappa_s) + (1-w)/(kappa_l+kappa_s)]^-1 = kappa_R,
 // so that emission uses the Planck mean and diffusion the Rosseland one with Kirchhoff's
 // law holding in each band.  The closure is w = two_band_w, falling back to kappa_l = 0
 // where that would need kappa_l < 0 (two_band_closure = gap0 takes kappa_l = 0 always),
-// and the Rosseland absorption is floored at two_band_floor times s; a group whose
+// and the Rosseland absorption is floored at two_band_floor times kappa_s; a group whose
 // Rosseland absorption reaches its Planck mean stays one band.  A photon carries a band
 // rank u (Photon::ubp): u < w(cell) puts it in the high band of its group, the same
 // frequencies in every cell; u is redrawn after every electron scattering and whenever
@@ -46,9 +46,11 @@
 // rho kappa_h W > two_band_thick (0 = never), it is in equilibrium with the gas and is
 // not transported: its emission is dropped and the low band receives instead what the
 // high band would have passed to it by scattering, w kappa_h p_s (1-w)/(1 - w p_s) with
-// p_s = s/(kappa_h + s), and a photon in the high band there is absorbed on the spot.
+// p_s = kappa_s/(kappa_h + kappa_s), and a photon in the high band there is absorbed on the spot.
+// two_band_decorrelate redraws the rank at a cell crossing with that probability, to
+// measure what the correlated-k assumption carries: 0 and 1 bracket the truth.
 //
-// Group reading (<montecarlo>/table_groups):
+// Group reading (<opacitytable>/table_groups):
 //   mean  the k-th Planck value is the opacity throughout group k, [E_k, E_k+1), the top
 //         edge continuing the geometric spacing.  Emission in a group is kappa_k times
 //         the photon Planck integral over the group, and the energy within a group is
@@ -125,19 +127,23 @@ class OpacityTable {
   AthenaArray<Real> nfree;
   Real abar;
   bool have_nfree;       // an nfree_file was read
-  bool table_ne;         // <montecarlo>/table_ne: electron density from N_free
+  bool table_ne;         // <opacitytable>/table_ne: electron density from N_free
   Real nfree_min_, nfree_max_;  // range of the file, for the report
   // the two-band split
   bool two_band;
   Real tb_w0, tb_floor, tb_thick;
   TableClosure tb_closure;
+  //! probability of redrawing the band rank at a cell crossing (two_band_decorrelate):
+  //! 0 keeps a band the same frequencies in every cell (correlated k), 1 makes every
+  //! cell's lines unrelated to its neighbours', which returns the Planck-only transport
+  Real tb_decorrelate;
 
   // options
   TableGroupReading groups;
   TableOffGrid offgrid;
   TableAbove above;
   Real emax;             // [erg] emission extends to here with table_above = freefree
-  bool cell_storage;     // <montecarlo>/table_storage = cell (true) or global
+  bool cell_storage;     // <opacitytable>/table_storage = cell (true) or global
   bool gray_to_freefree; // rows the same in every group are replaced by free-free
   bool fill_freefree;    // the whole table is replaced by free-free (a test knob)
   Real heabund;          // of the free-free fallback
@@ -162,12 +168,12 @@ class OpacityTable {
   Real RosselandNode(int l, const TableCell &cell) const;
   Real RossAbsNode(int l, const TableCell &cell) const;
   //! the two-band split of one group from its Planck mean kP, Rosseland absorption kRa
-  //! and the scattering s to be used with it, all per gram
-  void Split(Real kP, Real kRa, Real s, Real &w, Real &kh, Real &kl) const;
+  //! and the scattering kappa_s to be used with it, all per gram
+  void Split(Real kP, Real kRa, Real kappa_s, Real &w, Real &kh, Real &kl) const;
   //! the bands of extinction l of a cell [1/cm]: the Planck value chi, the high and low
-  //! band values and the high-band fraction (1 where the group is one band); sg is the
+  //! band values and the high-band fraction (1 where the group is one band); kappa_s is the
   //! cell's scattering per gram for the group
-  void Bands(int l, const TableCell &cell, Real temp, Real rho, Real sg, Real &chi,
+  void Bands(int l, const TableCell &cell, Real temp, Real rho, Real kappa_s, Real &chi,
              Real &chi_h, Real &chi_l, Real &w) const;
   //! free-free extinction [1/cm] of fully ionized H + He at one energy
   Real FreeFree(Real temp, Real rho, Real energy) const;

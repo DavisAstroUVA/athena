@@ -5,6 +5,7 @@ Band luminosities of a run's escaping photons, output by output, and the compari
 two runs by the scatter between their outputs.
 
     python band_luminosity.py RUNDIR [RUNDIR2] [--bands 0.1 0.3 1 3 10] [--base xrb.out1]
+                              [--screen NAME]
 
 Each output of a run is the set of list files <base>.proc*.<nnnnn>.list; the luminosity
 in a band is sum(w E)/dt over the escapers in it, summed over ranks.  With one run it
@@ -13,6 +14,15 @@ scatter between outputs.  With two it also prints the ratio run1/run2 per band w
 error from both scatters, which is the standard the biased-sampling guide used: two runs
 of the same problem agree when their bands agree within their own output-to-output
 scatter.
+
+Leaving photons out with a screen function, as make_spectrum.py does: screen.py in the
+working directory (or on PYTHONPATH) defines functions that take a Photons chunk and
+return True for the photons to drop; see tst/montecarlo/disk_atmosphere/screen.py for
+an example.  On a mesh whose inner radial boundary is an escape boundary, a screen on
+the exit radius separates the light that reaches the observer from the light that
+falls in:
+
+    python band_luminosity.py twoband_1e9 oneband_1e9 --base mctde.out1 --screen inner
 """
 
 import argparse
@@ -25,6 +35,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import athena_mc  # noqa: E402
+import mc_cli  # noqa: E402
 
 KEV = 1.602176634e-9  # erg
 
@@ -40,8 +51,9 @@ def outputs(rundir, base):
     return out
 
 
-def band_luminosities(files, edges_kev):
-    """luminosity in each band and in total, erg/s, summed over the files of one output"""
+def band_luminosities(files, edges_kev, screen_function=None):
+    """luminosity in each band and in total, erg/s, summed over the files of one output;
+    screen_function(phots) marks the photons to leave out"""
     edges = np.asarray(edges_kev)*KEV
     lum = np.zeros(len(edges)-1)
     total = 0.
@@ -54,10 +66,13 @@ def band_luminosities(files, edges_kev):
             if c['chunk'] is None:
                 continue
             p = athena_mc.Photons(dict(header, list=c['chunk'], length=c['length']))
-            we = p.weight*p.energy
+            keep = (np.ones(p.nphot, dtype=bool) if screen_function is None
+                    else ~np.asarray(screen_function(p), dtype=bool))
+            we = (p.weight*p.energy)[keep]
+            energy = p.energy[keep]
             total += we.sum()/dt
             nphot += len(we)
-            idx = np.searchsorted(edges, p.energy) - 1
+            idx = np.searchsorted(edges, energy) - 1
             ok = (idx >= 0) & (idx < len(lum))
             np.add.at(lum, idx[ok], we[ok]/dt)
             if c['done']:
@@ -65,13 +80,13 @@ def band_luminosities(files, edges_kev):
     return total, lum, nphot
 
 
-def run_table(rundir, base, edges):
+def run_table(rundir, base, edges, screen_function=None):
     outs = outputs(rundir, base)
     if not outs:
         sys.exit(f"no {base}.proc*.*.list in {rundir}")
     rows = []
     for n in sorted(outs):
-        total, lum, nphot = band_luminosities(outs[n], edges)
+        total, lum, nphot = band_luminosities(outs[n], edges, screen_function)
         rows.append((n, nphot, total, lum))
     return rows
 
@@ -109,14 +124,21 @@ def parse_args(argv=None):
     ap.add_argument('--bands', type=float, nargs='+', default=[0.1, 0.3, 1., 3., 10.],
                     help='band edges in keV')
     ap.add_argument('--base', default='xrb.out1', help='list file base name')
+    ap.add_argument('--screen',
+                    help='name of a function in a user-supplied screen.py that takes '
+                         'a Photons chunk and returns True for photons to leave out')
     return ap.parse_args(argv)
 
 
-def main(args):
+def main(args, screen_function=None):
+    """the tables from the options of parse_args(); a caller such as a notebook can pass
+    its own screen function instead of naming one in screen.py"""
+    if screen_function is None:
+        screen_function = mc_cli.load_screen(args.screen, 'band_luminosity.py')
     edges = args.bands
     results = []
     for r in args.runs[:2]:
-        rows = run_table(r, args.base, edges)
+        rows = run_table(r, args.base, edges, screen_function)
         results.append(print_run(r, rows, edges))
     if len(results) == 2:
         (mt1, et1, mb1, eb1), (mt2, et2, mb2, eb2) = results

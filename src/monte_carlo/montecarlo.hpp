@@ -674,6 +674,7 @@ public:
   AthenaArray<Real> tab_abs_hi, tab_abs_lo, tab_w;
   AthenaArray<int> tab_thick;
   bool table_two_band;  // optab->two_band, read per interaction
+  Real table_decorrelate;  // optab->tb_decorrelate, read per cell crossing
   //! global storage scratch: 5 nabs values then ngroups+1 cumulative values
   std::vector<Real> tab_scratch_;
   //! samples absorbed in their first step, before any scattering: with two_band the

@@ -1,6 +1,6 @@
 # Table opacities as a module option: plan
 
-**Status (2026-10-19): Phases 1 to 4 built; Phases 5 and 6 not started.** Work goes
+**Status (2026-10-21): Phases 1 to 5 done; Phase 6 (documentation) not started.** Phase 5's runs R0 to R11 and the repack test are recorded under Phase 5 below; the findings that change practice are `abs_method = prob` on the TDE (27 times cheaper at the same bands), the regridded table's extrapolation below the TOPS density edge (an absorbing outflow where the old table's gray rows gave a transparent one), and the edge reading's half-group shift of every strong group (17 times the mean reading's emission at 1 to 10 eV on the TDE). Work goes
 on the `opacity_table` branch in the `athena-opacity` worktree. Each phase ends with its
 tests passing and the status block here updated.
 
@@ -236,11 +236,14 @@ Findings that the port has to settle, not just move:
   species(1) as now. The user hook still overrides (the readers keep their horizon and
   cut handling by zeroing rho in the hook as today, or by the mask).
 
-### 3.2 Input keys (`<montecarlo>`)
+### 3.2 Input keys
 
-| key | default | meaning |
+`emission = table` and `absorption = table` stay in `<montecarlo>` beside the other
+emission and absorption choices; every key below is read from its own block,
+`<opacitytable>`.
+
+| key (`<opacitytable>`) | default | meaning |
 |---|---|---|
-| `emission = table`, `absorption = table` | | the shared path |
 | `opacity_file` | required | main table (old or regridded layout) |
 | `nfree_file` | none | free electrons per atom; required by `table_ne` and `two_band` |
 | `table_storage` | `cell` | `cell`: per-cell arrays built once per transport; `global`: one table per rank, interpolated at every call (3.6) |
@@ -293,7 +296,7 @@ exceeds `two_band_thick`, the high band is in LTE with the gas and is not transp
 
 - its emission w kappa_h rho B_g is dropped from the emission array, and in its place the
   low band receives the energy the high band would have passed to it by scattering,
-  (1 - w) p_s / (1 - w p_s) times that, with p_s = s / (kappa_h + s), which is
+  (1 - w) p_s / (1 - w p_s) times that, with p_s = kappa_s / (kappa_h + kappa_s), which is
   w (1 - w) s rho B_g to leading order;
 - a photon that enters such a cell in the high band, or is scattered into it there, is
   absorbed on the spot (its energy deposited; the compensating emission is already in
@@ -302,8 +305,8 @@ exceeds `two_band_thick`, the high band is in LTE with the gas and is not transp
 
 Detailed balance holds because the high band field is B_g: the rate low to high,
 w (1 - w) s rho J_g,low, equals the rate high to low when J_low = B. What is lost is
-the high band's share of the diffusive flux, w / (kappa_h + s) against
-(1 - w) / (kappa_l + s), negligible by construction wherever the split is two-band.
+the high band's share of the diffusive flux, w / (kappa_h + kappa_s) against
+(1 - w) / (kappa_l + kappa_s), negligible by construction wherever the split is two-band.
 
 ### 3.6 Storage modes
 
@@ -318,7 +321,7 @@ so that the log-log interpolation is four reads, four multiplies and one exp per
 
 - absorption: the photon's group from its energy (O(1)), then `Planck(g, loc)`; under
   `edge` the two node values and the log-linear step in energy, the same arithmetic as
-  `cell` mode does at build time; under two-band `Planck`, `Rosseland` and the cell's s,
+  `cell` mode does at build time; under two-band `Planck`, `Rosseland` and the cell's kappa_s,
   then the closed-form split (a square root), per call;
 - emission: the group probabilities are computed per emitted photon, nfre interpolations
   and nfre group Planck integrals from the shared cumulative Planck table, then the
@@ -415,11 +418,199 @@ full ionization; the free-free fallback and emission in off-grid cells use the s
   (identical away from the floor, cleaner near it), and the plan records whether the
   change is worth keeping.
 
-**Phase 5. XRB.** On andes: `mc_readhdf_gr` with the old table through the new path
-against the last table run's bands and against `d01_emis2`; then the regridded table,
-`table_ne` and two-band as science runs; load balancing with tables now allowed, checked
-first with `lb_test_repack` on the small snapshot. Both storage modes on the hires mesh:
-`VmHWM` per rank and the transport time, which is the comparison 3.6 is for.
+**Phase 5. The TDE snapshot.** The XRB's gas, at 1e7 to 1e8 K, never leaves the
+free-free regime, where every group is one band and the table reduces to free-free; it
+tests the port, not the method. The TDE snapshot
+`/PellaShared/swd8g/mc_tde_pol/pol_991_4e9a/tde.out1.00991.athdf` (the same file, by
+checksum, as in `pol_991_4e9b`, `tde_nr/pol_991_new` and `run_1e9`; 2.0 million cells
+in 7799 AMR blocks of 8 x 4 x 8 over six levels, spherical polar, r from 2.7 to 400,
+read through `grid_from_file` by `mc_readhdf`) has a quarter of its cells below 3e5 K
+at densities above 1e-13, the line-dominated regime where the TOPS Rosseland to Planck
+ratio falls below 0.05, and an outflow at a median 0.09c (90th percentile 0.22c) that
+shears the lines, so the correlated-k assumption is in question there. The deck of
+`pol_991_4e9a` (Compton, linear polarization, boosts, `rho_cgs = 1e-8`,
+`tgas_cgs = 1.633e6`, `vel_cgs = 1.499e7`, `l_cgs = 8.861e11`, emission window 0.01 to
+30 kT) is the starting point; it ran `emission = user` on the old table and becomes
+`emission = table`, `absorption = table`, `opacity_file`, with `table_groups = edge` and
+`table_gray = freefree` for the regression. The runs, on pella at two million cells,
+same seed and photon count:
+
+1. the old table through the new path (edge) against the run in `pol_991_4e9a`, then the
+   regridded TOPS table with the mean reading, then with `table_ne`: the escaping
+   spectrum from 1 eV to 10 keV in groups, band luminosities with the output-to-output
+   scatter, scatterings and cost per photon;
+2. two-band with the thermalized high band on a table written with `--rossabs`, and the
+   two brackets of `two_band_decorrelate` (0 and 1); if they differ by more than the
+   scatter, the outflow needs an expansion opacity that the tables cannot give, and the
+   plan says so; the closure at `two_band_w` of 0.1, 0.01 and 0.001 on the thermalized
+   configuration; `two_band_thick` at 3, 10 and 30;
+3. both storage modes, `VmHWM` per rank and transport time; on two million cells the
+   split's cell storage is 2.6 GB on top of the rest, which is where global storage
+   earns its place;
+4. load balancing with tables, `lb_test_repack` first on the small snapshot.
+
+Sampling on this snapshot (found 2026-10-21): `weights = equal` draws cells in
+proportion to their emission, which puts nearly every sample in the dense disk, where
+none escapes (520 escapers in 1e7 samples), so the runs use `weights = emission` as the
+reference did; its escapers carry heavy weights, and at 1e7 samples the bands scatter by
+4 to 50% between outputs (the total by 7%), the 0.1 to 1 keV bands least. `mc_readhdf`
+has no escape table for the biased scheme, which would be the right tool here. Runs take
+52 minutes at 48 ranks on pella (12,900 samples per second, 500 scatterings per sample,
+0.5 GB per rank). The reference run of `pol_991_4e9a` (1e9 samples, September code) is
+not a regression of the port: its escaping fraction (3.1%) and scatterings per sample
+(430) differ from the current code's (4.3%, 496) beyond noise, so the regression is
+against a binary built from `main` before the table work (run R0). R0 against R1 (the
+port, edge reading, same deck and seed, 48 ranks): escapers 426,382 against 426,677,
+scatterings per sample 495.1 against 496.2, every band within the output scatter (the
+0.3 to 1 keV band at 0.75 +- 0.12 the farthest); the lists are not byte-identical on 48
+ranks, since the asynchronous exchange orders the random draws by arrival, which the
+single-rank tests on the small snapshots do not see.
+
+R2 (the old table under the mean reading, otherwise R1's deck): escapers 445,250
+against 426,900, scatterings per sample 935 against 496, cost per sample 1.9 times R1's,
+escaping luminosity 0.66 +- 0.06 of R1's, and by band (R2 over R1) 0.15 +- 0.06 at
+1 to 10 eV, 0.79, 0.79, 0.66, 0.77 from 10 eV to 1 keV, 0.49 +- 0.19 at 1 to 3 keV, and
+1.7 +- 1.2 at 3 to 10 keV, where the edge reading never emits above 7.5 keV.  Most of
+this is in the emission, before any transport:
+`problem_specific/opacity_table/snapshot_emission.py` sums each cell's emitted
+luminosity per group under both readings, and on this snapshot the edge reading emits
+0.90 of the mean reading's total but 17.5 times its 1 to 10 eV decade, 1.5 times its
+1 to 10 keV decade, and within a decade it moves the emission of every strong group
+half a group down: group 7 (7.5 to 10 eV) emits 27 times more under edge, group 8
+(10 to 13 eV) half as much, groups 21 to 23 (0.42 to 1 keV) seven to nine times more
+and group 24 (1 to 1.3 keV) two thirds as much.  That is the trapezoid between nodes
+spreading a strong group's value over the interval below it, the misreading Section 2
+describes, and the doubled scatterings follow from the same smearing of the
+absorption: a photon in a weak group next to a strong one sees under edge an opacity
+raised by the neighbour, and under mean the group's own.  The edge reading is kept for
+continuity only; the differences in the published TDE spectra below 10 eV and around
+the 1 keV edge are of this size.
+
+R3 (the regridded TOPS table, `tops_rossabs.txt`, mean reading): escaping luminosity
+0.95 +- 0.09 of R2's and the bands within their scatter except 3 to 10 keV
+(0.16 +- 0.08, R2's figure being four noisy outputs), scatterings per sample 917
+against 935, cost per sample 0.95 of R2's, 382 MB per rank against 510, but escapers
+70,100 against 445,250.  The lost escapers carry no luminosity: by emission
+temperature, the 2e4 to 2e5 K bins fall from 381,000 to 36,500 samples at the same
+summed weight (7.5e59 against 7.7e59).  They are the samples born in the low-density
+outflow, where the old table is gray (3,025 of its 6,900 rows, every density below
+the TOPS edge, 1e-16 g/cm^3 at 8e4 K and 4e-13 at 1e6 K, the cells TOPS fills with its
+grey mean) and `table_gray = freefree` makes free-free, which is transparent there
+(1e-10 cm^2/g at 8e4 K and 1e-16 g/cm^3), while the regridded table extrapolates the
+TOPS absorption below the edge as a power law in density and gives the same cells
+whole-table opacities (1.9 cm^2/g in the 0.1 keV group at that point).  So the two
+tables differ not in their reading but in what they say about the outflow, and the
+difference is a modelling choice the opacity_table README already flags: below the
+edge the extrapolation is uncertain by 0.1 to 0.5 dex per dex of extrapolation below
+1e7 K, and the test covers only the first two decades.  The published TDE runs had the
+outflow transparent to absorption; the regridded table makes it absorbing, which costs
+the counts at 2e4 to 2e5 K (the low-energy bands' effective sample size) and moves the
+2e5 to 5e5 K escapers' weight from 4.6e58 to 1.3e58.  Which is closer to the truth
+is a question for the ionization balance at 1e-16 g/cm^3, not for this code; the
+tool `snapshot_emission.py` and a photon-list histogram by emission temperature are
+the way to see where a table change acts.
+
+R4 (R3 with `table_ne = true` and `tops_rossabs_nfree.txt`): escapers 70,560 against
+70,140, scatterings per sample 901 against 917, luminosity 1.03 +- 0.14 of R3's, the
+bands within their scatter except 10 to 30 eV at 0.72 +- 0.07; the electron density
+from the table replaces the readers' step (none below 1e5 K and a grey Rosseland mean
+of 0.34, full ionization elsewhere) and matters little on this snapshot.  Cost and
+memory as R3.
+
+R4b (R4 with `abs_method = prob`, the baseline of the two-band runs): luminosity
+1.09 +- 0.22 of R4's and the bands within their scatter (3 to 10 keV is a few heavy
+samples in both runs), but 27 scatterings per sample against 901 and 3.8 minutes
+against 101: under weight absorption with the default `minweight` a sample born in the
+disk is followed through hundreds of scatterings after its weight has gone, and that
+is 97% of the cost of R1 to R4.  Escapers 37,100, the rest of R4's 70,500 being
+samples whose surviving weight was too small to matter.  For this snapshot
+`abs_method = prob` is the production choice, with the two-band runs or without them.
+
+R5 (R4b with `two_band = true`, `two_band_thick = 10`, w = 0.01, no decorrelation):
+luminosity 1.04 +- 0.19 of R4b's, and the spectrum moved well beyond the scatter
+(R5 over R4b): 0.52 +- 0.15 at 1 to 10 eV, 1.29 +- 0.11 at 10 to 30 eV,
+2.15 +- 0.12 at 30 to 100 eV, 0.79 +- 0.05 at 0.1 to 0.3 keV, the 0.3 to 1 keV band
+unchanged, the harder bands within their large scatter.  The gain at 30 to 100 eV is
+where the TOPS Rosseland to Planck ratio is lowest on this snapshot: the low band
+carries the between-line continuum out through layers the Planck mean holds opaque.
+Escapers 612,000 against 37,100 and the 10 eV to 0.3 keV bands' scatter 1 to 3%
+against 5 to 9%, since the low band gives the outflow's samples a way out; 115
+scatterings per sample, 9.2% of the absorbed samples dying in their first step (the
+thermalized band keeps the rest out of the in-place death of Section 5), 14 minutes
+against 3.8, 613 MB per rank against 333 (the split's five per-cell arrays, the case
+for global storage).
+
+R6 (R5 with `two_band_decorrelate = 1`, the band rank redrawn at every cell crossing,
+the other bracket of the correlated-k assumption): R6 over R5 is 0.79 +- 0.02 at 10 to
+30 eV, 0.73 +- 0.02 at 30 to 100 eV, 0.92 +- 0.04 at 0.1 to 0.3 keV, the total
+0.85 +- 0.07, escapers 433,000 against 612,000.  So on this snapshot the two-band
+result at 30 to 100 eV lies between 1.56 and 2.15 times the one-band one depending on
+how far the lines of one cell line up with the next, which the tables cannot say and
+which the outflow's shear (0.09c median) decides; the bracket is a quarter of the
+effect, and the whole of it stands either way.  R7 (w = 0.1): 0.92 +- 0.02 at 10 to
+30 eV and 0.83 +- 0.03 at 30 to 100 eV of R5, 6.3% first-step deaths; R8 (w = 0.001):
+1.02 +- 0.02, 1.02 +- 0.03 and 1.06 +- 0.05 at 10 eV to 0.3 keV, 1.30 +- 0.17 at 1 to
+10 eV, 9.8% first-step deaths.  The closure converges as w falls, 0.01 and 0.001
+agreeing to the scatter and 0.1 a tenth lower, so the default stays 0.01.  All three
+ran in 12 to 14 minutes at 570 to 650 MB per rank.
+
+R9 and R10 (`two_band_thick` 3 and 30 against R5's 10): every band within its scatter
+(0.97 to 1.05 at 10 eV to 0.3 keV), the same escaper and first-step death counts to
+within noise, output 0's death count identical to the sample.  The snapshot cannot test
+the threshold: by emission (photon rate, volume weighted) 99.9% of the two-band
+emission is in cell-groups with chi_h W above 100, 2.6e-5 of it between 3 and 30, and
+the share born into a non-thick high band is 3.5e-7, 2.4e-6 and 1.4e-5 at thresholds
+3, 10 and 30, although 60% of the cells hold some group in that window (the
+scratch script `thick_diag.py` of the Phase 5 work; the cells are the outflow, and
+the groups in the window are far above their kT).  The 9.2% first-step deaths are low-band
+deaths in the dense disk, where chi_l W is itself far above one, the price of drawing
+cells uniformly under `weights = emission`; w moves them (6.3% at w = 0.1, 9.8% at
+0.001) because it moves kappa_l, and the threshold does not.  A test of the threshold
+needs a mesh whose photosphere is resolved into cells of depth near one, which the
+picket-fence slab of `rosseland_slab.py` is, not this snapshot.
+
+R11 (R5 with `table_storage = global`): bands within scatter, 12.8 minutes against
+13.8, 542 MB per rank against 613.  The split's five per-cell arrays are 2.6 GB over
+the mesh, 55 MB per rank on 48, and the rest of the footprint is the mesh, the
+photons and the exchange buffers; global storage earns its place on a run with far
+more cells per rank than this one.
+
+Load balancing with tables (`tst/montecarlo/opacity_table/repack_equivalence.py`, the
+small snapshot, 1e5 samples, Compton on the regridded solar-abundance table with its
+nfree file): with `lb_test_repack = local` and `mesh` the plain mean reading, the
+two-band split with the thermalized band in cell storage, and the same in global
+storage all give photon lists and moment files byte-identical to the plain run on one
+rank, so the table arrays are rebuilt exactly from the fluid a repacked block
+receives.  On four ranks two plain runs already differ in two of the four lists (the
+exchange orders the draws by arrival), so the test is bitwise on one rank and prints
+the escaper counts on more.
+
+Production runs (2026-10-21/22, `/PellaShared/swd8g/mc_tde_pol/{twoband,oneband,twoband_decor}_991_1e9`,
+1e9 samples in ten outputs each, R5's deck; two-band 4.9 hours, one-band 1.8, decorrelated 6.1).
+The quoted per-bin errors of the two-band run agree with the ten-output scatter (ratio
+0.9 median, 0.4 to 1.4 bin by bin), so they are honest.  Every escaper leaves through the
+inner (r = 2.7) or the outer (r = 400) radial boundary, and the inner ones, which fall
+into the hole, are 49% of the two-band run's escaping luminosity and 64% of the
+one-band run's: all of it above 0.3 keV and 78 to 94% of 0.1 to 0.3 keV, so the
+observable spectrum ends near 0.3 keV and the heavy-tailed hard band is not an
+observable.  `band_luminosity.py --screen` and `make_spectrum.py --screen` with a
+screen on the exit radius (`x1 < 10`) remove them.  Screened, the two-band run over
+the one-band run is 1.69 +- 0.03 in total (6.3e44 against 3.7e44 erg/s), 0.57 at 1 to
+10 eV, 1.25 at 10 to 30 eV, 2.75 +- 0.03 at 30 to 100 eV and 4.4 +- 0.5 at 0.1 to
+0.3 keV: the Planck mean's extra absorption acts on the light that reaches the outer
+boundary.  Decorrelating at every crossing takes a fixed quarter off at every energy
+from 10 to 300 eV (0.78 of the correlated run in total, 0.78, 0.76, 0.79 by band),
+which is (1 - w)^N with N about 30 thick crossings; against the one-band run the
+decorrelated run is still 2.09 +- 0.03 at 30 to 100 eV and 3.5 +- 0.4 at 0.1 to
+0.3 keV but 0.97 at 10 to 30 eV, so the gain at 30 to 300 eV is within-cell escape and
+survives the cell-to-cell question, and the 10 to 30 eV light, which crosses many
+cells, does not.  The within-cell expansion opacity under the outflow's shear is
+modelled by neither run and remains the open physics.  Peak memory per rank: 620 MB
+two-band, 920 one-band, 2.8 GB decorrelated, which does not follow the escaper count
+and is unexplained.
+
+The hires XRB stays as the regression of the port only (edge reading against
+`d01_emis2`), on andes when convenient.
 
 **Phase 6. Documentation.** CLAUDE.md (module paragraph, test list), this file's
 status, and a short `opacity_table_guide.md` with the keys, the file layouts, and the
@@ -435,7 +626,7 @@ group-change rule is right. The points below are what it leaves out or gets at r
 - **C1. The high band is unsampleable in the regime the method is for.** In the handoff's
   example cell kappa_h = 1.4e6 and s = 0.33 cm^2/g, and nearly all the group's emission,
   w kappa_h / kappa_P, is in the high band. Each such photon is absorbed within
-  1/(rho kappa_h) and scatters first with probability p_s = s / (kappa_h + s) = 2e-7;
+  1/(rho kappa_h) and scatters first with probability p_s = kappa_s / (kappa_h + kappa_s) = 2e-7;
   only that fraction of its weight ever reaches the low band, which is the only band
   that moves energy. With `abs_method = weight` the weight decays by the same factor
   per flight and is then rouletted. So the energy that actually leaves the cell is
@@ -456,14 +647,14 @@ group-change rule is right. The points below are what it leaves out or gets at r
   test moves a lot between 0 and 1, the group grid is too coarse for the method and a
   finer TOPS grid binned into bands per coarse group (handoff Section 5) is the remedy.
 - **C3. The split must use the code's scattering, so it needs N_free.** The handoff says
-  to use the code's own s (Section 4), and the code's s is sigma n_e / rho with n_e from
+  to use the code's own kappa_s (Section 4), and the code's kappa_s is sigma n_e / rho with n_e from
   species(0). With the default full ionization, s is wrong by orders of magnitude below
   1e4 K, exactly where the split matters, and the split with it. So `two_band` requires
-  `table_ne` or at least an `nfree_file` for s. The `_twoband` file's own kappa_es
+  `table_ne` or at least an `nfree_file` for kappa_s. The `_twoband` file's own kappa_es
   column is then not used by the code at all; the code reads the main table and the
   `_nfree` file and splits at run time.
 - **C4. Store the Rosseland absorption, not the total.** The split works on
-  kappa_R - s, a difference of two numbers near 0.34 written to five digits; the handoff
+  kappa_R - kappa_s, a difference of two numbers near 0.34 written to five digits; the handoff
   notes the ill-conditioning and floors it. Writing kappa_R,abs = kappa_R - kappa_es (as
   TOPS defines kappa_es) in the regrid output, in a third per-group block or in place
   of the total, removes the subtraction and the dependence on TOPS's scattering fit

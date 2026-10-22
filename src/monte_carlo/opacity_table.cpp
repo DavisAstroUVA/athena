@@ -121,30 +121,31 @@ OpacityTable::OpacityTable() :
     above(TABLE_ABOVE_FREEFREE), emax(0.), cell_storage(true), gray_to_freefree(false),
     fill_freefree(false), heabund(0.09), ngray_rows(0), ngroups(0), nabs(0),
     have_rossabs(false), abar(1.), have_nfree(false), table_ne(false), two_band(false),
-    tb_w0(0.01), tb_floor(0.003), tb_thick(0.), tb_closure(TABLE_CLOSURE_W) {}
+    tb_w0(0.01), tb_floor(0.003), tb_thick(0.), tb_closure(TABLE_CLOSURE_W),
+    tb_decorrelate(0.) {}
 
 //----------------------------------------------------------------------------------------
 //! \fn void OpacityTable::Read(ParameterInput *pin)
-//! \brief read <montecarlo>/opacity_file and the options
+//! \brief read <opacitytable>/opacity_file and the options
 
 void OpacityTable::Read(ParameterInput *pin) {
   // <problem>/opacity_filename is accepted as an alias
-  std::string fname = pin->GetOrAddString("montecarlo", "opacity_file", "");
+  std::string fname = pin->GetOrAddString("opacitytable", "opacity_file", "");
   if (fname.empty() && pin->DoesParameterExist("problem", "opacity_filename")) {
     fname = pin->GetString("problem", "opacity_filename");
     if (Globals::my_rank == 0)
       std::cout << "Opacity table: <problem>/opacity_filename is read as "
-                << "<montecarlo>/opacity_file; use the latter" << std::endl;
+                << "<opacitytable>/opacity_file; use the latter" << std::endl;
   }
   if (fname.empty()) {
     std::stringstream msg;
     msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-        << "emission = table or absorption = table needs <montecarlo>/opacity_file"
+        << "emission = table or absorption = table needs <opacitytable>/opacity_file"
         << std::endl;
     ATHENA_ERROR(msg);
   }
   {
-    std::string mode = pin->GetOrAddString("montecarlo", "table_groups", "mean");
+    std::string mode = pin->GetOrAddString("opacitytable", "table_groups", "mean");
     if (mode == "mean") {
       groups = TABLE_GROUPS_MEAN;
     } else if (mode == "edge") {
@@ -152,10 +153,10 @@ void OpacityTable::Read(ParameterInput *pin) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-          << "<montecarlo>/table_groups = " << mode << "; use mean or edge" << std::endl;
+          << "<opacitytable>/table_groups = " << mode << "; use mean or edge" << std::endl;
       ATHENA_ERROR(msg);
     }
-    mode = pin->GetOrAddString("montecarlo", "table_offgrid", "freefree");
+    mode = pin->GetOrAddString("opacitytable", "table_offgrid", "freefree");
     if (mode == "freefree") {
       offgrid = TABLE_OFFGRID_FREEFREE;
     } else if (mode == "clamp") {
@@ -163,12 +164,12 @@ void OpacityTable::Read(ParameterInput *pin) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-          << "<montecarlo>/table_offgrid = " << mode << "; use freefree or clamp"
+          << "<opacitytable>/table_offgrid = " << mode << "; use freefree or clamp"
           << std::endl;
       ATHENA_ERROR(msg);
     }
     // above the top edge: free-free under the mean reading, the top value under edge
-    mode = pin->GetOrAddString("montecarlo", "table_above",
+    mode = pin->GetOrAddString("opacitytable", "table_above",
                             (groups == TABLE_GROUPS_EDGE) ? "clamp" : "freefree");
     if (mode == "clamp") {
       above = TABLE_ABOVE_CLAMP;
@@ -179,11 +180,11 @@ void OpacityTable::Read(ParameterInput *pin) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-          << "<montecarlo>/table_above = " << mode << "; use freefree, clamp or none"
+          << "<opacitytable>/table_above = " << mode << "; use freefree, clamp or none"
           << std::endl;
       ATHENA_ERROR(msg);
     }
-    mode = pin->GetOrAddString("montecarlo", "table_storage", "cell");
+    mode = pin->GetOrAddString("opacitytable", "table_storage", "cell");
     if (mode == "cell") {
       cell_storage = true;
     } else if (mode == "global") {
@@ -191,11 +192,11 @@ void OpacityTable::Read(ParameterInput *pin) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-          << "<montecarlo>/table_storage = " << mode << "; use cell or global"
+          << "<opacitytable>/table_storage = " << mode << "; use cell or global"
           << std::endl;
       ATHENA_ERROR(msg);
     }
-    mode = pin->GetOrAddString("montecarlo", "table_gray", "keep");
+    mode = pin->GetOrAddString("opacitytable", "table_gray", "keep");
     if (mode == "keep") {
       gray_to_freefree = false;
     } else if (mode == "freefree") {
@@ -203,21 +204,30 @@ void OpacityTable::Read(ParameterInput *pin) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-          << "<montecarlo>/table_gray = " << mode << "; use keep or freefree"
+          << "<opacitytable>/table_gray = " << mode << "; use keep or freefree"
           << std::endl;
       ATHENA_ERROR(msg);
     }
   }
-  emax = pin->GetOrAddReal("montecarlo", "table_emax", 0.) * keverg;  // keV in the file
-  fill_freefree = pin->GetOrAddBoolean("montecarlo", "table_fill_freefree", false);
+  emax = pin->GetOrAddReal("opacitytable", "table_emax", 0.) * keverg;  // keV in the file
+  fill_freefree = pin->GetOrAddBoolean("opacitytable", "table_fill_freefree", false);
   heabund = pin->GetOrAddReal("problem", "heabund", 0.09);
-  table_ne = pin->GetOrAddBoolean("montecarlo", "table_ne", false);
-  two_band = pin->GetOrAddBoolean("montecarlo", "two_band", false);
-  tb_w0 = pin->GetOrAddReal("montecarlo", "two_band_w", 0.01);
-  tb_floor = pin->GetOrAddReal("montecarlo", "two_band_floor", 0.003);
-  tb_thick = pin->GetOrAddReal("montecarlo", "two_band_thick", 0.);
+  table_ne = pin->GetOrAddBoolean("opacitytable", "table_ne", false);
+  two_band = pin->GetOrAddBoolean("opacitytable", "two_band", false);
+  tb_w0 = pin->GetOrAddReal("opacitytable", "two_band_w", 0.01);
+  tb_floor = pin->GetOrAddReal("opacitytable", "two_band_floor", 0.003);
+  tb_thick = pin->GetOrAddReal("opacitytable", "two_band_thick", 0.);
+  tb_decorrelate = pin->GetOrAddReal("opacitytable", "two_band_decorrelate", 0.);
+  if (tb_decorrelate < 0. || tb_decorrelate > 1.) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
+        << "<opacitytable>/two_band_decorrelate = " << tb_decorrelate << "; use 0 to 1"
+        << std::endl;
+    ATHENA_ERROR(msg);
+  }
   {
-    const std::string closure = pin->GetOrAddString("montecarlo", "two_band_closure", "w");
+    const std::string closure = pin->GetOrAddString("opacitytable", "two_band_closure",
+                                                    "w");
     if (closure == "w") {
       tb_closure = TABLE_CLOSURE_W;
     } else if (closure == "gap0") {
@@ -225,7 +235,7 @@ void OpacityTable::Read(ParameterInput *pin) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-          << "<montecarlo>/two_band_closure = " << closure << "; use w or gap0"
+          << "<opacitytable>/two_band_closure = " << closure << "; use w or gap0"
           << std::endl;
       ATHENA_ERROR(msg);
     }
@@ -235,15 +245,17 @@ void OpacityTable::Read(ParameterInput *pin) {
     std::stringstream msg;
     msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
         << "two_band needs table_groups = mean, table_ne = true (the split uses the "
-        << "scattering of the cell's electrons), 0 < two_band_w < 1 and two_band_floor > 0"
+        << "scattering of the cell's electrons), 0 < two_band_w < 1 and "
+        << "two_band_floor > 0"
         << std::endl;
     ATHENA_ERROR(msg);
   }
-  const std::string nfree_name = pin->GetOrAddString("montecarlo", "nfree_file", "");
+  std::string nfree_name = pin->GetOrAddString("opacitytable", "nfree_file", "");
+  if (nfree_name == "none") nfree_name = "";  // the spelling a deck can override from
   if (table_ne && nfree_name.empty()) {
     std::stringstream msg;
     msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-        << "table_ne needs <montecarlo>/nfree_file" << std::endl;
+        << "table_ne needs <opacitytable>/nfree_file" << std::endl;
     ATHENA_ERROR(msg);
   }
 
@@ -251,7 +263,7 @@ void OpacityTable::Read(ParameterInput *pin) {
   if (file == NULL) {
     std::stringstream msg;
     msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-        << "cannot open <montecarlo>/opacity_file = " << fname << std::endl;
+        << "cannot open <opacitytable>/opacity_file = " << fname << std::endl;
     ATHENA_ERROR(msg);
   }
   int nread = 0;
@@ -317,7 +329,8 @@ void OpacityTable::Read(ParameterInput *pin) {
       if (nr != nfre*ntem*nrho) {
         std::stringstream msg;
         msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-            << fname << ": a fifth block of " << nr << " values follows the Planck means; "
+            << fname << ": a fifth block of " << nr << " values follows the Planck "
+            << "means; "
             << "a Rosseland absorption block would hold " << nfre*ntem*nrho << std::endl;
         ATHENA_ERROR(msg);
       }
@@ -427,7 +440,8 @@ void OpacityTable::Read(ParameterInput *pin) {
       std::cout << "  two-band split: w = " << tb_w0
                 << ((tb_closure == TABLE_CLOSURE_GAP0) ? " (gap0 closure)" : "")
                 << ", floor " << tb_floor << " kappa_es, high band thermalized above "
-                << tb_thick << std::endl;
+                << tb_thick << ", rank redrawn at a cell crossing with probability "
+                << tb_decorrelate << std::endl;
     if (have_nfree)
       std::cout << "  free electrons per atom from " << nfree_name << ": Abar = " << abar
                 << ", N_free " << nfree_min_ << " to " << nfree_max_
@@ -444,7 +458,7 @@ void OpacityTable::ReadNFree(const std::string &fname) {
   if (file == NULL) {
     std::stringstream msg;
     msg << "### FATAL ERROR in OpacityTable::ReadNFree" << std::endl
-        << "cannot open <montecarlo>/nfree_file = " << fname << std::endl;
+        << "cannot open <opacitytable>/nfree_file = " << fname << std::endl;
     ATHENA_ERROR(msg);
   }
   // Comment lines first; the one with "Abar =" carries the mean atomic weight.
@@ -636,34 +650,34 @@ Real OpacityTable::RossAbsNode(int l, const TableCell &cell) const {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void OpacityTable::Split(Real kP, Real kRa, Real s, Real &w, Real &kh,
+//! \fn void OpacityTable::Split(Real kP, Real kRa, Real kappa_s, Real &w, Real &kh,
 //!                               Real &kl) const
 //! \brief the two-band split of a group, per gram
 //
-// With R = Ra + s and Pt = kP + s: no line structure (R >= Pt) is one band.  The gap0
-// closure (kl = 0) gives kh = kP R / Ra - s and w = kP / kh.  The w closure fixes w = w0:
-// with a = kh + s, w0 a^2 + a [R (1 - 2 w0) - Pt] + R w0 Pt = 0, the larger root, and
-// kl = (Pt - w0 a)/(1 - w0) - s; where that is negative the cell falls back to gap0.
+// With R = Ra + kappa_s and Pt = kP + kappa_s: no line structure (R >= Pt) is one band.  The gap0
+// closure (kl = 0) gives kh = kP R / Ra - kappa_s and w = kP / kh.  The w closure fixes w = w0:
+// with a = kh + kappa_s, w0 a^2 + a [R (1 - 2 w0) - Pt] + R w0 Pt = 0, the larger root, and
+// kl = (Pt - w0 a)/(1 - w0) - kappa_s; where that is negative the cell falls back to gap0.
 
-void OpacityTable::Split(Real kP, Real kRa, Real s, Real &w, Real &kh, Real &kl) const {
-  const Real ra = std::max(kRa, tb_floor*s);
-  const Real r = ra + s, pt = kP + s;
+void OpacityTable::Split(Real kP, Real kRa, Real kappa_s, Real &w, Real &kh, Real &kl) const {
+  const Real ra = std::max(kRa, tb_floor*kappa_s);
+  const Real r = ra + kappa_s, pt = kP + kappa_s;
   if (r >= pt*(1. - 1.e-9) || kP <= 0.) {
     w = 1.;
     kh = kl = kP;
     return;
   }
-  const Real kh_g = kP*r/ra - s;
+  const Real kh_g = kP*r/ra - kappa_s;
   const Real w_g = (kh_g > 0.) ? kP/kh_g : 1.;
   if (tb_closure == TABLE_CLOSURE_W) {
     const Real w0 = tb_w0;
     const Real b = pt - r*(1. - 2.*w0);
     const Real d = std::max(b*b - 4.*w0*w0*r*pt, 0.);
     const Real a = (b + std::sqrt(d))/(2.*w0);
-    const Real kl_w = (pt - w0*a)/(1. - w0) - s;
+    const Real kl_w = (pt - w0*a)/(1. - w0) - kappa_s;
     if (kl_w >= 0.) {
       w = w0;
-      kh = a - s;
+      kh = a - kappa_s;
       kl = kl_w;
       return;
     }
@@ -675,7 +689,7 @@ void OpacityTable::Split(Real kP, Real kRa, Real s, Real &w, Real &kh, Real &kl)
 
 //----------------------------------------------------------------------------------------
 //! \fn void OpacityTable::Bands(int l, const TableCell &cell, Real temp, Real rho,
-//!                               Real sg, Real &chi, Real &chi_h, Real &chi_l,
+//!                               Real kappa_s, Real &chi, Real &chi_h, Real &chi_l,
 //!                               Real &w) const
 //! \brief the bands of extinction l of a cell [1/cm]
 //
@@ -684,7 +698,7 @@ void OpacityTable::Split(Real kP, Real kRa, Real s, Real &w, Real &kh, Real &kl)
 // absorption is the file's block when it has one, else the Rosseland mean less the
 // cell's scattering.
 
-void OpacityTable::Bands(int l, const TableCell &cell, Real temp, Real rho, Real sg,
+void OpacityTable::Bands(int l, const TableCell &cell, Real temp, Real rho, Real kappa_s,
                          Real &chi, Real &chi_h, Real &chi_l, Real &w) const {
   chi = Extinction(l, cell, temp, rho);
   chi_h = chi_l = chi;
@@ -692,9 +706,9 @@ void OpacityTable::Bands(int l, const TableCell &cell, Real temp, Real rho, Real
   if (!two_band || groups != TABLE_GROUPS_MEAN || l >= nfre
       || cell.source != TABLE_SRC_TABLE) return;
   const Real kp = PlanckNode(l, cell);
-  const Real kra = have_rossabs ? RossAbsNode(l, cell) : RosselandNode(l, cell) - sg;
+  const Real kra = have_rossabs ? RossAbsNode(l, cell) : RosselandNode(l, cell) - kappa_s;
   Real kh, kl;
-  Split(kp, kra, sg, w, kh, kl);
+  Split(kp, kra, kappa_s, w, kh, kl);
   chi_h = kh*rho;
   chi_l = kl*rho;
 }
@@ -923,8 +937,8 @@ void MonteCarloBlock::BuildOpacityTables() {
           // here, the one place every cell passes through at a known cost.
           const Real width = TableCellWidth(k,j,i);
           for (int l=0; l<nabs; ++l) {
-            const Real sg = TableScatteringPerGram(l,k,j,i);
-            tab->Bands(l, cell, temp, rhoc, sg, chi_c[l], chi_h[l], chi_l[l], wb[l]);
+            const Real kappa_s = TableScatteringPerGram(l,k,j,i);
+            tab->Bands(l, cell, temp, rhoc, kappa_s, chi_c[l], chi_h[l], chi_l[l], wb[l]);
             bool thick = false;
             if (wb[l] < 1.) {
               const Real w = wb[l];
@@ -932,7 +946,8 @@ void MonteCarloBlock::BuildOpacityTables() {
               const Real p_err = std::abs(w*kh + (1.-w)*kl - kp);
               if (p_err > 1.e-8*kp) {
                 std::stringstream msg;
-                msg << "### FATAL ERROR in MonteCarloBlock::BuildOpacityTables" << std::endl
+                msg << "### FATAL ERROR in MonteCarloBlock::BuildOpacityTables"
+                    << std::endl
                     << "two-band split of group " << l << " at T = " << temp << ", rho = "
                     << rhoc << " misses the Planck mean by " << p_err/kp << std::endl;
                 ATHENA_ERROR(msg);
@@ -944,7 +959,7 @@ void MonteCarloBlock::BuildOpacityTables() {
             } else if (!thick) {
               chi_eff[l] = wb[l]*chi_h[l] + (1.-wb[l])*chi_l[l];
             } else {
-              const Real chi_s = sg*rhoc;
+              const Real chi_s = kappa_s*rhoc;
               const Real ps = chi_s/(chi_h[l] + chi_s);
               chi_eff[l] = (1.-wb[l])*(chi_l[l] + wb[l]*chi_h[l]*ps/(1. - wb[l]*ps));
             }

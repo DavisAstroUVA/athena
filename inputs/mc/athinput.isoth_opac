@@ -63,6 +63,9 @@ emission   = table         # table | freefree
 absorption = table         # table | freefree
 polarized  = false
 abs_method = weight
+#abs_method   = prob        # analog absorption; weight follows dead samples with two bands
+
+<opacitytable>
 opacity_file  = out_opacity_table_nfreq32.txt  # tops_regrid.py layout
 table_groups  = mean       # mean: piecewise constant per group; edge: value at the lower bound
 table_gray    = freefree   # rows of the old tables gray in every group -> free-free
@@ -72,7 +75,7 @@ table_storage = cell       # cell: per-cell arrays; global: interpolate per call
 #two_band     = true        # Planck emission, Rosseland diffusion (needs table_ne)
 #two_band_w   = 0.01        # high-band frequency fraction
 #two_band_thick = 10        # thermalize the high band where rho kappa_h W exceeds this
-#abs_method   = prob        # analog absorption; weight follows dead samples with two bands
+#two_band_decorrelate = 0   # redraw the band rank at cell crossings with this probability
 
 <problem>
 temp       = 3.e5          # K

@@ -7,7 +7,7 @@
 //! \brief isothermal box or atmosphere with free-free or tabulated emission and
 //! absorption (emission = freefree | table, absorption = freefree | table); the test bed
 //! of the table opacities.  The tables themselves are the module's
-//! (<montecarlo>/opacity_file, src/monte_carlo/opacity_table.cpp).
+//! (<opacitytable>/opacity_file, src/monte_carlo/opacity_table.cpp).
 //
 //========================================================================================
 
@@ -258,14 +258,14 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin){
   EnrollUserMoment(2, ElectronJ, "nelJ");
 
   // The tabulated opacities are the module's (emission = table, absorption = table,
-  // <montecarlo>/opacity_file)
+  // <opacitytable>/opacity_file)
   const std::string emis = pin->GetOrAddString("montecarlo","emission","none");
   const std::string absn = pin->GetOrAddString("montecarlo","absorption","none");
   if (emis == "user" || absn == "user") {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo::InitUserMonteCarloData" << std::endl
         << "mc_isoth_opac has no user emission or absorption; use "
-        << "emission = table and absorption = table with <montecarlo>/opacity_file"
+        << "emission = table and absorption = table with <opacitytable>/opacity_file"
         << std::endl;
     ATHENA_ERROR(msg);
   }

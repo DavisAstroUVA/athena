@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import opacity_test_util as u  # noqa: E402
 
-# name: (scattering, emission, absorption, extra <montecarlo> keys)
+# name: (scattering, emission, absorption, extra keys; mc_block puts the table's in <opacitytable>)
 CONFIGS = {
     'readhdf': {
         'edge_thomson': ('thomson', 'table', 'table',
@@ -64,6 +64,10 @@ CONFIGS = {
         'mean_twoband_thick': ('compton', 'table', 'table',
                                {'table_ne': 'true', 'nfree_file': 'auto', 'two_band': 'true',
                                 'two_band_thick': '10.', 'abs_method': 'prob'}),
+        'mean_twoband_decor': ('thomson', 'table', 'table',
+                               {'table_ne': 'true', 'nfree_file': 'auto', 'two_band': 'true',
+                                'two_band_thick': '10.', 'two_band_decorrelate': '0.5',
+                                'abs_method': 'prob'}),
     },
     'readhdf_gr': {
         # the synthetic Kerr-Schild torus of make_ks_snapshot.py (--snapshot-dir holds it
