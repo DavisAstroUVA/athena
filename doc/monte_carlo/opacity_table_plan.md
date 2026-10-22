@@ -1,6 +1,6 @@
 # Table opacities as a module option: plan
 
-**Status (2026-10-21): Phases 1 to 5 done; Phase 6 (documentation) not started.** Phase 5's runs R0 to R11 and the repack test are recorded under Phase 5 below; the findings that change practice are `abs_method = prob` on the TDE (27 times cheaper at the same bands), the regridded table's extrapolation below the TOPS density edge (an absorbing outflow where the old table's gray rows gave a transparent one), and the edge reading's half-group shift of every strong group (17 times the mean reading's emission at 1 to 10 eV on the TDE). Work goes
+**Status (2026-10-22): all six phases done.** `opacity_table_guide.md` is the guide to running with the tables and the split; this file holds the design, the tests and the measurements. Phase 5's runs R0 to R11, the repack test and the three 1e9-sample production runs are recorded under Phase 5; the findings that change practice are `abs_method = prob` on the TDE (27 times cheaper at the same bands), the regridded table's extrapolation below the TOPS density edge (an absorbing outflow where the old table's gray rows gave a transparent one), the edge reading's half-group shift of every strong group (17 times the mean reading's emission at 1 to 10 eV on the TDE), and the inner-boundary photons being half the TDE's escaping luminosity. The within-cell expansion opacity under shear (C5) is deferred indefinitely by decision of 2026-10-22: there is no robust way to treat it from group means, and the two-band table is accepted as an approximation to a more detailed treatment. Work goes
 on the `opacity_table` branch in the `athena-opacity` worktree. Each phase ends with its
 tests passing and the status block here updated.
 
@@ -615,7 +615,7 @@ decorrelated run is still 2.09 +- 0.03 at 30 to 100 eV and 3.5 +- 0.4 at 0.1 to
 0.3 keV but 0.97 at 10 to 30 eV, so the gain at 30 to 300 eV is within-cell escape and
 survives the cell-to-cell question, and the 10 to 30 eV light, which crosses many
 cells, does not.  The within-cell expansion opacity under the outflow's shear is
-modelled by neither run and remains the open physics.  Peak memory per rank: 620 MB
+modelled by neither run; it is deferred indefinitely (C5).  Peak memory per rank: 620 MB
 two-band, 920 one-band, 2.8 GB decorrelated, which does not follow the escaper count
 and is unexplained.
 
@@ -624,7 +624,11 @@ The hires XRB stays as the regression of the port only (edge reading against
 
 **Phase 6. Documentation.** CLAUDE.md (module paragraph, test list), this file's
 status, and a short `opacity_table_guide.md` with the keys, the file layouts, and the
-reasoning of Section 5.
+reasoning of Section 5. Done 2026-10-22: the guide covers switching the tables on, the
+two files and the regrid command, the keys, the two readings, the split with the
+settings a run should use (`two_band_thick`, `abs_method = prob`, both decorrelation
+limits), what the split does not do, sampling and errors on a large snapshot, the
+storage modes, and the tests and tools; CLAUDE.md points to it.
 
 ## 5. The two-band handoff, re-examined
 
@@ -675,7 +679,10 @@ group-change rule is right. The points below are what it leaves out or gets at r
   an expansion opacity, which neither TOPS means nor the split provide. The two-band
   option is for static and slow regions (disk, atmosphere). The group-change redraw of
   3.4 handles the bulk shift's group crossings correctly but does not make the split
-  right inside a group.
+  right inside a group. Decided 2026-10-22: deferred indefinitely. There is no robust
+  way to treat the sweep from group means, and the two-band table is accepted as an
+  approximation to a more detailed treatment; `two_band_decorrelate` brackets the
+  cell-to-cell part, which on the TDE is a quarter of the light at 10 to 300 eV.
 - **C6. The diffusion test needs a slab thick in both bands.** Section 6.3 of the
   handoff expects the Rosseland flux per group. That holds only where the low band is
   also in the diffusion limit; a slab thin in kappa_l gives a free-streaming low band
