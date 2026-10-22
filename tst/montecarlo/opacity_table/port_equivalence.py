@@ -19,6 +19,12 @@ random draws, so nothing weaker than identity is expected.  PASS/FAIL.
 With --scattering none the two are not identical: the reference binary roulettes samples
 whose weight the absorption has taken to zero, and a tenth of them survive to be
 destroyed by the no-scattering handler, whereas the module absorbs them outright.
+With --pgen readhdf_gr identity holds only where no cell is excluded: the reader's hook
+now zeroes the species of cells above tcut, below dcut and inside the horizon, where
+the pre-port generator gave them the densities of a 1e-30 g/cm^3 floor, and the
+extinction of 1e-31 against 0 in those cells moves a few flights by round-off.  There
+the comparison is of the escaped, absorbed and removed counts within four times their
+Poisson scatter, and the output says so.
 Both binaries must be built with --prob=mc_readhdf -mc -hdf5 (and -mpi if --mcranks > 1).
 The old one comes from a checkout of main before the port, e.g.
   git archive <commit> | tar -x -C DIR && cd DIR && python configure.py ... && make
@@ -88,8 +94,31 @@ def main():
         new_stats[-1] if new_stats else '?', t_new, args.storage))
     print('photon lists: ' + msg_l)
     print('moment files: ' + msg_a)
-    print('PASS' if (ok_l and ok_a) else 'FAIL')
-    sys.exit(0 if (ok_l and ok_a) else 1)
+    ok = ok_l and ok_a
+    if not ok and gr and old_stats and new_stats:
+        # excluded cells carry zero species in the ported reader, a 1e-30 density floor
+        # in the pre-port one: a statistical comparison of the counts is what is left
+        ok = counts_agree(old_stats[-1], new_stats[-1])
+        print('readhdf_gr excludes cells with zero species, the reference with a density '
+              'floor; counts {} within four Poisson sigma'.format(
+                  'agree' if ok else 'DIFFER'))
+    print('PASS' if ok else 'FAIL')
+    sys.exit(0 if ok else 1)
+
+
+def counts_agree(old_line, new_line, nsigma=4.):
+    """the nesc, nabs and nrem of two 'ntot:' report lines within nsigma of Poisson"""
+    import re
+    import math
+    for key in ('nesc', 'nabs', 'nrem'):
+        a = re.search(key + r': (\d+)', old_line)
+        b = re.search(key + r': (\d+)', new_line)
+        if a is None or b is None:
+            continue
+        a, b = int(a.group(1)), int(b.group(1))
+        if abs(a - b) > nsigma*math.sqrt(max(a, b, 1)):
+            return False
+    return True
 
 
 if __name__ == '__main__':

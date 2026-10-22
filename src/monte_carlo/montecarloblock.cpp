@@ -2421,8 +2421,13 @@ void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetDensity()
-//! \brief Make hard copy of density from MeshBlock to MonteCarloBlock.
-//  Uses hard copy so that rho is always in cgs units
+//! \brief the density in cgs: the enrolled user function, else the default
+//
+// The fluid-derived arrays each have a Get function, which calls the user function
+// enrolled for that quantity or else the Default one, and a public Default function
+// holding the module's own conversion of the fluid state, so that a user function can
+// call the default and then modify its result instead of repeating it.  rho is a copy
+// in cgs rather than a view of the fluid array, so that every reader sees cgs.
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::FillBounds(int &il, int &iu, int &jl, int &ju,
@@ -2511,6 +2516,15 @@ void MonteCarloBlock::GetDensity() {
     pmy_mc->UserGetDensity(this);
     return;
   }
+  DefaultDensity();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DefaultDensity()
+//! \brief the default density: the fluid density times rho_cgs
+
+void MonteCarloBlock::DefaultDensity() {
+
   int il, iu, jl, ju, kl, ku;
   FillBounds(il, iu, jl, ju, kl, ku);
   for (int k=kl; k<=ku; ++k) {
@@ -2524,7 +2538,7 @@ void MonteCarloBlock::GetDensity() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetNumberDensity()
-//! \brief default function for computing number densities if no user function provided.
+//! \brief the number densities: the enrolled user function, else the default
 
 void MonteCarloBlock::GetNumberDensity() {
 
@@ -2532,6 +2546,16 @@ void MonteCarloBlock::GetNumberDensity() {
     pmy_mc->UserGetNumberDensity(this);
     return;
   }
+  DefaultNumberDensity();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DefaultNumberDensity()
+//! \brief the default number densities: the ionized hydrogen-helium mixture of heabund,
+//! or neutral hydrogen for resonant scattering, with the electron density from the
+//! opacity table's free electrons under table_ne
+
+void MonteCarloBlock::DefaultNumberDensity() {
 
   if (pmy_mc->scattering_meth == SCATRES) {
     // Default for resonant scattering assumes pure hydrogen
@@ -2734,8 +2758,7 @@ Real MonteCarloBlock::GasConstant(Real heabund) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetTemperature()
-//! \brief default function for computing temperature if no user function provided.
-//  Assumes EOS of the form P=RTd.
+//! \brief the gas temperature in K: the enrolled user function, else the default
 
 void MonteCarloBlock::GetTemperature() {
 
@@ -2743,12 +2766,21 @@ void MonteCarloBlock::GetTemperature() {
     pmy_mc->UserGetTemperature(this);
     return;
   }
+  DefaultTemperature();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DefaultTemperature()
+//! \brief the default temperature: the ideal-gas inversion of pressure over density,
+//! with tgas_cgs or the gas constant of the default composition, floored and capped
+
+void MonteCarloBlock::DefaultTemperature() {
 
   Hydro* phydro = pmy_block->phydro;
 
   // Without tgas_cgs the pressure and density are taken as cgs and inverted with the
-  // gas constant of the default composition (see rgas), the same mixture the default
-  // GetNumberDensity turns into electron and ion densities.  tgas_cgs, when given, is
+  // gas constant of the default composition (see rgas), the same mixture
+  // DefaultNumberDensity turns into electron and ion densities.  tgas_cgs, when given, is
   // the caller's own p/rho to T conversion and is used as is.
   Real tconv;
   if (tgas_cgs <= 0.)

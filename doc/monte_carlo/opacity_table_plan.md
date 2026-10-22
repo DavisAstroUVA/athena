@@ -9,8 +9,16 @@ per-block build, `TableCell`), `TableAbsorptionOpacity`, `GetEmissionTable`,
 `PhotonEmitTable`, the `EMISTABLE`/`ABSTABLE` flags, the keys `opacity_file`,
 `table_groups = edge`, `table_offgrid`, `table_above = clamp`, `table_gray`,
 `table_storage`, `table_fill_freefree`, `MonteCarloBlock::tab_mask`, and the run report
-line. `mc_readhdf`, `mc_readhdf_gr` and `mc_isoth_opac` use the module (the readers keep
-`GetNel`, the GR reader its `tcut` mask and escape tables on the module's accessors);
+line. `mc_readhdf`, `mc_readhdf_gr` and `mc_isoth_opac` use the module (since
+2026-10-22 the readers take the module's number densities, `DefaultNumberDensity`,
+public so that a hook can modify its result; `mc_readhdf` has no hook, the GR reader's
+`ExcludeCells` zeroes the species below `dcut`, above `tcut` and inside the horizon on
+both opacity paths and sets the `tcut` mask, and the escape tables use the module's
+accessors; the Rosseland ionization step of F4 is gone.  Excluded cells carry zero
+species where the old hooks gave them the densities of a 1e-30 g/cm^3 floor; a
+temporary build with the floor was byte-identical to the pre-port binary with and
+without the cut, so that floor is the whole difference, and `port_equivalence.py`
+compares the GR counts statistically);
 `mc_isoth_gr` and `mc_gr_simple`, which carried a dead copy of `mc_isoth_opac`'s table
 code, are stripped too. The load-balancing refusal of the readers is gone, the tables
 being rebuilt in `SetupBlockFromFluid`. Tests in `tst/montecarlo/opacity_table/`:
@@ -65,8 +73,8 @@ hundreds of kT walk astronomically far in a closed box.
 
 Phase 3 as built: `nfree_file` (read by `OpacityTable::ReadNFree`, grids checked
 against the main table's, Abar from the header) and `table_ne`; `ElectronDensity(T, rho)`
-is bilinear in the cell's bracket; the default `GetNumberDensity` and the readers'
-`GetNel` use it when `table_ne` is on, the ion density stays that of the ionized
+is bilinear in the cell's bracket; the default number densities, which the readers now
+share, use it when `table_ne` is on, the ion density stays that of the ionized
 mixture, and the free-free fallback of off-grid cells keeps full ionization (a
 departure from the plan's wording, deliberate: those cells are hot or empty, and the
 fallback has no cell state). `mc_isoth_opac` gained the `nelJ` user moment, whose ratio
@@ -169,10 +177,12 @@ Findings that the port has to settle, not just move:
   follow the fluid. The module builds them in `SetupBlockFromFluid`, with the rest of
   the fluid-derived arrays, which also makes the per-lid arrays and the load-balancing
   refusal in the readers go away.
-- **F4. Ionization.** `GetNel` sets n_e to zero where the grey Rosseland mean falls
-  below 0.34 and T < 1e5 K, else to full ionization: a step. The `_nfree` table gives
-  N_free(T, rho) continuously; with it n_e = rho N_free / (Abar m_u) with Abar from its
-  header.
+- **F4. Ionization.** The readers' `GetNel` set n_e to zero where the grey Rosseland
+  mean fell below 0.34 and T < 1e5 K, else to full ionization: a step. The `_nfree`
+  table gives N_free(T, rho) continuously; with it n_e = rho N_free / (Abar m_u) with
+  Abar from its header. The step was removed on 2026-10-22 with the hooks; without
+  `table_ne` the readers are at full ionization like every other generator (the TDE
+  regression pair R0/R1 ran with the step; the production runs used `table_ne`).
 - **F5. Composition.** The code's free-free and default n_e assume hydrogen and helium
   with `heabund` = 0.09 per hydrogen nucleus (n_e/rho = 0.868/m_u fully ionized). The
   TOPS tables are solar (Z_full/Abar = 0.845/m_u). Setting n_e from the table changes

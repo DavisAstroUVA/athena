@@ -33,13 +33,6 @@ namespace {
   // Global variables
   bool tnorm;
   Real logemin, logemax;
-  // Helium nuclei per hydrogen nucleus, <problem>/heabund; the same key sets
-  // MonteCarloBlock::heabund, so the number densities here, the free-free opacity, and
-  // the library's default temperature inversion all describe one mixture.
-  Real heabund = 0.09;
-
-  //functions
-  void GetNel(MonteCarloBlock *pmcb);
 }
 
 std::vector<float> x1coord;
@@ -55,9 +48,9 @@ int getindex(std::vector<float> vec, float val){
 void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
 
   nuser_var = 3;
-  heabund = pin->GetOrAddReal("problem", "heabund", heabund);
   // The tabulated opacities are the module's (emission = table, absorption = table,
-  // <opacitytable>/opacity_file); this generator sets the electron density from them
+  // <opacitytable>/opacity_file), and so are the number densities: the mixture of
+  // <problem>/heabund, with table_ne the electron density from the table
   const std::string emis = pin->GetOrAddString("montecarlo","emission","none");
   const std::string absn = pin->GetOrAddString("montecarlo","absorption","none");
   if (emis == "user" || absn == "user") {
@@ -68,7 +61,6 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
         << std::endl;
     ATHENA_ERROR(msg);
   }
-  if (optab != nullptr) EnrollUserGetNumberDensity(GetNel);
 }
 
 void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
@@ -349,62 +341,5 @@ namespace {
 // opacity read as species(1).  With table_ne the electron density is the table's; else
 // the gas is taken as neutral where the table's grey Rosseland mean falls below the
 // Thomson value of ionized gas and T < 1e5 K.
-void GetNel(MonteCarloBlock *pmcb) {
-
-  Real mp = 1.67262192369e-24;
-  const OpacityTable *tab = pmcb->pmy_mc->optab;
-
-  for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
-    for (int j=pmcb->js; j<=pmcb->je; ++j) {
-      for (int i=pmcb->is; i<=pmcb->ie; ++i) {
-        Real rho = pmcb->rho(k,j,i);
-        Real nh = rho / (mp*(1.+4.*heabund));
-        Real nhe = nh*heabund;
-        pmcb->species(1,k,j,i) = nh + 4. * nhe;
-        pmcb->species(0,k,j,i) = nh + 2. * nhe;
-
-        Real tgas = pmcb->tgas(k,j,i);
-        if (tab->table_ne) {
-          // the free electrons per atom of the table
-          pmcb->species(0,k,j,i) = tab->ElectronDensity(tgas, rho);
-          continue;
-        }
-        Real ld = log10(rho);
-        Real lt = log10(tgas);
-        Real xi = (ld - tab->lmind) / tab->dld;
-        int ii = std::floor(xi);
-        if (ii < 0) {
-          ii = 0;
-        } else if (ii > tab->nrho-2) {
-          ii = tab->nrho-2;
-        }
-        xi -= static_cast<Real>(ii);
-        Real xj = (lt - tab->lmint) / tab->dlt;
-        int jj = std::floor(xj);
-        if (jj < 0)
-          jj = 0;
-        if (jj > tab->ntem-2)
-          jj = tab->ntem-2;
-        while ((jj<tab->ntem-2) && (tab->tgrid(jj+1) < tgas)){
-          jj++;
-        }
-        while ((jj>0) && (tab->tgrid(jj) > tgas)){
-          jj--;
-        }
-        if(jj < 0) {
-          pmcb->species(0,k,j,i) = 0.; //below T grid, assume neutral
-          continue;
-        }
-        xj = (tgas-tab->tgrid(jj))/(tab->tgrid(jj+1)-tab->tgrid(jj));
-        Real ross = (1.-xi)*( (1.-xj)*tab->gray_ross(jj,ii)
-                +xj*tab->gray_ross(jj+1,ii) ) + xi*( (1.-xj)*tab->gray_ross(jj,ii+1)
-                +xj*tab->gray_ross(jj+1,ii+1) );
-        if ((tgas < 1.e5) && (ross < 0.34)) {
-          pmcb->species(0,k,j,i) = 0.; // assume neutral
-        }
-      } // loop over i
-    }
-  }
-}
 
 }

@@ -48,8 +48,8 @@ namespace {
   // ave/pesc_min
   Real pesc_min = 1.e-10;
   // emission = table: the module's tabulated opacities (<opacitytable>/opacity_file) supply
-  // the emission and absorption; this generator masks the cells above tcut, sets the
-  // electron density and builds the escape tables on them
+  // the emission and absorption; this generator masks the cells above tcut and builds
+  // the escape tables on them
   bool table = false;
 
   //functions
@@ -57,8 +57,7 @@ namespace {
   Real KerrSchildRadius(Real x, Real y, Real z);
   bool InsideHorizonCell(MonteCarloBlock *pmcb, int k, int j, int i);
   Real FreeFreeOpacity(Real tgas, Real rho, Real energy);
-  void GetNel(MonteCarloBlock *pmcb);
-  void GetNelFloor(MonteCarloBlock *pmcb);
+  void ExcludeCells(MonteCarloBlock *pmcb);
   void BuildEscapeTables(MonteCarloBlock *pmcb);
   void FillEscapeLocal(MonteCarloBlock *pmcb);
   void ReadEscapeFile(MonteCarloBlock *pmcb);
@@ -99,8 +98,8 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     }
   }
   table = (emission_flag == EMISTABLE);
+  EnrollUserGetNumberDensity(ExcludeCells);
   if (!table) {
-    EnrollUserGetNumberDensity(GetNelFloor);
     if (biased) {
       // Escape-table groups, log-spaced over every energy the free-free sampler can
       // draw: emin..emax in eV, or in units of kT over the temperature range with tnorm
@@ -125,7 +124,6 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     return;
   }
 
-  EnrollUserGetNumberDensity(GetNel);
   if (biased) {
     // one escape group per group of the opacity table, which is what PhotonEmitTable's
     // energy-group draw assumes
@@ -562,92 +560,24 @@ void BuildEscapeTables(MonteCarloBlock *pmcb) {
   ComputeImportance(pmcb);
 }
 
-void GetNelFloor(MonteCarloBlock *pmcb) {
-
-  Real mp = 1.67262192369e-24;
-  Real dmin = dcut*pmcb->rho_cgs; // dfloor
-  
+void ExcludeCells(MonteCarloBlock *pmcb) {
+  // The module's number densities, then no matter to speak of in the cells that take no
+  // part in the radiation: below the density floor, above the temperature cut, or
+  // inside the horizon.  The cells above tcut are also masked out of the table
+  // opacities, which BuildOpacityTables reads after this.
+  pmcb->DefaultNumberDensity();
+  const Real dmin = dcut*pmcb->rho_cgs;
+  const bool masked = (pmcb->tab_mask.GetSize() > 0);
   for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
     for (int j=pmcb->js; j<=pmcb->je; ++j) {
       for (int i=pmcb->is; i<=pmcb->ie; ++i) {
-        // below the density floor, above the temperature cut, or inside the horizon:
-        // no matter to speak of
-        Real rho = pmcb->rho(k,j,i);
-        if (rho < dmin || pmcb->tgas(k,j,i) > tcut || InsideHorizonCell(pmcb,k,j,i))
-          rho = 1.e-30;
-        Real nh = rho / (mp*(1.+4.*heabund));
-        Real nhe = nh*heabund;
-	      pmcb->species(1,k,j,i) = nh + 4. * nhe;
-        pmcb->species(0,k,j,i) = nh + 2. * nhe;
+        const bool hot = (pmcb->tgas(k,j,i) > tcut);
+        if (pmcb->rho(k,j,i) < dmin || hot || InsideHorizonCell(pmcb,k,j,i)) {
+          pmcb->species(0,k,j,i) = 0.;
+          pmcb->species(1,k,j,i) = 0.;
+        }
+        if (masked) pmcb->tab_mask(k,j,i) = hot ? 0 : 1;
       }
-    }
-  }
-}
-  
-void GetNel(MonteCarloBlock *pmcb) {
-
-  Real mp = 1.67262192369e-24;
-  const OpacityTable *tab = pmcb->pmy_mc->optab;
-
-  for (int k=pmcb->ks; k<=pmcb->ke; ++k) {
-    for (int j=pmcb->js; j<=pmcb->je; ++j) {
-      for (int i=pmcb->is; i<=pmcb->ie; ++i) {
-        Real rho = pmcb->rho(k,j,i);
-        // A cell above tcut takes no part in the table opacities: negligible extinction
-        // at every energy and negligible emission (BuildOpacityTables runs after this).
-        pmcb->tab_mask(k,j,i) = (pmcb->tgas(k,j,i) > tcut) ? 0 : 1;
-        // above the temperature cut or inside the horizon: no matter to speak of, as
-        // in GetNelFloor
-        if (pmcb->tgas(k,j,i) > tcut || InsideHorizonCell(pmcb,k,j,i)) rho = 1.e-30;
-        Real nh = rho / (mp*(1.+4.*heabund));
-        Real nhe = nh*heabund;
-        // species(1) is the ion density read by the free-free opacity and emission in
-        // opacity.cpp and emission.cpp.  Set it here as GetNelFloor and the default in
-        // MonteCarloBlock do, so this hook does not depend on the table functions fully
-        // displacing those paths.
-        pmcb->species(1,k,j,i) = nh + 4. * nhe;
-        pmcb->species(0,k,j,i) = nh + 2. * nhe;
-
-        Real tgas = pmcb->tgas(k,j,i);
-        if (tab->table_ne) {
-          // the free electrons per atom of the table
-          pmcb->species(0,k,j,i) = tab->ElectronDensity(tgas, rho);
-          continue;
-        }
-        Real ld = log10(rho);
-        Real lt = log10(tgas);
-        Real xi = (ld - tab->lmind) / tab->dld;
-        int ii = std::floor(xi);
-        if (ii < 0) {
-          ii = 0;
-        } else if (ii > tab->nrho-2) {
-          ii = tab->nrho-2;
-        }
-        xi -= static_cast<Real>(ii);
-        Real xj = (lt - tab->lmint) / tab->dlt;
-        int jj = std::floor(xj);
-        if (jj < 0)
-          jj = 0;
-        if (jj > tab->ntem-2)
-          jj = tab->ntem-2;
-        while ((jj<tab->ntem-2) && (tab->tgrid(jj+1) < tgas)){
-          jj++;
-        }
-        while ((jj>0) && (tab->tgrid(jj) > tgas)){
-          jj--;
-        }
-        if(jj < 0) {
-          pmcb->species(0,k,j,i) = 0.; //below T grid, assume neutral
-          continue;
-        }
-        xj = (tgas-tab->tgrid(jj))/(tab->tgrid(jj+1)-tab->tgrid(jj));
-        Real ross = (1.-xi)*( (1.-xj)*tab->gray_ross(jj,ii)
-                +xj*tab->gray_ross(jj+1,ii) ) + xi*( (1.-xj)*tab->gray_ross(jj,ii+1)
-                +xj*tab->gray_ross(jj+1,ii+1) );
-        if ((tgas < 1.e5) && (ross < 0.34)) {
-          pmcb->species(0,k,j,i) = 0.; // assume neutral
-        }
-      } // loop over i
     }
   }
 }

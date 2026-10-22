@@ -841,14 +841,21 @@ public:
   void FluidFourVelocity(const Real gcov[4][4], const Real gcon[4][4], int i3, int i2,
                          int i1, Real ucon[4]) const;
 
+  // The fluid-derived arrays: each Get function calls the user function enrolled for
+  // that quantity, else the Default one, which holds the module's own conversion and
+  // is public so that a user function can call it and modify the result.  Velocity,
+  // scalars and the magnetic field have no user function.
   void GetDensity();
-  void GetNumberDensity();
-  void ComputeFreeFreePrefactor();
-  void GetScalars();
-  void GetVelocity();
-  void SetNormalObserver();
-  void GetBField();
+  void DefaultDensity();
   void GetTemperature();
+  void DefaultTemperature();
+  void GetNumberDensity();
+  void DefaultNumberDensity();
+  void GetVelocity();
+  void GetScalars();
+  void GetBField();
+  void ComputeFreeFreePrefactor();
+  void SetNormalObserver();
   void ComputeTransformations();
   void TransformToComoving(Photon *pphot, int ips, int ipe);
   void TransformToCoordinate(Photon *pphot, int ips, int ipe);
