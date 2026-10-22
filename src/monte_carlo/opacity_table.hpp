@@ -31,10 +31,11 @@
 // uniform or not (a cell's bracket comes from the uniform-spacing formula corrected by a
 // walk, which costs nothing on a uniform axis).
 //
-// Two-band split (<opacitytable>/two_band, mean reading with table_ne): each table group is
-// split into a high band, frequency fraction w with absorption kappa_h, and a low band,
-// fraction 1-w with kappa_l, with the cell's scattering kappa_s in both, such that
-//   w kappa_h + (1-w) kappa_l = kappa_P,  [w/(kappa_h+kappa_s) + (1-w)/(kappa_l+kappa_s)]^-1 = kappa_R,
+// Two-band split (<opacitytable>/two_band, mean reading with table_ne): each table group
+// is split into a high band, frequency fraction w with absorption kappa_h, and a low
+// band, fraction 1-w with kappa_l, with the cell's scattering kappa_s in both, such that
+//   w kappa_h + (1-w) kappa_l = kappa_P,
+//   [w/(kappa_h+kappa_s) + (1-w)/(kappa_l+kappa_s)]^-1 = kappa_R,
 // so that emission uses the Planck mean and diffusion the Rosseland one with Kirchhoff's
 // law holding in each band.  The closure is w = two_band_w, falling back to kappa_l = 0
 // where that would need kappa_l < 0 (two_band_closure = gap0 takes kappa_l = 0 always),
@@ -46,7 +47,8 @@
 // rho kappa_h W > two_band_thick (0 = never), it is in equilibrium with the gas and is
 // not transported: its emission is dropped and the low band receives instead what the
 // high band would have passed to it by scattering, w kappa_h p_s (1-w)/(1 - w p_s) with
-// p_s = kappa_s/(kappa_h + kappa_s), and a photon in the high band there is absorbed on the spot.
+// p_s = kappa_s/(kappa_h + kappa_s), and a photon in the high band there is absorbed on
+// the spot.
 // two_band_decorrelate redraws the rank at a cell crossing with that probability, to
 // measure what the correlated-k assumption carries: 0 and 1 bracket the truth.
 //
@@ -171,8 +173,8 @@ class OpacityTable {
   //! and the scattering kappa_s to be used with it, all per gram
   void Split(Real kP, Real kRa, Real kappa_s, Real &w, Real &kh, Real &kl) const;
   //! the bands of extinction l of a cell [1/cm]: the Planck value chi, the high and low
-  //! band values and the high-band fraction (1 where the group is one band); kappa_s is the
-  //! cell's scattering per gram for the group
+  //! band values and the high-band fraction (1 where the group is one band); kappa_s is
+  //! the cell's scattering per gram for the group
   void Bands(int l, const TableCell &cell, Real temp, Real rho, Real kappa_s, Real &chi,
              Real &chi_h, Real &chi_l, Real &w) const;
   //! free-free extinction [1/cm] of fully ionized H + He at one energy

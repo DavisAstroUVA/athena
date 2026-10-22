@@ -13,20 +13,20 @@
 // C++ headers
 #include <algorithm>  // min, max
 #include <cmath>
+#include <cstdlib>  // atof
+#include <cstring>  // strstr
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
-#include <cstdlib>  // atof
-#include <cstring>  // strstr
 #include <string>
 #include <vector>
 
 // Athena++ headers
-#include "opacity_table.hpp"
-#include "montecarlo.hpp"
 #include "../globals.hpp"
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"
+#include "montecarlo.hpp"
+#include "opacity_table.hpp"
 
 namespace {
 // Constants, as literals so that the table path's arithmetic is self-contained
@@ -42,13 +42,11 @@ constexpr Real zeta3x2 = 2.4041138063191885;  // 2 zeta(3), int_0^inf x^2/(e^x-1
 // Eight-point Gauss-Legendre rule on [-1, 1], for the free-free group means
 constexpr int NGL = 8;
 constexpr Real gl_x[NGL] = {-0.9602898564975363, -0.7966664774136267,
-                            -0.5255324099163290, -0.1834346424956498,
-                             0.1834346424956498,  0.5255324099163290,
-                             0.7966664774136267,  0.9602898564975363};
+  -0.5255324099163290, -0.1834346424956498, 0.1834346424956498, 0.5255324099163290,
+  0.7966664774136267, 0.9602898564975363};
 constexpr Real gl_w[NGL] = {0.1012285362903763, 0.2223810344533745,
-                            0.3137066458778873, 0.3626837833783620,
-                            0.3626837833783620, 0.3137066458778873,
-                            0.2223810344533745, 0.1012285362903763};
+  0.3137066458778873, 0.3626837833783620, 0.3626837833783620, 0.3137066458778873,
+  0.2223810344533745, 0.1012285362903763};
 
 //----------------------------------------------------------------------------------------
 // The cumulative photon Planck function P(x) = int_0^x t^2/(e^t - 1) dt / (2 zeta(3)),
@@ -153,7 +151,8 @@ void OpacityTable::Read(ParameterInput *pin) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in OpacityTable::Read" << std::endl
-          << "<opacitytable>/table_groups = " << mode << "; use mean or edge" << std::endl;
+          << "<opacitytable>/table_groups = " << mode << "; use mean or edge"
+          << std::endl;
       ATHENA_ERROR(msg);
     }
     mode = pin->GetOrAddString("opacitytable", "table_offgrid", "freefree");
@@ -654,12 +653,14 @@ Real OpacityTable::RossAbsNode(int l, const TableCell &cell) const {
 //!                               Real &kl) const
 //! \brief the two-band split of a group, per gram
 //
-// With R = Ra + kappa_s and Pt = kP + kappa_s: no line structure (R >= Pt) is one band.  The gap0
-// closure (kl = 0) gives kh = kP R / Ra - kappa_s and w = kP / kh.  The w closure fixes w = w0:
-// with a = kh + kappa_s, w0 a^2 + a [R (1 - 2 w0) - Pt] + R w0 Pt = 0, the larger root, and
-// kl = (Pt - w0 a)/(1 - w0) - kappa_s; where that is negative the cell falls back to gap0.
+// With R = Ra + kappa_s and Pt = kP + kappa_s: no line structure (R >= Pt) is one
+// band.  The gap0 closure (kl = 0) gives kh = kP R / Ra - kappa_s and w = kP / kh.  The
+// w closure fixes w = w0: with a = kh + kappa_s, w0 a^2 + a [R (1 - 2 w0) - Pt]
+// + R w0 Pt = 0, the larger root, and kl = (Pt - w0 a)/(1 - w0) - kappa_s; where that
+// is negative the cell falls back to gap0.
 
-void OpacityTable::Split(Real kP, Real kRa, Real kappa_s, Real &w, Real &kh, Real &kl) const {
+void OpacityTable::Split(Real kP, Real kRa, Real kappa_s, Real &w, Real &kh,
+                         Real &kl) const {
   const Real ra = std::max(kRa, tb_floor*kappa_s);
   const Real r = ra + kappa_s, pt = kP + kappa_s;
   if (r >= pt*(1. - 1.e-9) || kP <= 0.) {
