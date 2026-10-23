@@ -44,13 +44,13 @@ The orientation of the three spatial legs is worth stating explicitly, because i
 inherited rather than chosen. \texttt{ConstructTetrad} takes the coordinate directions
 $\delta^\mu_{\ 1}, \delta^\mu_{\ 2}, \delta^\mu_{\ 3}$ as trial vectors and orthonormalises
 them by Gram--Schmidt \emph{in index order}, each projected orthogonal to $e_{(0)}$ and to
-the legs already built. The legs are therefore tied to the coordinate ordering of the chart:
+the legs already built. The legs are therefore tied to the coordinate ordering of the coordinate system:
 
 \begin{table}[h]
 \centering
 \begin{tabular}{llll}
 \toprule
-chart & $e_{(1)}$ & $e_{(2)}$ & $e_{(3)}$ \\
+coordinates & $e_{(1)}$ & $e_{(2)}$ & $e_{(3)}$ \\
 \midrule
 cartesian $(x,y,z)$          & $\hat{x}$   & $\hat{y}$      & $\hat{z}$ \\
 spherical polar $(r,\theta,\phi)$ & $\hat{e}_r$ & $\hat{e}_\theta$ & $\hat{e}_\phi$ \\
@@ -59,7 +59,7 @@ cylindrical $(R,\phi,z)$     & $\hat{e}_R$ & $\hat{e}_\phi$ & $\hat{e}_z$ \\
 \end{tabular}
 \end{table}
 
-The third column is the one that matters. In a cartesian or cylindrical chart the third leg
+The third column is the one that matters. In cartesian or cylindrical coordinates the third leg
 \emph{is} the global $z$ axis, so nothing distinguishes ``the tetrad's third leg'' from
 ``the global $z$ axis''. In spherical polar the third leg is $\hat{e}_\phi$, which rotates
 with azimuth.
@@ -133,7 +133,7 @@ With that projection in place, all four combinations agree on the global $z$ axi
 \centering
 \begin{tabular}{lll}
 \toprule
-pusher & chart & reference axis \\
+pusher & coordinates & reference axis \\
 \midrule
 legacy  & cartesian & global $\hat{z}$ (the transport convention, see \texttt{polarization.hpp}) \\
 legacy  & spherical & global $\hat{z}$ (same) \\
@@ -249,7 +249,7 @@ writes, then rotates onto the global cartesian legs as the list does. Spectrum a
 therefore bin every photon to the same $\mu$ by construction; on a Kerr-Schild shell at
 $r = 6M$ the two agree to round-off. What ``global $z$'' means in a curved metric is a
 convention shared between them: the normal observer's third leg rotated by the flat
-$R(\theta,\phi)$, which is the global axis exactly in a flat chart and its natural
+$R(\theta,\phi)$, which is the global axis exactly in a flat coordinate system and its natural
 observer's-eye analogue otherwise.
 
 \section{The wavevector in the photon list}

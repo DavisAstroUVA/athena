@@ -42,7 +42,7 @@ cells inside hold 0.994 of the sphere's volume and their staircase surface lets 
 out about 2 percent sooner (median tau_path 100.3 against 102.3 in one cell), which is
 where the spectrum's extra 0.3 percent in CDF comes from; a finer grid or an effective
 tau closes it.  Transport 11.3 s against 9.2 s in one cell.  Spherical polar is not done:
-the chart needs an inner radius, and a destroy or escape boundary there eats the point
+the coordinate system needs an inner radius, and a destroy or escape boundary there eats the point
 source, so it waits for either a reflecting Monte Carlo boundary or a displaced source.
 Phase C is in place except the write-up's figures (`doc/monte_carlo/kompaneets/`, with
 `make_doc_figures.py` pointed at the moved modules).
@@ -276,7 +276,7 @@ crossings in the analog transport too.
   source draws a cell in proportion to its emission (the standard emission path, which
   `MonteCarloProblemGenerator` currently overrides) and a position uniform in the cell,
   with the sphere boundary applied by rejection in edge cells.
-- The escape hook works in either chart (radius from `x1p..x3p` in Cartesian, `x1p` in
+- The escape hook works in either coordinate system (radius from `x1p..x3p` in Cartesian, `x1p` in
   spherical polar; the back-up along `k` needs the Cartesian direction, which the
   spherical pusher provides through its basis helpers).
 - Deck: `athinput.sphere_compton_grid` with, say, 32^3 cells over +/- 1.25 radius and a
