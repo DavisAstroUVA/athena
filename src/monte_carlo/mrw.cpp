@@ -539,6 +539,9 @@ bool PhotonPusher::MRWTrigger(Photon *pphot, int ip, Real chi) {
   MonteCarloBlock *pmcb = pmy_mcb;
   if (pmcb->accel_mask.GetSize() > 0
       && pmcb->accel_mask(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]) == 0) return false;
+  // The step stands for many scatterings in one band; with two bands each of those
+  // would redraw the band, so the walk is left analog
+  if (pmcb->table_two_band) return false;
   Real W[3], x[3];
   CellGeometry(pphot, ip, W, x);
   Real dmin = HUGE_NUMBER, wmin = HUGE_NUMBER;

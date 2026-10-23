@@ -103,23 +103,40 @@ Real ComptonOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
   int &i3 = pphot->i3p[ip];
   Real &energy = pphot->ep[ip];
 
-  Real sigmat = 6.65248e-25;
   Real kmec2 = 1.68638e-10;
   Real mec2 = 8.18711e-7;
 
   Real theta = pmcb->tgas(i3,i2,i1)* kmec2;
-  Real dens = pmcb->rho(i3,i2,i1);
   Real edim = energy / mec2;
 
-  Real sigma0;
+  if (edim >= MAXE) pphot->statp[ip] = DESTROYED;
+  if ((theta > MINT) && (edim > MINE) && ((edim >= MAXE) || (theta >= MAXT))
+      && pmcb->pmy_mc->verbose) {
+    std::cout << "Warning: out of range parameter in Compton Opacity: "
+              << edim << " " << theta << std::endl
+              << "Assuming Thomson cross section." << std::endl;
+  }
+
+  Real nel = pmcb->species(0,i3,i2,i1);
+  return ComptonSigma(edim, theta) * nel;
+
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real ComptonSigma(Real edim, Real theta)
+//! \brief the thermal Compton cross section [cm^2] from the lookup table; Thomson
+//! outside its range
+
+Real ComptonSigma(Real edim, Real theta) {
+
+  Real sigmat = 6.65248e-25;
+
   if (theta <= MINT) {
-    if (edim <= MINE)
-      sigma0 = sigmat;
-    else
-      sigma0 = KleinNishina(2.*edim) * sigmat;
-  } else if (edim <= MINE) {
-    sigma0 = sigmat;
-  } else if ( (edim < MAXE) && (theta < MAXT) ) {
+    if (edim <= MINE) return sigmat;
+    return KleinNishina(2.*edim) * sigmat;
+  }
+  if (edim <= MINE) return sigmat;
+  if ((edim < MAXE) && (theta < MAXT)) {
     Real le = log10(edim);
     Real lt = log10(theta);
     Real xi = (le - lmine) / dle;
@@ -131,26 +148,9 @@ Real ComptonOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
     Real lxsect = (1.-xi) * ( (1.-xj) * xsect[i  ][j] + xj * xsect[i  ][j+1] )
                     + xi  * ( (1.-xj) * xsect[i+1][j] + xj * xsect[i+1][j+1] );
-
-    sigma0 = pow(10., lxsect);
-  } else {
-    if (edim >= MAXE) {
-      pphot->statp[ip] = DESTROYED;
-    }
-    if (pmcb->pmy_mc->verbose) {
-      std::cout << "Warning: out of range parameter in Compton Opacity: "
-                << edim << " " << theta << std::endl
-                << "Assuming Thomson cross section." << std::endl;
-    }
-    //std::cout << "Warning: out of range parameter in Compton Opacity: "
-    //          << edim << " " << theta << std::endl
-    //          << "Assuming Thomson cross section." << std::endl;
-    sigma0 = sigmat;
+    return pow(10., lxsect);
   }
-
-  Real nel = pmcb->species(0,i3,i2,i1);
-  return sigma0 * nel;
-
+  return sigmat;
 }
 //----------------------------------------------------------------------------------------
 //! \fn Real ResonanceLineOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip)
@@ -428,4 +428,57 @@ Real XsecVoigt(Real nu, Real tgas) {
 
   Real sigmatot = pre * lineprofile;
   return sigmatot;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real TableAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip)
+//! \brief the tabulated absorption extinction [1/cm] at the photon's energy
+//
+// Mean reading: the value of the group holding the energy, or with two_band the value
+// of the photon's band in it; below the bottom edge the first group's, above the top
+// edge (extension groups included) what table_above says: the last group's, the analytic
+// free-free at the energy, or nothing.  Edge reading: linear in log E between the two
+// nodes that bracket the energy, clamped to the ends.
+
+Real TableAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
+  const OpacityTable *tab = pmcb->pmy_mc->optab;
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  const Real energy = pphot->ep[ip];
+  if (tab->groups == TABLE_GROUPS_EDGE) {
+    int k;
+    Real xk;
+    tab->EnergyNode(energy, k, xk);
+    return (1.-xk) * pmcb->TableExtinction(i3,i2,i1,k)
+           + xk * pmcb->TableExtinction(i3,i2,i1,k+1);
+  }
+  const int g = tab->GroupIndex(energy);
+  if (g >= 0) {
+    if (!pmcb->table_two_band) return pmcb->TableExtinction(i3,i2,i1,g);
+    // Two bands.  A change of group since the band was last used means other lines,
+    // so the rank is redrawn; then the band's value.  Where the high band is
+    // thermalized its value is also what absorbs a photon on the spot, the band being
+    // thick across the cell by definition.
+    if (pphot->grpp[ip] != g) {
+      pphot->ubp[ip] = pmcb->pran->uniform();
+      pphot->grpp[ip] = g;
+    }
+    Real chi, chi_h, chi_l, w;
+    bool thick;
+    pmcb->TableBands(i3,i2,i1,g,chi,chi_h,chi_l,w,thick);
+    if (w >= 1.) return chi;
+    return (pphot->ubp[ip] < w) ? chi_h : chi_l;
+  }
+  if (g == -1) return pmcb->TableExtinction(i3,i2,i1,0);
+  switch (tab->above) {
+    case TABLE_ABOVE_CLAMP:
+      return pmcb->TableExtinction(i3,i2,i1,tab->ngroups-1);
+    case TABLE_ABOVE_FREEFREE: {
+      const int kt = i3-pmcb->ks, jt = i2-pmcb->js, it = i1-pmcb->is;
+      if (pmcb->tab_cell[pmcb->TableIndex(kt,jt,it)].source == TABLE_SRC_CUT)
+        return TABLE_CUT_VALUE;
+      return tab->FreeFree(pmcb->tgas(i3,i2,i1), pmcb->rho(i3,i2,i1), energy);
+    }
+    default:
+      return 0.;
+  }
 }

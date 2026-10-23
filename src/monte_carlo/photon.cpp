@@ -42,6 +42,7 @@ int Photon::idk0p = -1, Photon::idk1p = -1, Photon::idk2p = -1, Photon::idk3p = 
 std::vector<Real> Photon::dk_scratch_;
 int Photon::iep = -1, Photon::iwp = -1, Photon::iscp = -1, Photon::iacp = -1;
 int Photon::istrp = -1, Photon::itaup = -1, Photon::iwrefp = -1;
+int Photon::iubp = -1, Photon::igrpp = -1;
 int Photon::isip = -1, Photon::isqp = -1, Photon::isup = -1, Photon::isvp = -1;
 int Photon::iuserp = -1, Photon::ipolp = -1, Photon::idtp = -1;
 
@@ -64,7 +65,7 @@ Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
     //user(new std::vector<Real> [pmcb->pmy_mc->nuser_var]),
     //polten(new std::vector<std::complex<Real>> [ncplx]),
     nphot(npar),nscp(intprop[inscp]), statp(intprop[istatp]),
-    type(intprop[ityp]), nmvp(intprop[inmvp]),
+    type(intprop[ityp]), nmvp(intprop[inmvp]), grpp(intprop[igrpp]),
     i1p(intprop[ii1p]), i2p(intprop[ii2p]), i3p(intprop[ii3p]),
     x0p(rp[ix0p]), x1p(rp[ix1p]), x2p(rp[ix2p]), x3p(rp[ix3p]),
     k0p(rp[ik0p]), k1p(rp[ik1p]), k2p(rp[ik2p]), k3p(rp[ik3p]),
@@ -75,7 +76,7 @@ Photon::Photon(MonteCarloBlock *pmcb, ParameterInput *pin)
     dk0p(dk_scratch_), dk1p(dk_scratch_), dk2p(dk_scratch_), dk3p(dk_scratch_),
 #endif
     ep(rp[iep]), wp(rp[iwp]), scp(rp[iscp]), acp(rp[iacp]), strp(rp[istrp]),
-    taup(rp[itaup]), wrefp(rp[iwrefp]),
+    taup(rp[itaup]), wrefp(rp[iwrefp]), ubp(rp[iubp]),
     sip(rp[isip]), sqp(rp[isqp]), sup(rp[isup]), svp(rp[isvp]),
     dtp(rp[idtp]) {
 
@@ -281,6 +282,8 @@ void Photon::AllocatePhotons(int nphot) {
     strp[ip] = 0.;
     taup[ip] = -1.;
     wrefp[ip] = 0.;
+    ubp[ip] = 0.;
+    grpp[ip] = -1;
   }
 }
 
@@ -408,6 +411,7 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
   istatp = AddIntProperty("statp");
   ityp = AddIntProperty("type");
   inmvp = AddIntProperty("nmv");
+  igrpp = AddIntProperty("grp");
 
   // Add photon position.
   ix0p = AddRealProperty("x0");
@@ -447,6 +451,7 @@ void Photon::Initialize(MonteCarlo *pmc, ParameterInput *pin) {
   istrp = AddRealProperty("strp");
   itaup = AddRealProperty("taup");
   iwrefp = AddRealProperty("wrefp");
+  iubp = AddRealProperty("ubp");
 
   // Add time remaining parameter
   idtp = AddRealProperty("dtp");

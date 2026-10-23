@@ -359,6 +359,8 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     AbsorptionOpacity = FreeFreeAbsorptionOpacity;
   } else if (absorption_opac == ABSDUST) {
     AbsorptionOpacity = DustAbsorptionOpacity;
+  } else if (absorption_opac == ABSTABLE) {
+    AbsorptionOpacity = TableAbsorptionOpacity;
   }
   // Get number of species
   nspec = pin->GetOrAddInteger("problem","nspec",2);
@@ -478,6 +480,30 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     accel_mask.NewAthenaArray(ncells3,ncells2,ncells1);
     for (int n=0; n<accel_mask.GetSize(); ++n) accel_mask(n) = 1;
   }
+  if (pmy_mc->optab != nullptr) {
+    // Tabulated opacities: the mask covers the ghosts like rho so a problem generator
+    // can index it the same way; the tables themselves cover the active cells only.
+    const int nabs = pmy_mc->optab->nabs, ncum = pmy_mc->optab->ngroups+1;
+    tab_mask.NewAthenaArray(ncells3,ncells2,ncells1);
+    for (int n=0; n<tab_mask.GetSize(); ++n) tab_mask(n) = 1;
+    tab_cell.resize(static_cast<std::size_t>(nx1)*nx2*nx3);
+    tab_emis_tot.NewAthenaArray(nx3,nx2,nx1);
+    if (pmy_mc->optab->cell_storage) {
+      tab_abs.NewAthenaArray(nx3,nx2,nx1,nabs);
+      tab_emis_cum.NewAthenaArray(nx3,nx2,nx1,ncum);
+      if (pmy_mc->optab->two_band) {
+        tab_abs_hi.NewAthenaArray(nx3,nx2,nx1,nabs);
+        tab_abs_lo.NewAthenaArray(nx3,nx2,nx1,nabs);
+        tab_w.NewAthenaArray(nx3,nx2,nx1,nabs);
+        tab_thick.NewAthenaArray(nx3,nx2,nx1,nabs);
+      }
+    }
+    tab_scratch_.resize(5*nabs + ncum);
+    for (int n=0; n<NTABCOUNT; ++n) tab_count[n] = 0;
+  }
+  table_two_band = (pmy_mc->optab != nullptr) && pmy_mc->optab->two_band;
+  table_decorrelate = table_two_band ? pmy_mc->optab->tb_decorrelate : 0.;
+  nabs_first = 0;
 
  // Create user monte carlo block data
   InitUserMonteCarloBlockData(pin);
@@ -525,6 +551,14 @@ MonteCarloBlock::~MonteCarloBlock() {
   if (importance.GetSize() > 0) importance.DeleteAthenaArray();
   if (escape_prob.GetSize() > 0) escape_prob.DeleteAthenaArray();
   if (accel_mask.GetSize() > 0) accel_mask.DeleteAthenaArray();
+  if (tab_mask.GetSize() > 0) tab_mask.DeleteAthenaArray();
+  if (tab_emis_tot.GetSize() > 0) tab_emis_tot.DeleteAthenaArray();
+  if (tab_abs.GetSize() > 0) tab_abs.DeleteAthenaArray();
+  if (tab_emis_cum.GetSize() > 0) tab_emis_cum.DeleteAthenaArray();
+  if (tab_abs_hi.GetSize() > 0) tab_abs_hi.DeleteAthenaArray();
+  if (tab_abs_lo.GetSize() > 0) tab_abs_lo.DeleteAthenaArray();
+  if (tab_w.GetSize() > 0) tab_w.DeleteAthenaArray();
+  if (tab_thick.GetSize() > 0) tab_thick.DeleteAthenaArray();
 }
 
 //----------------------------------------------------------------------------------------
@@ -770,6 +804,7 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
+        if (pphot->nscp[ip] == 0 && pphot->nmvp[ip] <= 1) nabs_first++;
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == DESTROYED) {
         ndes++;
@@ -924,9 +959,12 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         }
       }
 
-      // Update the absorption and scattering extinction coefficients
-      // if scattering can change sample energy.
-      if (!coherent_scattering) {
+      // Update the absorption and scattering extinction coefficients if scattering can
+      // change the sample's energy, or its band: with two_band the electron's thermal
+      // Doppler shift moves the photon between the lines and the gaps of its group, so
+      // the band rank is redrawn and the absorption follows.
+      if (table_two_band) pphot->ubp[ip] = pran->uniform();
+      if (!coherent_scattering || table_two_band) {
         pphot->acp[ip] = AbsorptionOpacity(this,pphot,ip);
         pphot->scp[ip] = ScatteringOpacity(this,pphot,ip);
       }
@@ -970,6 +1008,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
+        if (pphot->nscp[ip] == 0 && pphot->nmvp[ip] <= 1) nabs_first++;
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == DESTROYED) {
         pphot->RemoveOneParticle(ip);
@@ -2078,10 +2117,15 @@ void MonteCarloBlock::WeightWindow(Photon *pphot, int ip) {
 //! \fn void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip)
 //! \brief a sample below the minimum weight survives with probability roulette and
 //! carries 1/roulette times its weight, or is absorbed; the expected weight is unchanged
+//
+// A sample whose weight is exactly zero is absorbed without a draw: there is nothing to
+// amplify, and a zero-weight survivor would go on to the scattering step, which with
+// scattering = none destroys it.  Weight absorption with no scattering takes every
+// sample through here at its first interaction.
 
 void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip) {
   const Real p = pmy_mc->roulette;
-  if (p > 0. && pran->uniform() < p)
+  if (pphot->wp[ip] > 0. && p > 0. && pran->uniform() < p)
     pphot->wp[ip] /= p;
   else
     pphot->statp[ip] = ABSORBED;
@@ -2377,8 +2421,13 @@ void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetDensity()
-//! \brief Make hard copy of density from MeshBlock to MonteCarloBlock.
-//  Uses hard copy so that rho is always in cgs units
+//! \brief the density in cgs: the enrolled user function, else the default
+//
+// The fluid-derived arrays each have a Get function, which calls the user function
+// enrolled for that quantity or else the Default one, and a public Default function
+// holding the module's own conversion of the fluid state, so that a user function can
+// call the default and then modify its result instead of repeating it.  rho is a copy
+// in cgs rather than a view of the fluid array, so that every reader sees cgs.
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::FillBounds(int &il, int &iu, int &jl, int &ju,
@@ -2467,6 +2516,15 @@ void MonteCarloBlock::GetDensity() {
     pmy_mc->UserGetDensity(this);
     return;
   }
+  DefaultDensity();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DefaultDensity()
+//! \brief the default density: the fluid density times rho_cgs
+
+void MonteCarloBlock::DefaultDensity() {
+
   int il, iu, jl, ju, kl, ku;
   FillBounds(il, iu, jl, ju, kl, ku);
   for (int k=kl; k<=ku; ++k) {
@@ -2480,7 +2538,7 @@ void MonteCarloBlock::GetDensity() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetNumberDensity()
-//! \brief default function for computing number densities if no user function provided.
+//! \brief the number densities: the enrolled user function, else the default
 
 void MonteCarloBlock::GetNumberDensity() {
 
@@ -2488,6 +2546,16 @@ void MonteCarloBlock::GetNumberDensity() {
     pmy_mc->UserGetNumberDensity(this);
     return;
   }
+  DefaultNumberDensity();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DefaultNumberDensity()
+//! \brief the default number densities: the ionized hydrogen-helium mixture of heabund,
+//! or neutral hydrogen for resonant scattering, with the electron density from the
+//! opacity table's free electrons under table_ne
+
+void MonteCarloBlock::DefaultNumberDensity() {
 
   if (pmy_mc->scattering_meth == SCATRES) {
     // Default for resonant scattering assumes pure hydrogen
@@ -2505,10 +2573,10 @@ void MonteCarloBlock::GetNumberDensity() {
     return;
   }
 
-  // For all other cases, the default assumes a composition of hydrogen and helium with
-  // <problem>/heabund helium nuclei per hydrogen nucleus, fully ionized, and computes
-  // the electron and ion number densities.  This is used for electron scattering and
-  // free-free emission/absorption.  species(1) carries sum(Z^2 n_ion).
+  // table_ne = true -> the electron density comes from the opacity table's
+  // free electrons per atom, rho N_free / (Abar m_u), which falls below full ionization
+  // where the gas is cool; the ion density stays that of the ionized mixture.
+  const bool table_ne = (pmy_mc->optab != nullptr) && pmy_mc->optab->table_ne;
 
   Real mp = 1.67262192369e-24;
 
@@ -2520,7 +2588,10 @@ void MonteCarloBlock::GetNumberDensity() {
         Real nh = rho(k,j,i) / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
         species(1,k,j,i) = nh + 4. * nhe; // nion
-        species(0,k,j,i) = nh + 2. * nhe; // nel
+        if (table_ne)
+          species(0,k,j,i) = pmy_mc->optab->ElectronDensity(tgas(k,j,i), rho(k,j,i));
+        else
+          species(0,k,j,i) = nh + 2. * nhe; // nel
       }
     }
   }
@@ -2687,8 +2758,7 @@ Real MonteCarloBlock::GasConstant(Real heabund) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetTemperature()
-//! \brief default function for computing temperature if no user function provided.
-//  Assumes EOS of the form P=RTd.
+//! \brief the gas temperature in K: the enrolled user function, else the default
 
 void MonteCarloBlock::GetTemperature() {
 
@@ -2696,12 +2766,21 @@ void MonteCarloBlock::GetTemperature() {
     pmy_mc->UserGetTemperature(this);
     return;
   }
+  DefaultTemperature();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DefaultTemperature()
+//! \brief the default temperature: the ideal-gas inversion of pressure over density,
+//! with tgas_cgs or the gas constant of the default composition, floored and capped
+
+void MonteCarloBlock::DefaultTemperature() {
 
   Hydro* phydro = pmy_block->phydro;
 
   // Without tgas_cgs the pressure and density are taken as cgs and inverted with the
-  // gas constant of the default composition (see rgas), the same mixture the default
-  // GetNumberDensity turns into electron and ion densities.  tgas_cgs, when given, is
+  // gas constant of the default composition (see rgas), the same mixture
+  // DefaultNumberDensity turns into electron and ion densities.  tgas_cgs, when given, is
   // the caller's own p/rho to T conversion and is used as is.
   Real tconv;
   if (tgas_cgs <= 0.)
