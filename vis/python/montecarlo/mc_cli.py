@@ -12,6 +12,7 @@ its results, and the two cannot drift apart.
 # python standard modules
 import collections
 import glob
+import multiprocessing
 import os
 import re
 import sys
@@ -150,12 +151,13 @@ def check_inputs(parser, args, combine_ext):
         parser.error(f"output file(s) {clash} would overwrite an input file")
 
 
-def bin_list(infile, bin_chunk, add, screen_function=None, calclum=False):
+def bin_list(infile, bin_chunk, add, screen_function=None, calclum=False, progress=True):
     """
     Bin one list file, streamed in chunks so that the whole list is never in memory.
     bin_chunk(phots, mask) bins one chunk of photons, mask being None or True for the
     photons to leave out; add(a, b) folds two of its results, starting from {}.  Returns
-    the result and the luminosity of the list, None unless calclum.
+    the result and the luminosity of the list, None unless calclum.  progress=False
+    keeps the per-chunk lines quiet, for files binned side by side.
     """
 
     reader = athenamc.read_list_generator(infile)
@@ -165,7 +167,7 @@ def bin_list(infile, bin_chunk, add, screen_function=None, calclum=False):
     result = {}
     luminosity = 0.0 if calclum else None
     for nchunk, chunk in enumerate(reader):
-        if nchunk > 0 and nchunk % PROGRESS_EVERY == 0:
+        if progress and nchunk > 0 and nchunk % PROGRESS_EVERY == 0:
             print(f"    {chunk['remaining']} samples remain")
         phlist = dict(header, list=chunk['chunk'], length=chunk['length'])
         if calclum:
@@ -180,21 +182,49 @@ def bin_list(infile, bin_chunk, add, screen_function=None, calclum=False):
     return result, luminosity
 
 
-def bin_output(out, bin_chunk, add, screen_function=None, calclum=False):
-    """
-    Sum the ranks of one output; each rank holds a share of the same photons, so the
-    sum is the result for all of them.  Returns it and the luminosity of the output,
-    None unless calclum.
-    """
-
+def _fold(parts, add, calclum):
+    """Sum (result, luminosity) pairs as bin_list returns them."""
     result = {}
     luminosity = 0.0 if calclum else None
-    for infile in out.files:
-        part, lum = bin_list(infile, bin_chunk, add, screen_function, calclum)
+    for part, lum in parts:
         result = add(result, part)
         if calclum:
             luminosity += lum
     return result, luminosity
+
+
+# What a worker process needs to bin its share of the files.  bin_chunk is a closure of
+# the calling script around its arguments and cannot be pickled, so it is not sent to
+# the workers; the pool is started with the fork method and the workers inherit this
+# module global, set by bin_output just before the pool is made.  Only the file names
+# go out and one summed result per worker comes back.
+_task = None
+
+
+def _bin_files_task(infiles):
+    bin_chunk, add, screen_function, calclum = _task
+    return _fold((bin_list(f, bin_chunk, add, screen_function, calclum, progress=False)
+                  for f in infiles), add, calclum)
+
+
+def bin_output(out, bin_chunk, add, screen_function=None, calclum=False, nproc=1):
+    """
+    Sum the ranks of one output; each rank holds a share of the same photons, so the
+    sum is the result for all of them.  Returns it and the luminosity of the output,
+    None unless calclum.  nproc > 1 deals the files out to that many processes, each
+    of which sums its share; the files are independent until the sum, so the result
+    is the same to round-off.
+    """
+
+    global _task
+    if nproc > 1 and len(out.files) > 1:
+        nproc = min(nproc, len(out.files))
+        _task = (bin_chunk, add, screen_function, calclum)
+        with multiprocessing.get_context('fork').Pool(nproc) as pool:
+            parts = pool.map(_bin_files_task, [out.files[i::nproc] for i in range(nproc)])
+    else:
+        parts = (bin_list(f, bin_chunk, add, screen_function, calclum) for f in out.files)
+    return _fold(parts, add, calclum)
 
 
 def argv_from(positional, options):
@@ -235,7 +265,8 @@ def bin_outputs(args, script, bin_chunk, add, write, screen_function=None,
     is the caller's name, for messages; bin_chunk and add are as for bin_list, and
     write(filename, result) writes one result.  args.screen names the screen function
     in the user's screen.py unless one is passed in directly, as a notebook does, and
-    args.calclum asks for the luminosity of each output to be printed.  finish, if
+    args.calclum asks for the luminosity of each output to be printed, args.nproc, if
+    present, bins the files of an output in that many processes.  finish, if
     given, is applied to each output's result once all its ranks are summed, before it
     is written or combined.
     """
@@ -243,6 +274,7 @@ def bin_outputs(args, script, bin_chunk, add, write, screen_function=None,
     if screen_function is None:
         screen_function = load_screen(args.screen, script)
     calclum = getattr(args, 'calclum', False)
+    nproc = getattr(args, 'nproc', 1)
 
     combined = {}
     lum_dt = 0.0
@@ -250,7 +282,8 @@ def bin_outputs(args, script, bin_chunk, add, write, screen_function=None,
     for i, out in enumerate(args.outputs):
         label = out.base if out.output is None else f"{out.base} output {out.output}"
         print(f"{label}: {len(out.files)} file(s)")
-        result, luminosity = bin_output(out, bin_chunk, add, screen_function, calclum)
+        result, luminosity = bin_output(out, bin_chunk, add, screen_function, calclum,
+                                        nproc)
         if finish is not None:
             result = finish(result)
         if calclum:

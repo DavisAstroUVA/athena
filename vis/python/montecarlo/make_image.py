@@ -114,6 +114,8 @@ def parse_args(argv=None):
     parser.add_argument('--unit',
                         help='unit of the positions in the lists, recorded for the plot '
                              'axis labels; by default they are code units and unlabeled')
+    parser.add_argument('--nproc', type=int, default=1,
+                        help='bin the files of each output in this many processes')
     parser.add_argument('--screen',
                         help='name of a function in a user-supplied screen.py that takes '
                              'a Photons chunk and returns True for photons to leave out')

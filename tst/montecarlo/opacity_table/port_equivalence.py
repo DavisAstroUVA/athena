@@ -76,7 +76,7 @@ def main():
     # the pre-port generator: tables under <problem>, user emission and absorption
     writer(os.path.join(dirs['old'], ath_name), snap_name, args.table, args.nphot,
            args.iseed, args.scattering, emission='user', absorption='user',
-           extra={'weights': args.weights}, table_key='problem')
+           extra={'weights': args.weights}, table_key='problem', legacy=True)
     # the module: the same table through the shared path, reading it the old way
     writer(os.path.join(dirs['new'], ath_name), snap_name, args.table, args.nphot,
            args.iseed, args.scattering, emission='table', absorption='table',

@@ -188,7 +188,7 @@ void ATHDF5Output::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool flag) {
     num_datasets = 1;
     num_variables = new int[num_datasets];
     int n_dataset = 0;
-    int nf_scat = pin->GetInteger("montecarlo","nf_scat");
+    int nf_scat = pin->GetInteger(output_params.block_name,"ne");
     num_variables[n_dataset] = 2*nf_scat;
   } else {
     num_datasets = 1;

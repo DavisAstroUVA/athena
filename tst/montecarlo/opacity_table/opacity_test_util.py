@@ -19,15 +19,32 @@ SNAPSHOT_GR = 'ks_torus.athdf'  # from make_ks_snapshot.py
 TABLE = 'out_opacity_table_nfreq32.txt'
 
 
-# the keys the code reads from <opacitytable>; every other key of extra goes to <montecarlo>
-TABLE_KEYS = ('opacity_file', 'table_groups', 'table_above', 'table_emax', 'table_offgrid',
-              'table_gray', 'table_fill_freefree', 'table_storage', 'nfree_file', 'table_ne',
-              'two_band', 'two_band_w', 'two_band_floor', 'two_band_closure',
-              'two_band_thick', 'two_band_decorrelate')
+# the block each key of extra is written to; every other key goes to <montecarlo>
+KEY_BLOCKS = {}
+for _k in ('opacity_file', 'table_groups', 'table_above', 'table_emax', 'table_offgrid',
+           'table_gray', 'table_fill_freefree', 'table_storage', 'nfree_file', 'table_ne',
+           'two_band', 'two_band_w', 'two_band_floor', 'two_band_closure',
+           'two_band_thick', 'two_band_decorrelate'):
+    KEY_BLOCKS[_k] = 'opacitytable'
+for _k in ('weights', 'bias_mix', 'bias_energy', 'bias_energy_mix', 'minweight', 'roulette',
+           'window_top', 'window_bottom', 'window_max_split', 'window_energy',
+           'window_interp', 'stretch', 'stretch_taucell', 'stretch_bound'):
+    KEY_BLOCKS[_k] = 'sampling'
+for _k in ('initial', 'check_interval', 'check_fraction', 'max_per_transport', 'min_window',
+           'min_gain', 'partition', 'cost_decay', 'report', 'test_repack', 'test_costs',
+           'balancer', 'tolerance', 'interval', 'cost_file'):
+    KEY_BLOCKS[_k] = 'loadbalancing'
+for _k in ('enable', 'domain', 'tau', 'face_tau', 'pmax', 'kgreens_file'):
+    KEY_BLOCKS[_k] = 'randomwalk'
 
 
-def mc_block(nphot, iseed, scattering, emission, absorption, extra):
-    """the <montecarlo> block and, when extra holds table keys, the <opacitytable> block"""
+def mc_block(nphot, iseed, scattering, emission, absorption, extra, legacy=False):
+    """
+    the <montecarlo> block and, for the keys of extra that the code reads from their own
+    blocks, those blocks (<opacitytable>, <sampling>, <loadbalancing>, <randomwalk>);
+    legacy=True writes every key into <montecarlo>, for a binary built before the blocks
+    existed
+    """
     lines = ['<montecarlo>',
              'nphot      = {:d}'.format(nphot),
              'iseed      = {:d}'.format(iseed),
@@ -36,17 +53,18 @@ def mc_block(nphot, iseed, scattering, emission, absorption, extra):
              'absorption = ' + absorption,
              'polarized  = false',
              'abs_method = weight']
-    table = []
+    blocks = {}
     for k, v in extra.items():
-        (table if k in TABLE_KEYS else lines).append('{} = {}'.format(k, v))
-    if table:
-        lines += ['', '<opacitytable>'] + table
+        block = None if legacy else KEY_BLOCKS.get(k)
+        (lines if block is None else blocks.setdefault(block, [])).append('{} = {}'.format(k, v))
+    for block, keys in blocks.items():
+        lines += ['', '<' + block + '>'] + keys
     return '\n'.join(lines) + '\n'
 
 
 def write_readhdf_athinput(path, snapshot, table, nphot, iseed, scattering='thomson',
                            emission='table', absorption='table', extra=None,
-                           table_key='montecarlo'):
+                           table_key='montecarlo', legacy=False):
     """
     mc_readhdf on the snapshot: the small isothermal atmosphere (64x64x128 cells, eight
     blocks).  table_key = 'problem' writes the table under <problem>/opacity_filename, the
@@ -97,7 +115,7 @@ nx3 = 64
 <hydro>
 gamma = 1.666666666666667
 
-""" + mc_block(nphot, iseed, scattering, emission, absorption, extra) + """
+""" + mc_block(nphot, iseed, scattering, emission, absorption, extra, legacy) + """
 <problem>
 input_filename = {snapshot}
 {table_line}rho_cgs = 1.
@@ -114,7 +132,8 @@ emax     = 3.0e+01
 
 def write_readhdf_gr_athinput(path, snapshot, table, nphot, iseed, scattering='thomson',
                               emission='table', absorption='table', extra=None,
-                              table_key='montecarlo', nx=16, nb=2, half=24.):
+                              table_key='montecarlo', nx=16, nb=2, half=24.,
+                              legacy=False):
     """
     mc_readhdf_gr on the synthetic Kerr-Schild torus of make_ks_snapshot.py (its mesh
     and unit conversions repeated here), general pusher, spin 0.9.  tcut = 5e6 K masks
@@ -184,7 +203,7 @@ gamma = 1.666666666666667
         nphot, iseed, scattering, emission, absorption,
         dict({'mc_coord': 'kerr_schild_cartesian', 'general_pusher': 'true',
               'varystep': 'true', 'stepsize': '0.1', 'boosts': 'true',
-              'initialize_comoving': 'true', 'tmax': '1.0e36'}, **extra)) + """
+              'initialize_comoving': 'true', 'tmax': '1.0e36'}, **extra), legacy) + """
 <problem>
 input_filename = {snapshot}
 {table_line}rho_cgs  = 1.0e-3
@@ -258,7 +277,7 @@ nx3 = 32
 <hydro>
 gamma = 1.666666666666667
 
-""" + mc_block(nphot, iseed, scattering, emission, absorption, extra) + """
+""" + mc_block(nphot, iseed, scattering, emission, absorption, extra, legacy) + """
 <problem>
 {table_line}temp     = {temp:e}
 dens     = {dens:e}

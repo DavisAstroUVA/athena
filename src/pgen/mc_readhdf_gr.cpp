@@ -79,7 +79,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   dcut = pin->GetOrAddReal("problem", "dcut", dcut);
   tcut = pin->GetOrAddReal("problem", "tcut", tcut);
   heabund = pin->GetOrAddReal("problem", "heabund", heabund);
-  biased = (pin->GetOrAddString("montecarlo","weights","emission") == "biased");
+  biased = (pin->GetOrAddString("sampling","weights","emission") == "biased");
   if (biased) {
     pesc_min = pin->GetOrAddReal("problem", "pesc_min", pesc_min);
     escape_file = pin->GetOrAddString("problem", "escape_file", "");

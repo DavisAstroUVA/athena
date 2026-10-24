@@ -1400,6 +1400,7 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
           mom_flag_src = true;
         } else if (var.compare("mcscat") == 0) {
           mom_flag_scat = true;
+          scat_block = pib->block_name;
         } else if (var.compare("uom") == 0) {
           if (pmy_mc->nuser_mom > 0) {
             mom_flag_usr = true;

@@ -2,7 +2,7 @@
 """
 Table opacities across a load-balancing repack.
 
-With <montecarlo> lb_test_repack = local|mesh every block is packed, deleted, built anew
+With <loadbalancing> test_repack = local|mesh every block is packed, deleted, built anew
 and unpacked at the top of each transport (no block changes rank), and the new block
 rebuilds its table arrays from the fluid it receives.  A run with the knob must give
 byte-identical photon lists and moment files to the plain run; the table arrays are
@@ -89,7 +89,7 @@ def main():
                 ath = os.path.join(d, 'athinput.readhdf')
                 u.write_readhdf_athinput(ath, u.SNAPSHOT, args.table, args.nphot, args.iseed,
                                          scattering, emission, absorption,
-                                         dict(keys, lb_test_repack=mode))
+                                         dict(keys, test_repack=mode))
                 times[mode] = u.run(binary, ath, d, nr)
             stats = u.grep(os.path.join(dirs['none'], 'run.log'), 'ntot:')
             print('{} on {} rank(s): {}'.format(name, nr, stats[-1] if stats else '?'))

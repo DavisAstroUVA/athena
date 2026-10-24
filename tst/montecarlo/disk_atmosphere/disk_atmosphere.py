@@ -187,13 +187,16 @@ def write_athinput(path, iseed, nphot, nx1=32, nx2=512, nx3=8, x2rat=0.993,
          # escapers come from.  true places samples in proportion to emission, and emission
          # goes as density squared, so nearly every sample starts at the absorbing midplane:
          # measured, 38 escapers out of 4 million.  The option is kept for that record.
-         "weights = {0}".format("equal" if equal_weight else "emission")]
+         ]
     if general_pusher:
         o += ["general_pusher = true",
               "stepsize   = {0!r}".format(stepsize),
               "varystep   = true",
               "capmove    = 2000000"]
     o += ["",
+         "<sampling>",
+         "weights = {0}".format("equal" if equal_weight else "emission"),
+         "",
          "<problem>",
          # the z-stratified branch of the spherical setup in mc_isoth
          "radial     = false",

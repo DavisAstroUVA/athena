@@ -46,11 +46,82 @@
 #endif
 
 //----------------------------------------------------------------------------------------
+//! \fn void CheckRelocatedKeys(ParameterInput *pin)
+//! \brief refuse an input file that sets a key in the block it used to be read from
+//
+// The keys of the load balancer, the random-walk acceleration, the sampling schemes and
+// the scattering-moment bins were moved out of <montecarlo> into blocks of their own
+// (2026-10-22).  A key left in the old block would be read by nothing and the default
+// would apply silently, so every old location is checked here and the run stops naming
+// the new one.  This check is temporary: it goes once the input files have moved.
+
+namespace {
+struct RelocatedKey {
+  const char *old_block, *old_key, *new_block, *new_key;
+};
+const RelocatedKey relocated_keys[] = {
+  {"montecarlo", "lb_initial",           "loadbalancing", "initial"},
+  {"montecarlo", "lb_check_interval",    "loadbalancing", "check_interval"},
+  {"montecarlo", "lb_check_fraction",    "loadbalancing", "check_fraction"},
+  {"montecarlo", "lb_max_per_transport", "loadbalancing", "max_per_transport"},
+  {"montecarlo", "lb_min_window",        "loadbalancing", "min_window"},
+  {"montecarlo", "lb_min_gain",          "loadbalancing", "min_gain"},
+  {"montecarlo", "lb_partition",         "loadbalancing", "partition"},
+  {"montecarlo", "lb_cost_decay",        "loadbalancing", "cost_decay"},
+  {"montecarlo", "lb_report",            "loadbalancing", "report"},
+  {"montecarlo", "lb_test_repack",       "loadbalancing", "test_repack"},
+  {"montecarlo", "lb_test_costs",        "loadbalancing", "test_costs"},
+  {"montecarlo", "acceleration",         "randomwalk",    "enable"},
+  {"montecarlo", "accel_domain",         "randomwalk",    "domain"},
+  {"montecarlo", "accel_tau",            "randomwalk",    "tau"},
+  {"montecarlo", "accel_face_tau",       "randomwalk",    "face_tau"},
+  {"montecarlo", "accel_pmax",           "randomwalk",    "pmax"},
+  {"montecarlo", "kgreens_file",         "randomwalk",    "kgreens_file"},
+  {"montecarlo", "accel_report",         "randomwalk",    "report"},
+  {"montecarlo", "weights",              "sampling",      "weights"},
+  {"montecarlo", "equal_weight",         "sampling",      "weights"},
+  {"montecarlo", "bias_mix",             "sampling",      "bias_mix"},
+  {"montecarlo", "bias_energy",          "sampling",      "bias_energy"},
+  {"montecarlo", "bias_energy_mix",      "sampling",      "bias_energy_mix"},
+  {"montecarlo", "minweight",            "sampling",      "minweight"},
+  {"montecarlo", "roulette",             "sampling",      "roulette"},
+  {"montecarlo", "wwin_top",             "sampling",      "window_top"},
+  {"montecarlo", "wwin_bottom",          "sampling",      "window_bottom"},
+  {"montecarlo", "wwin_max_split",       "sampling",      "window_max_split"},
+  {"montecarlo", "wwin_energy",          "sampling",      "window_energy"},
+  {"montecarlo", "wwin_interp",          "sampling",      "window_interp"},
+  {"montecarlo", "stretch",              "sampling",      "stretch"},
+  {"montecarlo", "stretch_taucell",      "sampling",      "stretch_taucell"},
+  {"montecarlo", "stretch_bound",        "sampling",      "stretch_bound"},
+  {"montecarlo", "nf_scat",              "output block of the mcscat output", "ne"},
+  {"montecarlo", "emin_scat",            "output block of the mcscat output", "emin"},
+  {"montecarlo", "emax_scat",            "output block of the mcscat output", "emax"},
+};
+
+void CheckRelocatedKeys(ParameterInput *pin) {
+  std::stringstream msg;
+  int nfound = 0;
+  for (const RelocatedKey &key : relocated_keys) {
+    if (pin->DoesParameterExist(key.old_block, key.old_key)) {
+      if (nfound == 0)
+        msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+            << "keys set in a block they are no longer read from:" << std::endl;
+      msg << "  <" << key.old_block << ">/" << key.old_key << " is now <"
+          << key.new_block << ">/" << key.new_key << std::endl;
+      ++nfound;
+    }
+  }
+  if (nfound > 0) ATHENA_ERROR(msg);
+}
+}  // namespace
+
+//----------------------------------------------------------------------------------------
 //! MonteCarlo constructor, builds monte carlo using parameters in input file
 
 MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 
   std::stringstream msg;
+  CheckRelocatedKeys(pin);
 
   pmy_mesh = pmesh;
 
@@ -58,39 +129,39 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   GetEmission=nullptr;
   UserGetDensity=nullptr;
   nescape = 0;
-  bias_energy = pin->GetOrAddBoolean("montecarlo","bias_energy",true);
-  bias_mix = pin->GetOrAddReal("montecarlo","bias_mix",0.99);
+  bias_energy = pin->GetOrAddBoolean("sampling","bias_energy",true);
+  bias_mix = pin->GetOrAddReal("sampling","bias_mix",0.99);
   if (bias_mix <= 0. || bias_mix > 1.) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/bias_mix = " << bias_mix << "; use 0 < bias_mix <= 1" << std::endl;
+        << "<sampling>/bias_mix = " << bias_mix << "; use 0 < bias_mix <= 1" << std::endl;
     ATHENA_ERROR(msg);
   }
   // The energy-group draw is mixed the same way, so that the factor it puts on the
   // weight is bounded at 1/(1 - bias_energy_mix); it follows bias_mix unless set
-  bias_energy_mix = pin->GetOrAddReal("montecarlo","bias_energy_mix",bias_mix);
+  bias_energy_mix = pin->GetOrAddReal("sampling","bias_energy_mix",bias_mix);
   if (bias_energy_mix <= 0. || bias_energy_mix > 1.) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/bias_energy_mix = " << bias_energy_mix
+        << "<sampling>/bias_energy_mix = " << bias_energy_mix
         << "; use 0 < bias_energy_mix <= 1" << std::endl;
     ATHENA_ERROR(msg);
   }
   bias_scale = 1.;
   bias_mixed_ = false;
   weight_ref_bias_ = 0.;
-  wwin_top = pin->GetOrAddReal("montecarlo","wwin_top",0.);
-  wwin_bottom = pin->GetOrAddReal("montecarlo","wwin_bottom",0.);
-  wwin_max_split = pin->GetOrAddInteger("montecarlo","wwin_max_split",8);
-  wwin_energy = pin->GetOrAddBoolean("montecarlo","wwin_energy",true);
-  wwin_interp = pin->GetOrAddBoolean("montecarlo","wwin_interp",true);
+  wwin_top = pin->GetOrAddReal("sampling","window_top",0.);
+  wwin_bottom = pin->GetOrAddReal("sampling","window_bottom",0.);
+  wwin_max_split = pin->GetOrAddInteger("sampling","window_max_split",8);
+  wwin_energy = pin->GetOrAddBoolean("sampling","window_energy",true);
+  wwin_interp = pin->GetOrAddBoolean("sampling","window_interp",true);
   if ((wwin_top != 0. && wwin_top < 1.) || wwin_bottom < 0. || wwin_bottom > 1. ||
       wwin_max_split < 2) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/wwin_top = " << wwin_top << ", wwin_bottom = " << wwin_bottom
-        << ", wwin_max_split = " << wwin_max_split
-        << "; use wwin_top >= 1 or 0, 0 <= wwin_bottom <= 1, wwin_max_split >= 2"
+        << "<sampling>/window_top = " << wwin_top << ", window_bottom = " << wwin_bottom
+        << ", window_max_split = " << wwin_max_split
+        << "; use window_top >= 1 or 0, 0 <= window_bottom <= 1, window_max_split >= 2"
         << std::endl;
     ATHENA_ERROR(msg);
   }
@@ -136,18 +207,18 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   ttransport = 0.;
   boosts = pin->GetOrAddBoolean("montecarlo","boosts",false);
   polarized = GetMCPolarizationFlag(pin->GetOrAddString("montecarlo","polarized","none"));
-  acceleration = pin->GetOrAddBoolean("montecarlo","acceleration",false);
+  acceleration = pin->GetOrAddBoolean("randomwalk","enable",false);
   // MCCoord::dmin, the smallest cell width, is built for the MRW acceleration.  A user
   // hook can want it for its own reasons -- mc_hotjupiter's core skipping compares the
   // cell's comoving line optical depth against a threshold -- and reading an array that
   // was never allocated segfaults, so a problem generator that needs it asks here rather
   // than turning MRW on as a side effect.
   compute_dmin = pin->GetOrAddBoolean("montecarlo","compute_dmin",false);
-  accel_tau = pin->GetOrAddReal("montecarlo","accel_tau",20.);
-  accel_face_tau = pin->GetOrAddReal("montecarlo","accel_face_tau",5.);
-  accel_pmax = pin->GetOrAddReal("montecarlo","accel_pmax",0.);
+  accel_tau = pin->GetOrAddReal("randomwalk","tau",20.);
+  accel_face_tau = pin->GetOrAddReal("randomwalk","face_tau",5.);
+  accel_pmax = pin->GetOrAddReal("randomwalk","pmax",0.);
   {
-    std::string dom = pin->GetOrAddString("montecarlo","accel_domain","cell");
+    std::string dom = pin->GetOrAddString("randomwalk","domain","cell");
     if (dom == "cell") {
       accel_domain = MRW_DOMAIN_CELL;
     } else if (dom == "sphere") {
@@ -155,18 +226,18 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "accel_domain must be cell or sphere, not " << dom << std::endl;
+          << "<randomwalk>/domain must be cell or sphere, not " << dom << std::endl;
       ATHENA_ERROR(msg);
     }
   }
-  kgreens_file = pin->GetOrAddString("montecarlo","kgreens_file","");
+  kgreens_file = pin->GetOrAddString("randomwalk","kgreens_file","");
   kgreens = nullptr;
   mrw = nullptr;
   optab = nullptr;
   if (acceleration) mrw = new MRWTables;
-  accel_report = pin->GetOrAddBoolean("montecarlo","accel_report",false);
+  accel_report = pin->GetOrAddBoolean("randomwalk","report",false);
   verbose = pin->GetOrAddBoolean("montecarlo", "verbose", true);
-  lb_report = pin->GetOrAddBoolean("montecarlo", "lb_report", false);
+  lb_report = pin->GetOrAddBoolean("loadbalancing", "report", false);
   raytrace_flag = pin->GetOrAddBoolean("montecarlo", "raytrace", false);
   if (raytrace_flag)
     general_pusher_flag = true;
@@ -180,7 +251,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     if (kgreens_file.empty()) {
       std::stringstream msg;
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "acceleration with Compton scattering needs <montecarlo> kgreens_file"
+          << "the random walk with Compton scattering needs <randomwalk> kgreens_file"
           << std::endl;
       ATHENA_ERROR(msg);
     }
@@ -209,22 +280,22 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   nscat_run = 0;
 
   // Set mininmum weight if using weighting for absorption
-  weightratio = pin->GetOrAddReal("montecarlo","minweight",1.0e-20);
-  roulette = pin->GetOrAddReal("montecarlo","roulette",0.1);
+  weightratio = pin->GetOrAddReal("sampling","minweight",1.0e-20);
+  roulette = pin->GetOrAddReal("sampling","roulette",0.1);
   if (roulette < 0. || roulette >= 1.) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/roulette = " << roulette << "; use 0 <= roulette < 1" << std::endl;
+        << "<sampling>/roulette = " << roulette << "; use 0 <= roulette < 1" << std::endl;
     ATHENA_ERROR(msg);
   }
 
-  stretch = pin->GetOrAddReal("montecarlo","stretch",1.0);
-  stretch_bound = pin->GetOrAddReal("montecarlo","stretch_bound",10.0);
-  stretch_taucell = pin->GetOrAddReal("montecarlo","stretch_taucell",HUGE_NUMBER);
+  stretch = pin->GetOrAddReal("sampling","stretch",1.0);
+  stretch_bound = pin->GetOrAddReal("sampling","stretch_bound",10.0);
+  stretch_taucell = pin->GetOrAddReal("sampling","stretch_taucell",HUGE_NUMBER);
   if (stretch <= 0. || stretch_bound < 1. || stretch_taucell <= 0.) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/stretch = " << stretch << ", stretch_bound = " << stretch_bound
+        << "<sampling>/stretch = " << stretch << ", stretch_bound = " << stretch_bound
         << ", stretch_taucell = " << stretch_taucell
         << "; use stretch > 0, stretch_bound >= 1, stretch_taucell > 0" << std::endl;
     ATHENA_ERROR(msg);
@@ -312,7 +383,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   MPI_Comm_dup(MPI_COMM_WORLD, &lb_comm_);
 #endif
   {
-    const std::string mode = pin->GetOrAddString("montecarlo", "lb_test_repack", "none");
+    const std::string mode = pin->GetOrAddString("loadbalancing", "test_repack", "none");
     if (mode == "none") {
       lb_test_repack = LBTEST_NONE;
     } else if (mode == "local") {
@@ -321,46 +392,46 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
       lb_test_repack = LBTEST_MESH;
     } else {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "<montecarlo>/lb_test_repack = " << mode << "; use none, local or mesh"
+          << "<loadbalancing>/test_repack = " << mode << "; use none, local or mesh"
           << std::endl;
       ATHENA_ERROR(msg);
     }
     lb_cost_file = pin->GetOrAddString("loadbalancing", "cost_file", "");
     lb_costs_loaded = false;
-    lb_min_gain = pin->GetOrAddReal("montecarlo", "lb_min_gain", 0.05);
-    lb_check_interval = pin->GetOrAddInteger("montecarlo", "lb_check_interval", 0);
-    lb_max_per_transport = pin->GetOrAddInteger("montecarlo", "lb_max_per_transport", 4);
-    lb_min_window = pin->GetOrAddInteger("montecarlo", "lb_min_window", lb_check_interval);
-    lb_check_fraction = pin->GetOrAddReal("montecarlo", "lb_check_fraction", 0.1);
-    lb_cost_decay = pin->GetOrAddReal("montecarlo", "lb_cost_decay", 1.0);
-    const std::string part = pin->GetOrAddString("montecarlo", "lb_partition", "optimal");
+    lb_min_gain = pin->GetOrAddReal("loadbalancing", "min_gain", 0.05);
+    lb_check_interval = pin->GetOrAddInteger("loadbalancing", "check_interval", 0);
+    lb_max_per_transport = pin->GetOrAddInteger("loadbalancing", "max_per_transport", 4);
+    lb_min_window = pin->GetOrAddInteger("loadbalancing", "min_window", lb_check_interval);
+    lb_check_fraction = pin->GetOrAddReal("loadbalancing", "check_fraction", 0.1);
+    lb_cost_decay = pin->GetOrAddReal("loadbalancing", "cost_decay", 1.0);
+    const std::string part = pin->GetOrAddString("loadbalancing", "partition", "optimal");
     if (part == "optimal") {
       lb_partition_optimal = true;
     } else if (part == "greedy") {
       lb_partition_optimal = false;
     } else {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "<montecarlo>/lb_partition = " << part << "; use optimal or greedy" << std::endl;
+          << "<loadbalancing>/partition = " << part << "; use optimal or greedy" << std::endl;
       ATHENA_ERROR(msg);
     }
-    const std::string init = pin->GetOrAddString("montecarlo", "lb_initial", "none");
+    const std::string init = pin->GetOrAddString("loadbalancing", "initial", "none");
     if (init == "none") {
       lb_initial_photons = false;
     } else if (init == "photons") {
       lb_initial_photons = true;
     } else {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "<montecarlo>/lb_initial = " << init << "; use none or photons" << std::endl;
+          << "<loadbalancing>/initial = " << init << "; use none or photons" << std::endl;
       ATHENA_ERROR(msg);
     }
-    const std::string cmode = pin->GetOrAddString("montecarlo", "lb_test_costs", "measured");
+    const std::string cmode = pin->GetOrAddString("loadbalancing", "test_costs", "measured");
     if (cmode == "measured") {
       lb_test_costs = LBCOST_MEASURED;
     } else if (cmode == "alternate") {
       lb_test_costs = LBCOST_ALTERNATE;
     } else {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "<montecarlo>/lb_test_costs = " << cmode << "; use measured or alternate"
+          << "<loadbalancing>/test_costs = " << cmode << "; use measured or alternate"
           << std::endl;
       ATHENA_ERROR(msg);
     }
@@ -2974,23 +3045,16 @@ void MCRandom::SampleMultinomial(int n, int m, Real *prob, int *counts) {
 
 //----------------------------------------------------------------------------------------
 //! \fn enum WeightScheme GetWeightScheme(ParameterInput *pin)
-//! \brief read <montecarlo>/weights, the sample allocation and weighting scheme
+//! \brief read <sampling>/weights, the sample allocation and weighting scheme
 
 enum WeightScheme GetWeightScheme(ParameterInput *pin) {
-  if (pin->DoesParameterExist("montecarlo","equal_weight")) {
-    std::stringstream msg;
-    msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
-        << "<montecarlo>/equal_weight is not an option; use weights = emission | equal"
-        << " | biased" << std::endl;
-    ATHENA_ERROR(msg);
-  }
-  std::string s = pin->GetOrAddString("montecarlo","weights","emission");
+  std::string s = pin->GetOrAddString("sampling","weights","emission");
   if (s == "emission") return WEIGHTS_EMISSION;
   if (s == "equal") return WEIGHTS_EQUAL;
   if (s == "biased") return WEIGHTS_BIASED;
   std::stringstream msg;
   msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
-      << "<montecarlo>/weights = " << s << " is not one of emission, equal, biased"
+      << "<sampling>/weights = " << s << " is not one of emission, equal, biased"
       << std::endl;
   ATHENA_ERROR(msg);
   return WEIGHTS_EMISSION;

@@ -430,10 +430,13 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     sourceterms_error.NewAthenaArray(3,ncells3,ncells2,ncells1);
   }
   if (mom_flag_scat) {
-    nf_scat = pin->GetInteger("montecarlo","nf_scat");
+    // the bins of the scattering moments are those of the mcscat output's own block,
+    // named as a spectrum output names its bins
+    const std::string &scat_block = pmy_mc->pmcout->scat_block;
+    nf_scat = pin->GetInteger(scat_block,"ne");
     Real everg = 1.602176634e-12;
-    emin_scat = pin->GetReal("montecarlo","emin_scat") * everg;
-    emax_scat = pin->GetReal("montecarlo","emax_scat") * everg;
+    emin_scat = pin->GetReal(scat_block,"emin") * everg;
+    emax_scat = pin->GetReal(scat_block,"emax") * everg;
     moments_scat.NewAthenaArray(nf_scat,ncells3,ncells2,ncells1);
     moments_scat_error.NewAthenaArray(nf_scat,ncells3,ncells2,ncells1);
     dloge_scat = (std::log10(emax_scat/emin_scat))/static_cast<Real>(nf_scat);

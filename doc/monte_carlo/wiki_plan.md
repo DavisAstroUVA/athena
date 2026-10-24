@@ -9,6 +9,17 @@ installed here, so they were not converted; the pages were written from them). W
 the `wiki_update` branch of the code repository and in the wiki clone at
 `/home/swd8g/wiki/athena.wiki`.
 
+Added 2026-10-22, with the pages updated to match: the input keys of the load balancer,
+the random-walk acceleration and the sampling schemes moved out of `<montecarlo>` into
+`<loadbalancing>` (prefix `lb_` dropped), `<randomwalk>` (`enable`, `domain`, `tau`,
+`face_tau`, `pmax`, `kgreens_file`, `report`) and `<sampling>` (`weights`, `bias_*`,
+`minweight`, `roulette`, `window_*` for the former `wwin_*`, `stretch*`), and the bins of
+the `mcscat` output moved into its own `<output[n]>` block as `ne`, `emin`, `emax`.
+`CheckRelocatedKeys` in `montecarlo.cpp` refuses an input file that still sets a moved
+key in `<montecarlo>`, naming the new location; it is to be dropped once the input files
+have moved. From here on a change to the input keys, outputs, tools or methods is a
+change to the wiki, proposed for approval with the code change.
+
 ## 1. Where things stand
 
 The wiki exists: 21 pages, 820 lines, last touched 2025-09-01, in the Athena++ wiki
