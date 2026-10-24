@@ -115,10 +115,6 @@ user_dt = 1.e11
 #lys_eqwt = true  # use eq. weight scheme for stellar lya
 #lyr_eqwt = true  # use eq. weight scheme for recomb. lya
 
-# Debug flag for turning off opacity entirely
-zero_opacity = false
-escape_after_scatter = false
-
 # Geometry
 incident_from_z = false
 

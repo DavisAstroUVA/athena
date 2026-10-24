@@ -243,8 +243,8 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin) {
   // Array for each component of the tidal gravity acceleration.
   ruser_meshblock_data[0].NewAthenaArray(3,ncells3,ncells2,ncells1);
   // Photoionization rate per neutral atom (in code time units) from the last transport,
-  // which MeshBlock::UserWorkInLoop applies every cycle when the transport runs at a
-  // cadence > 1
+  // which MeshBlock::UserWorkInLoop applies every cycle when the ionizing photons run at
+  // a cadence > 1 (ion_cadence)
   ruser_meshblock_data[1].NewAthenaArray(ncells3,ncells2,ncells1);
   for (int n=0; n<ruser_meshblock_data[1].GetSize(); ++n) ruser_meshblock_data[1](n) = -1.;
 
@@ -319,6 +319,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     EnrollUserEmissionFunction(SurfaceEmissivityIonizing,etype);
     emission_geometry[etype] = EMISAREA;
     emission_face[etype] = SetEmissionSurface("outer_x1");
+    cadence_type[etype] = pin->GetOrAddInteger("problem","ion_cadence",cadence);
     etype++;
     if (report_setup && (Globals::my_rank == 0)) {
       std::cout << "Computing stellar ionizing photons emitted from surface."
@@ -339,6 +340,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     emission_geometry[etype] = EMISAREA;
     EnrollUserEmissionFunction(SurfaceEmissivityLya,etype);
     emission_face[etype] = SetEmissionSurface("outer_x1");
+    cadence_type[etype] = pin->GetOrAddInteger("problem","lya_cadence",cadence);
     etype++;
     if (report_setup && (Globals::my_rank == 0)) {
       std::cout << "Computing stellar lyman alpha photons emitted from surface."
@@ -359,6 +361,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     emission_geometry[etype] = EMISVOL;
     EnrollUserEmissionFunction(VolumeEmissivityLya,etype);
     emission_face[etype] = SetEmissionSurface("none");
+    cadence_type[etype] = pin->GetOrAddInteger("problem","lya_cadence",cadence);
     if (report_setup && (Globals::my_rank == 0)) {
       std::cout << "Computing recombination lyman alpha photons emitted throughout volume."
                 << std::endl;
@@ -1028,8 +1031,8 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
 
   Real tint = pmy_mc->tint; // in cgs
 
-  // With cadence > 1 only the rate is recorded here; MeshBlock::UserWorkInLoop updates
-  // the ionization and applies the impact cooling on every cycle
+  // With ion_cadence > 1 only the rate is recorded here; MeshBlock::UserWorkInLoop
+  // updates the ionization and applies the impact cooling on every cycle
   const bool hold = HoldIonization(pmy_mc);
   for (int k=ks; k<=ke; ++k) {
     for (int j=js; j<=je; ++j) {
@@ -2167,7 +2170,8 @@ void OutflowOuterX1 (MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 
 
 bool HoldIonization(MonteCarlo *pmc) {
-  return flag_update_nh && pmc->dynamic && pmc->cadence > 1;
+  // only the cadence of the ionizing photons matters: they alone set the rate
+  return flag_update_nh && pmc->dynamic && ion_str >= 0 && pmc->cadence_type[ion_str] > 1;
 }
 
 Real ImplicitNeutralDensity(Real nh, Real na, Real Gamma, Real tempo1e4K, Real dt,

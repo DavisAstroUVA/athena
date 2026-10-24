@@ -204,6 +204,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   }
   last_transport_cycle = -1;
   last_transport_time = 0.;
+  last_transport_end = 0.;
   ttransport = 0.;
   boosts = pin->GetOrAddBoolean("montecarlo","boosts",false);
   polarized = GetMCPolarizationFlag(pin->GetOrAddString("montecarlo","polarized","none"));
@@ -324,6 +325,18 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   // Initialize user MonteCarlo data before initializing MonteCarloBlocks
   // Should be caleld before Output constuctor
   InitUserMonteCarloData(pin);
+
+  // The problem generator may have given the emission types cadences of their own
+  for (int n=0; n<ntype; ++n) {
+    if (cadence_type[n] < 1 || (!dynamic && cadence_type[n] > 1)) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo::Initialize" << std::endl
+          << "emission type " << n << " has cadence " << cadence_type[n]
+          << "; a type's cadence is at least 1, and above 1 only with dynamic = true"
+          << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
 
   // Initialize output
   pmcout = new MCOutput(this,pin);
@@ -460,6 +473,11 @@ MonteCarlo::~MonteCarlo() {
   delete optab;
   delete pmcout;
   delete pexch;
+  delete[] cadence_type;
+  delete[] last_transport_cycle_type;
+  delete[] tint_type;
+  delete[] tint_last_type;
+  delete[] due_type;
 #ifdef MPI_PARALLEL
   MPI_Comm_free(&lb_comm_);
 #endif
@@ -1127,6 +1145,17 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   GetEmission = new EmisFunc_t[ntype];
   emission_geometry = new int[ntype];
   emission_face = new BoundaryFace[ntype];
+  cadence_type = new int[ntype];
+  last_transport_cycle_type = new int[ntype];
+  tint_type = new Real[ntype];
+  tint_last_type = new Real[ntype];
+  due_type = new bool[ntype];
+  for (int n=0; n<ntype; ++n) {
+    cadence_type[n] = cadence;
+    last_transport_cycle_type[n] = -1;
+    tint_type[n] = tint_last_type[n] = 0.;
+    due_type[n] = true;
+  }
   // Set emmisivity functions and flag for determining emission array
   if (emission_flag == EMISNONE) {
     GetEmission[0] = nullptr; // left unset
@@ -1428,13 +1457,21 @@ void MonteCarlo::DistributeSamples(int etype) {
 
 //----------------------------------------------------------------------------------------
 //! \fn bool MonteCarlo::TransportDue()
-//! \brief the first cycle of a run or restart, every cadence cycles after the last
-//! transport, and with cadence_frac > 0 any cycle by whose end the held energy source
-//! would have changed a cell's internal energy by more than that fraction
+//! \brief marks the emission types due this cycle and returns whether any is: a type is
+//! due on the first cycle of a run or restart and every cadence_type cycles after its
+//! last transport; with cadence_frac > 0 every type is due on a cycle by whose end the
+//! held energy source would have changed a cell's internal energy by more than that
+//! fraction
 
 bool MonteCarlo::TransportDue() {
   const int ncycle = pmy_mesh->ncycle;
-  if (last_transport_cycle < 0 || ncycle - last_transport_cycle >= cadence) return true;
+  bool any = false;
+  for (int n=0; n<ntype; ++n) {
+    due_type[n] = (last_transport_cycle_type[n] < 0
+                   || ncycle - last_transport_cycle_type[n] >= cadence_type[n]);
+    any = any || due_type[n];
+  }
+  if (any) return true;
   if (cadence_frac > 0. && coupled) {
     const Real elapsed = pmy_mesh->time + pmy_mesh->dt - last_transport_time;
     Real frac = 0.;
@@ -1448,6 +1485,7 @@ bool MonteCarlo::TransportDue() {
         std::cout << "Monte Carlo transport at cycle " << ncycle << ", "
                   << ncycle - last_transport_cycle << " after the last: held energy "
                   << "source would change internal energy by " << frac << std::endl;
+      for (int n=0; n<ntype; ++n) due_type[n] = true;
       return true;
     }
   }
@@ -1462,22 +1500,28 @@ bool MonteCarlo::TransportDue() {
 void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                                      ParameterInput *pinput) {
 
-  // Leave if transport not due
-  if (dynamic && !TransportDue()) return;
-
+  Real time_cgs = 1.;
   if (dynamic) {
+    // Every type's next emission covers this step, whether or not the type runs now;
+    // then leave if no type is due.
+    for (int n=0; n<ntype; ++n) tint_type[n] += pmy_mesh->dt;
+    if (!TransportDue()) return;
+    // The time this cycle's transports cover is the time since the end of the last
+    // cycle that transported anything, which is what the types' emissions carry
+    // (tint_type), so the outputs' normalization by ttransport matches the weights.
+    const Real step_end = pmy_mesh->time + pmy_mesh->dt;
+    ttransport += (last_transport_cycle < 0) ? pmy_mesh->dt
+                                             : step_end - last_transport_end;
     last_transport_cycle = pmy_mesh->ncycle;
     last_transport_time = pmy_mesh->time;
-    ttransport += pmy_mesh->dt;
+    last_transport_end = step_end;
     tmax = pinput->GetOrAddReal("montecarlo","tmax",-1.);
     if (tmax < 0.)
       tmax = pmy_mesh->dt;
-    tint = pmy_mesh->dt;
-    // convert to cgs units
+    // convert to cgs units; tint is set per type inside the loop below
     Real vel_cgs = pinput->GetOrAddReal("problem","vel_cgs",1.);
     Real l_cgs = pinput->GetOrAddReal("problem","l_cgs",1.);
-    Real time_cgs = l_cgs/vel_cgs;
-    tint *= time_cgs;
+    time_cgs = l_cgs/vel_cgs;
     tmax *= time_cgs;
   }
 
@@ -1510,17 +1554,33 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
   }
 
-  // Reset the moments and source terms for this transport, in both modes.  Every output
-  // is an independent estimate of the same steady state.
-  for(int nb=0; nb<nblocal; ++nb) {
-    MonteCarloBlock *pmcb = my_blocks(nb);
-    if (pmcb->call_moments)
-      pmcb->ResetMoments();
-    if (pmcb->call_srcterms)
-      pmcb->ResetSourceTerms();
+  // A static run resets the moments and source terms once for this transport: every
+  // output is an independent estimate of the same steady state.  A dynamic run resets
+  // per type inside the loop, since a type that is not due keeps its held rates.
+  if (!dynamic) {
+    for(int nb=0; nb<nblocal; ++nb) {
+      MonteCarloBlock *pmcb = my_blocks(nb);
+      if (pmcb->call_moments)
+        pmcb->ResetMoments();
+      if (pmcb->call_srcterms)
+        pmcb->ResetSourceTerms();
+    }
   }
 
   for (int etype=0; etype < ntype; etype++) {
+    if (dynamic) {
+      if (!due_type[etype]) continue;
+      // this type's emission covers the steps since its last transport
+      tint = tint_type[etype] * time_cgs;
+      for (int nb=0; nb<nblocal; ++nb) {
+        MonteCarloBlock *pmcb = my_blocks(nb);
+        if (pmcb->call_moments)
+          pmcb->ResetMoments(etype);
+        if (pmcb->call_srcterms)
+          pmcb->ResetSourceTerms();
+      }
+    }
+    tint_last_type[etype] = tint;
 
       // reset counters
     for (int nb=0; nb<nblocal; nb++) {
@@ -1746,6 +1806,13 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
 
     for(int nb=0; nb<nblocal; ++nb) {
       my_blocks(nb)->UserWorkAfterTransfer(etype);
+    }
+    if (dynamic) {
+      // hold this type's source terms and shared moments as rates until it runs again
+      for(int nb=0; nb<nblocal; ++nb)
+        my_blocks(nb)->StoreTypeRates(etype);
+      last_transport_cycle_type[etype] = pmy_mesh->ncycle;
+      tint_type[etype] = 0.;
     }
   } // end loop over ntype
 
