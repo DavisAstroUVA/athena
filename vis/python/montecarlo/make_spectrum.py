@@ -149,6 +149,8 @@ def parse_args(argv=None):
                              'correlated (mc_readhdf* write them as columns 0 and 1)')
     parser.add_argument('--calclum', action='store_true',
                         help='report the luminosity of each output from its lists')
+    parser.add_argument('--nproc', type=int, default=1,
+                        help='bin the files of each output in this many processes')
     parser.add_argument('--screen',
                         help='name of a function in a user-supplied screen.py that takes '
                              'a Photons chunk and returns True for photons to leave out')

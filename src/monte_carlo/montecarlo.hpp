@@ -94,7 +94,7 @@ enum EmissionGeometry {EMISVOL = 0, EMISAREA = 1, EMISGNONE = 2};
 enum AbsorptionOpacityFlag {ABSUSER = 0, ABSNONE = 1, ABSFF = 2, ABSDUST = 3,
                             ABSTABLE = 4};
 enum AbsorptionMethodFlag {ABSWEIGHT = 0, ABSPROB = 1, ABSTAU = 2};
-// How samples are allocated to cells and weighted, <montecarlo>/weights:
+// How samples are allocated to cells and weighted, <sampling>/weights:
 //   emission  cells are drawn uniformly and the cell's emission goes into the weight
 //   equal     cells are drawn in proportion to their emission and every sample carries
 //             the same weight em_tot/nphot
@@ -445,13 +445,13 @@ public:
     std::vector<Real> rb;
     std::vector<char> sb;
   };
-  //! <montecarlo> lb_test_repack: none; local -- at the top of every RunMonteCarlo pack,
+  //! <loadbalancing> test_repack: none; local -- at the top of every RunMonteCarlo pack,
   //! destroy and rebuild every block in place, no mesh call, which must be bitwise
   //! neutral; mesh -- run the mesh's redistribution with unchanged costs and treat every
   //! block as departing and arriving, which exercises the hooks end to end.
   enum LbTestMode {LBTEST_NONE = 0, LBTEST_LOCAL = 1, LBTEST_MESH = 2};
   LbTestMode lb_test_repack;
-  //! <montecarlo> lb_test_costs: measured (the default) or alternate -- synthetic block
+  //! <loadbalancing> test_costs: measured (the default) or alternate -- synthetic block
   //! costs of 3 and 1 on the two halves of the gid range, swapped every balance, so that
   //! a known set of blocks changes rank each time.  Needs <loadbalancing> balancer =
   //! manual, whose cost path reads MeshBlock::cost_ as given.
@@ -472,7 +472,7 @@ public:
   //! and read back at startup, so a run on the same mesh starts balanced
   std::string lb_cost_file;
   bool lb_costs_loaded;
-  //! <montecarlo> lb_min_gain: a redistribution is taken only if the busiest rank of the
+  //! <loadbalancing> min_gain: a redistribution is taken only if the busiest rank of the
   //! partition the mesh would choose is at least this fraction below the current one.
   //! The mesh tests whether the current layout is imbalanced, not whether its greedy
   //! contiguous partition improves on it, and with few blocks per rank it can be worse.
@@ -490,17 +490,17 @@ public:
   //! gather and judge, in one blocking step
   bool RedistributionWorthwhile();
   //! the partition of a cost list the mesh will use when it redistributes: the
-  //! module's optimal contiguous one under <montecarlo> lb_partition = optimal (the
+  //! module's optimal contiguous one under <loadbalancing> partition = optimal (the
   //! default), the mesh's greedy CalculateLoadBalance under greedy.  Called by the mesh
   //! from RedistributeAndRefineMeshBlocks and by the prediction guard, so the two agree.
   void Partition(double *cost, int nb, int *rlist, int *slist, int *nlist) const;
   bool lb_partition_optimal;
-  //! <montecarlo> lb_cost_decay: after every balance check the accumulated block costs
+  //! <loadbalancing> cost_decay: after every balance check the accumulated block costs
   //! are scaled by this, so what the next check sees leans toward the recent window.
   //! 1 (the default) keeps everything since the last redistribution.
   Real lb_cost_decay;
   void DecayCosts();
-  //! <montecarlo> lb_initial = none|photons: with photons and no cost file, the first
+  //! <loadbalancing> initial = none|photons: with photons and no cost file, the first
   //! transport is balanced on each block's share of the photons to emit before any is
   //! moved.  Informative for equal-weight emission, where that share follows the
   //! emissivity; uniform, and so useless, for the variable-weight scheme.

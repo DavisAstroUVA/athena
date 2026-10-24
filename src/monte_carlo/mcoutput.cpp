@@ -1214,7 +1214,7 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         //
         // What remains is a convention, shared with PhotonList::AddPhoton: the "global
         // z" the polar_axis binning measures against is the normal observer's third leg
-        // rotated by the flat R(theta, phi).  In a flat chart that is the global z axis
+        // rotated by the flat R(theta, phi).  In a flat coordinate system that is the global z axis
         // exactly; in a curved one it is the natural observer's-eye analogue, and it is
         // the same axis the list's wavevector columns are written against, so spectrum
         // and list agree with each other by construction.
@@ -1400,6 +1400,7 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
           mom_flag_src = true;
         } else if (var.compare("mcscat") == 0) {
           mom_flag_scat = true;
+          scat_block = pib->block_name;
         } else if (var.compare("uom") == 0) {
           if (pmy_mc->nuser_mom > 0) {
             mom_flag_usr = true;

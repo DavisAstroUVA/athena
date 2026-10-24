@@ -575,7 +575,7 @@ compares.
   interval of a second run on the same deck starts from the balanced layout.
   *Test:* second run's first-interval per-rank max/mean is within tolerance from the
   start; the file round-trips (write, read, compare).
-- L2d. Dynamic run through the same hooks: `inputs/mc/athinput.hotjupiter` (dynamic,
+- L2d. Dynamic run through the same hooks: `inputs/mc/athinput.hot_jupiter` (dynamic,
   coupled) with `balancer = automatic` on 4 ranks and forced moves.
   *Tests:* the run completes; hydro and Monte Carlo outputs agree with the unbalanced
   run to statistical precision; photon conservation per cycle; a one-rank run with the

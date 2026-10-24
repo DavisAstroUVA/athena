@@ -8,7 +8,7 @@
 //
 // The same physical problem as mc_isoth -- a plane-parallel isothermal atmosphere whose
 // density falls exponentially with height, emitting free-free and scattering off
-// electrons -- but written in the sheared chart of White, Stone & Gammie (2016),
+// electrons -- but written in the sheared coordinates of White, Stone & Gammie (2016),
 // ApJS 225, 22:
 //
 //     t = t_M,  x = x_M,  y = y_M + a sin(k x_M),  z = z_M
@@ -17,7 +17,7 @@
 //
 //     ds^2 = -dt^2 + (1 + beta^2) dx^2 - 2 beta dx dy + dy^2 + dz^2.
 //
-// The point is that this spacetime is genuinely flat: the shear is a change of chart and
+// The point is that this spacetime is genuinely flat: the shear is a change of coordinates and
 // nothing more.  Stratifying along x3 keeps the physics identical to the cartesian case,
 // because z = z_M exactly and no metric component mixes x3 with anything, so the emergent
 // polarized intensity must reproduce the same Feautrier solution that mc_isoth is checked

@@ -103,7 +103,7 @@ correction -- not worth it. Gamma is 1/64 sparse in snake and fully dense in Ker
    so it is ~20 lines. The cost is a Gram-Schmidt per photon per step, ~300 flops and 4 square
    roots, about 3x the transport that was rejected. Photons in a cell are then measured in
    slightly different frames, an O(cell) inconsistency of the same order as the binning itself.
-4. **Sub-step the transport.** Not recommended: it pays more to converge a scheme that still
+4. **Sub-step the transport.** Not recommended: it is more worthwhile to converge a scheme that still
    diverges at the axis.
 5. **Refine the angular grid**, if the science allows. Cheapest mitigation, no code change.
 

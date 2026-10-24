@@ -418,6 +418,6 @@ question.
 6. S2, *statistical*. Commit.
 7. S3, S7, S8 together, *bitwise* except as noted. Commit.
 8. S4, gates. Commit.
-9. S5 and S6, measured; keep what pays. Commit.
+9. S5 and S6, measured; keep what is worthwhile. Commit.
 10. Final: the XRB deck on a real snapshot, before-and-after memory and photon rate, and
     a spectrum comparison within its statistical error.

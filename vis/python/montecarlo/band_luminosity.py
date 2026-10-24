@@ -5,7 +5,7 @@ Band luminosities of a run's escaping photons, output by output, and the compari
 two runs by the scatter between their outputs.
 
     python band_luminosity.py RUNDIR [RUNDIR2] [--bands 0.1 0.3 1 3 10] [--base xrb.out1]
-                              [--screen NAME]
+                              [--screen NAME] [--nproc N]
 
 Each output of a run is the set of list files <base>.proc*.<nnnnn>.list; the luminosity
 in a band is sum(w E)/dt over the escapers in it, summed over ranks.  With one run it
@@ -26,7 +26,9 @@ falls in:
 """
 
 import argparse
+import functools
 import glob
+import multiprocessing
 import os
 import re
 import sys
@@ -51,42 +53,58 @@ def outputs(rundir, base):
     return out
 
 
-def band_luminosities(files, edges_kev, screen_function=None):
-    """luminosity in each band and in total, erg/s, summed over the files of one output;
-    screen_function(phots) marks the photons to leave out"""
-    edges = np.asarray(edges_kev)*KEV
+def band_luminosities_file(f, edges, screen_function=None):
+    """luminosity in each band and in total, erg/s, of one list file; edges in erg"""
     lum = np.zeros(len(edges)-1)
     total = 0.
     nphot = 0
-    for f in files:
-        gen = athena_mc.read_list_generator(f)
-        header = next(gen)['header']
-        dt = header['dt']
-        for c in gen:
-            if c['chunk'] is None:
-                continue
-            p = athena_mc.Photons(dict(header, list=c['chunk'], length=c['length']))
-            keep = (np.ones(p.nphot, dtype=bool) if screen_function is None
-                    else ~np.asarray(screen_function(p), dtype=bool))
-            we = (p.weight*p.energy)[keep]
-            energy = p.energy[keep]
-            total += we.sum()/dt
-            nphot += len(we)
-            idx = np.searchsorted(edges, energy) - 1
-            ok = (idx >= 0) & (idx < len(lum))
-            np.add.at(lum, idx[ok], we[ok]/dt)
-            if c['done']:
-                break
+    gen = athena_mc.read_list_generator(f)
+    header = next(gen)['header']
+    dt = header['dt']
+    for c in gen:
+        if c['chunk'] is None:
+            continue
+        p = athena_mc.Photons(dict(header, list=c['chunk'], length=c['length']))
+        keep = (np.ones(p.nphot, dtype=bool) if screen_function is None
+                else ~np.asarray(screen_function(p), dtype=bool))
+        we = (p.weight*p.energy)[keep]
+        energy = p.energy[keep]
+        total += we.sum()/dt
+        nphot += len(we)
+        idx = np.searchsorted(edges, energy) - 1
+        ok = (idx >= 0) & (idx < len(lum))
+        np.add.at(lum, idx[ok], we[ok]/dt)
+        if c['done']:
+            break
     return total, lum, nphot
 
 
-def run_table(rundir, base, edges, screen_function=None):
+def band_luminosities(files, edges_kev, screen_function=None, nproc=1):
+    """luminosity in each band and in total, erg/s, summed over the files of one output;
+    screen_function(phots) marks the photons to leave out; nproc > 1 reads the files in
+    that many processes (the screen function comes from a module, so it can be sent to
+    them; the pool is forked so that it need not be)"""
+    edges = np.asarray(edges_kev)*KEV
+    task = functools.partial(band_luminosities_file, edges=edges,
+                             screen_function=screen_function)
+    if nproc > 1 and len(files) > 1:
+        with multiprocessing.get_context('fork').Pool(min(nproc, len(files))) as pool:
+            parts = pool.map(task, files)
+    else:
+        parts = [task(f) for f in files]
+    total = sum(part[0] for part in parts)
+    lum = sum(part[1] for part in parts)
+    nphot = sum(part[2] for part in parts)
+    return total, lum, nphot
+
+
+def run_table(rundir, base, edges, screen_function=None, nproc=1):
     outs = outputs(rundir, base)
     if not outs:
         sys.exit(f"no {base}.proc*.*.list in {rundir}")
     rows = []
     for n in sorted(outs):
-        total, lum, nphot = band_luminosities(outs[n], edges, screen_function)
+        total, lum, nphot = band_luminosities(outs[n], edges, screen_function, nproc)
         rows.append((n, nphot, total, lum))
     return rows
 
@@ -124,6 +142,8 @@ def parse_args(argv=None):
     ap.add_argument('--bands', type=float, nargs='+', default=[0.1, 0.3, 1., 3., 10.],
                     help='band edges in keV')
     ap.add_argument('--base', default='xrb.out1', help='list file base name')
+    ap.add_argument('--nproc', type=int, default=1,
+                    help='read the files of each output in this many processes')
     ap.add_argument('--screen',
                     help='name of a function in a user-supplied screen.py that takes '
                          'a Photons chunk and returns True for photons to leave out')
@@ -138,7 +158,7 @@ def main(args, screen_function=None):
     edges = args.bands
     results = []
     for r in args.runs[:2]:
-        rows = run_table(r, args.base, edges, screen_function)
+        rows = run_table(r, args.base, edges, screen_function, args.nproc)
         results.append(print_run(r, rows, edges))
     if len(results) == 2:
         (mt1, et1, mb1, eb1), (mt2, et2, mb2, eb2) = results

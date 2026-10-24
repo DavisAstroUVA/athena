@@ -1887,10 +1887,17 @@ def finalize_family_errors(spectrum):
 
 
 def _merge_family_sums(fam1, fam2):
+    # each input is a few runs sorted by key (one per Stokes plane from make_spectrum,
+    # one after a merge), so a stable sort merges them in linear time, where np.unique
+    # would sort the concatenation from scratch
     keys = np.concatenate([fam1[0], fam2[0]])
     sums = np.concatenate([fam1[1], fam2[1]])
-    uniq, inv = np.unique(keys, return_inverse=True)
-    return uniq, np.bincount(inv, weights=sums)
+    if keys.size == 0:      # every photon of both was screened out
+        return keys, sums
+    order = np.argsort(keys, kind='stable')
+    keys, sums = keys[order], sums[order]
+    first = np.flatnonzero(np.concatenate(([True], keys[1:] != keys[:-1])))
+    return keys[first], np.add.reduceat(sums, first)
 
 
 def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1.,

@@ -1,6 +1,6 @@
 # Table opacities as a module option: plan
 
-**Status (2026-10-22): all six phases done.** `opacity_table_guide.md` is the guide to running with the tables and the split; this file holds the design, the tests and the measurements. Phase 5's runs R0 to R11, the repack test and the three 1e9-sample production runs are recorded under Phase 5; the findings that change practice are `abs_method = prob` on the TDE (27 times cheaper at the same bands), the regridded table's extrapolation below the TOPS density edge (an absorbing outflow where the old table's gray rows gave a transparent one), the edge reading's half-group shift of every strong group (17 times the mean reading's emission at 1 to 10 eV on the TDE), and the inner-boundary photons being half the TDE's escaping luminosity. The within-cell expansion opacity under shear (C5) is deferred indefinitely by decision of 2026-10-22: there is no robust way to treat it from group means, and the two-band table is accepted as an approximation to a more detailed treatment. Work goes
+**Status (2026-10-22): all six phases done.** the wiki page Table Opacities is the guide to running with the tables and the split; this file holds the design, the tests and the measurements. Phase 5's runs R0 to R11, the repack test and the three 1e9-sample production runs are recorded under Phase 5; the findings that change practice are `abs_method = prob` on the TDE (27 times cheaper at the same bands), the regridded table's extrapolation below the TOPS density edge (an absorbing outflow where the old table's gray rows gave a transparent one), the edge reading's half-group shift of every strong group (17 times the mean reading's emission at 1 to 10 eV on the TDE), and the inner-boundary photons being half the TDE's escaping luminosity. The within-cell expansion opacity under shear (C5) is deferred indefinitely by decision of 2026-10-22: there is no robust way to treat it from group means, and the two-band table is accepted as an approximation to a more detailed treatment. Work goes
 on the `opacity_table` branch in the `athena-opacity` worktree. Each phase ends with its
 tests passing and the status block here updated.
 
@@ -456,7 +456,7 @@ same seed and photon count:
    configuration; `two_band_thick` at 3, 10 and 30;
 3. both storage modes, `VmHWM` per rank and transport time; on two million cells the
    split's cell storage is 2.6 GB on top of the rest, which is where global storage
-   earns its place;
+   is worthwhile;
 4. load balancing with tables, `lb_test_repack` first on the small snapshot.
 
 Sampling on this snapshot (found 2026-10-21): `weights = equal` draws cells in
@@ -582,7 +582,7 @@ picket-fence slab of `rosseland_slab.py` is, not this snapshot.
 R11 (R5 with `table_storage = global`): bands within scatter, 12.8 minutes against
 13.8, 542 MB per rank against 613.  The split's five per-cell arrays are 2.6 GB over
 the mesh, 55 MB per rank on 48, and the rest of the footprint is the mesh, the
-photons and the exchange buffers; global storage earns its place on a run with far
+photons and the exchange buffers; global storage is worthwhile on a run with far
 more cells per rank than this one.
 
 Load balancing with tables (`tst/montecarlo/opacity_table/repack_equivalence.py`, the
@@ -623,8 +623,9 @@ The hires XRB stays as the regression of the port only (edge reading against
 `d01_emis2`), on andes when convenient.
 
 **Phase 6. Documentation.** CLAUDE.md (module paragraph, test list), this file's
-status, and a short `opacity_table_guide.md` with the keys, the file layouts, and the
-reasoning of Section 5. Done 2026-10-22: the guide covers switching the tables on, the
+status, and a short guide with the keys, the file layouts, and the
+reasoning of Section 5. Done 2026-10-22 (the guide became the wiki page Table Opacities
+on 2026-10-22): the guide covers switching the tables on, the
 two files and the regrid command, the keys, the two readings, the split with the
 settings a run should use (`two_band_thick`, `abs_method = prob`, both decorrelation
 limits), what the split does not do, sampling and errors on a large snapshot, the

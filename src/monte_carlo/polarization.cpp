@@ -312,7 +312,7 @@ void CoherencyToObserverStokes(MonteCarloBlock *pmcb, Photon *pphot, int ip) {
 
   // Reference axis, in tetrad components.  (0,0,1) is the tetrad's third spatial leg,
   // which is what ConstructTetrad grows from the third coordinate direction: e_z in a
-  // cartesian or cylindrical chart, and so already the global z axis there.  In spherical
+  // cartesian or cylindrical coordinates, and so already the global z axis there.  In spherical
   // polar it is e_phi, which rotates with azimuth -- Q and U would then be referenced to a
   // different physical plane for every photon, they could not be combined across the grid,
   // and they would not vanish for a photon leaving along the polar axis.  Project the

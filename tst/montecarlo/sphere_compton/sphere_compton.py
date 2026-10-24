@@ -275,6 +275,7 @@ def write_athinput(args, filename):
             subs[f'x{d}max'] = f"{hi:.7e}"
     out = []
     block = None
+    rw_lines = ""
     for line in open(template):
         key = line.split('=')[0].strip() if '=' in line else None
         if line.startswith('<'):
@@ -289,10 +290,11 @@ def write_athinput(args, filename):
             line = f"{key:<10s} = {subs[key]}"
             line += f"    # {comment.strip()}\n" if comment else "\n"
         if block == 'montecarlo' and line.startswith('polarized') and args.accel:
-            line += (f"acceleration = true\naccel_tau = {args.accel_tau}\n"
-                     f"accel_pmax = {args.accel_pmax}\n")
+            # the random-walk keys have their own block, written before <problem>
+            rw_lines += (f"enable = true\ntau = {args.accel_tau}\n"
+                         f"pmax = {args.accel_pmax}\n")
             if args.kgreens:
-                line += f"kgreens_file = {args.kgreens}\n"
+                rw_lines += f"kgreens_file = {args.kgreens}\n"
         if block == 'montecarlo' and line.startswith('polarized') and args.beta:
             line += "boosts = true\n"
         if block == 'montecarlo' and line.startswith('polarized') and args.general_pusher:
@@ -300,12 +302,14 @@ def write_athinput(args, filename):
             # affine step is far too small for a cell of 1e10 cm
             line += f"general_pusher = true\nvarystep = true\nstepsize = {args.stepsize}\n"
         if block == 'montecarlo' and line.startswith('polarized') and args.accel_report:
-            line += "accel_report = true\n"
+            rw_lines += "report = true\n"
         if block == 'montecarlo' and line.startswith('polarized') and args.accel \
                 and args.accel_domain != 'cell':
-            line += f"accel_domain = {args.accel_domain}\n"
+            rw_lines += f"domain = {args.accel_domain}\n"
         if block == 'montecarlo' and line.startswith('polarized') and args.accel:
-            line += f"accel_face_tau = {args.accel_face_tau}\n"
+            rw_lines += f"face_tau = {args.accel_face_tau}\n"
+        if line.startswith('<problem>') and rw_lines:
+            line = "<randomwalk>\n" + rw_lines + "\n" + line
         if block == 'problem' and line.startswith('heabund') and args.beta:
             line += f"velocity = {args.beta}    # fluid velocity along z, in units of c\n"
         out.append(line)
