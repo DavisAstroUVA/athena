@@ -104,8 +104,7 @@ def run_luminosities(binary, workdir, table, scheme, temp, dens, taumin, taumax,
         for c in gen:
             if c['chunk'] is None:
                 continue
-            p = band_luminosity.athena_mc.Photons(dict(header, list=c['chunk'],
-                                                       length=c['length']))
+            p = band_luminosity.athena_mc.Photons.from_chunk(header, c)
             we = p.weight*p.energy/dt
             idx = np.searchsorted(edges, p.energy) - 1
             ok = (idx >= 0) & (idx < len(nph))

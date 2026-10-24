@@ -64,7 +64,7 @@ def band_luminosities_file(f, edges, screen_function=None):
     for c in gen:
         if c['chunk'] is None:
             continue
-        p = athena_mc.Photons(dict(header, list=c['chunk'], length=c['length']))
+        p = athena_mc.Photons.from_chunk(header, c)
         keep = (np.ones(p.nphot, dtype=bool) if screen_function is None
                 else ~np.asarray(screen_function(p), dtype=bool))
         we = (p.weight*p.energy)[keep]

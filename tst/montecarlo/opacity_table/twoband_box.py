@@ -127,8 +127,7 @@ def escaping(workdir, edges):
         for c in gen:
             if c['chunk'] is None:
                 continue
-            p = band_luminosity.athena_mc.Photons(dict(header, list=c['chunk'],
-                                                       length=c['length']))
+            p = band_luminosity.athena_mc.Photons.from_chunk(header, c)
             rate += p.weight.sum()/dt
             wsq += (p.weight**2).sum()/dt**2
             idx = np.searchsorted(edges, p.energy) - 1
