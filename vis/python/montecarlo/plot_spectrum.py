@@ -216,7 +216,7 @@ def plot_blackbody(ax, xfaces, xunit, yunit, bbtemp, bbnorm, *, imu=None, iphi=N
 
 def make_figure(args):
     """
-    Read each input spectrum with athena_mc.py and plot them on a shared axis, using the
+    Read each input spectrum with athena_mc and plot them on a shared axis, using the
     options returned by parse_args().  Returns the figure, for a notebook to show or a
     caller to save.
     """

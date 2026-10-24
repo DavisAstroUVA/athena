@@ -75,7 +75,7 @@ def load(files):
         for c in gen:
             if c['chunk'] is None:
                 continue
-            p = athena_mc.Photons(dict(header, list=c['chunk'], length=c['length']))
+            p = athena_mc.Photons.from_chunk(header, c)
             if p.nuser < 3:
                 sys.exit(f"{f}: the list needs the three user columns (nuser = 3 in the "
                          "phlist output block)")
