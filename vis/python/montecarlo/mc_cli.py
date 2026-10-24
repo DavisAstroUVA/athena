@@ -284,6 +284,10 @@ def bin_outputs(args, script, bin_chunk, add, write, screen_function=None,
         print(f"{label}: {len(out.files)} file(s)")
         result, luminosity = bin_output(out, bin_chunk, add, screen_function, calclum,
                                         nproc)
+        if not result:
+            # a dynamic run writes a list at its start with nothing in it
+            print(f"  warning: no photons in {label}, skipped")
+            continue
         if finish is not None:
             result = finish(result)
         if calclum:
@@ -299,6 +303,8 @@ def bin_outputs(args, script, bin_chunk, add, write, screen_function=None,
             print(f"  wrote {args.outnames[i]}")
 
     if args.combine:
+        if not combined:
+            raise SystemExit(f"{script}: no photons in any output, nothing to write")
         if calclum and len(args.outputs) > 1:
             print(f"combined luminosity: {lum_dt/total_dt:e}")
         write(args.outnames[0], combined)

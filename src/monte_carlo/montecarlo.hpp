@@ -274,11 +274,23 @@ public:
 
   Real tint;   // Monte Carlo timestep
   Real tmax;   // Maximum evolution time
-  int cadence; // cycle cadence MC called in dynamic runs
+  int cadence; // default cycle cadence of every emission type in dynamic runs
   Real cadence_frac; // energy fraction threshold for cadence > 1
-  int last_transport_cycle; // -1 until the first transport
+  int last_transport_cycle; // -1 until the first transport (of any type)
   Real last_transport_time; // mesh time at the start of the last transport's step
+  Real last_transport_end; // mesh time at the end of the last transport's step
   Real ttransport; // simulation time the transport has covered, in code units
+  // Per emission type, so that the types of a multi run can transport at their own
+  // cadences in a dynamic run
+  int *cadence_type; // cadence of each type
+  int *last_transport_cycle_type; // cycle of each type's last transport
+  Real *tint_type; // code time each type's next transport has to cover
+  Real *tint_last_type; // cgs tint of each type's last transport
+  bool *due_type; // whether each type is due this cycle
+  //! the tint an emission type's moments are normalized by (tint before any transport)
+  Real TintOfType(int etype) const {
+    return (tint_last_type[etype] > 0.) ? tint_last_type[etype] : tint;
+  }
   Real weightratio; // used for setting minimum weight for absorption
   Real roulette; // determines if low weight samples are absorbed or survive
   // Path stretching paramters
@@ -754,6 +766,10 @@ public:
   AthenaArray<Real> freq_scat_mid;
   AthenaArray<Real> sourceterms;
   AthenaArray<Real> sourceterms_error;
+  //! Dynamic runs only: the source terms, scattering moments and user moments are
+  //! accumulated over all types in the arrays above; when types run at their own cadence
+  //! contributions are converted to a rate at the end of its transport
+  AthenaArray<Real> srcrate, srcrate_error, scatrate, scatrate_error, userrate;
   Real force_pend_sum_[3];
   int force_pend_i1_, force_pend_i2_, force_pend_i3_;
   AthenaArray<Real> scalars;
@@ -804,7 +820,10 @@ public:
   void ComovingFrameMatrix(int k, int j, int i, const AthenaArray<Real> &g,
                            const AthenaArray<Real> &gi, Real lam[4][4]);
   void DeriveComovingMoments();
-  void ResetMoments();
+  //! etype < 0: every moment array; etype >= 0: that type's slot
+  void ResetMoments(int etype = -1);
+  //! Dynamic runs: hold the type's accumulated source terms
+  void StoreTypeRates(int etype);
   void UpdateSourceTerms(Photon *pphot, Real energy0, Real weight0,
                          Real k1p0, Real k2p0, Real k3p0, int ip);
   void NormalizeSourceTerms(bool normalize);

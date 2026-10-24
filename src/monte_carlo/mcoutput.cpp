@@ -1293,10 +1293,24 @@ MCOutput::MCOutput(MonteCarlo *pmc, ParameterInput *pin) {
         // Cartesian axes; the alternative branch of UpdateSpectrum has nothing to use.
         // Previously tested cartesian only, which left minkowski and gr_user defaulting
         // to polar_axis = false and then binning uninitialized angle indices.
-        if (pmc->topology == MCTOPO_CARTESIAN)
+        if (pmc->topology == MCTOPO_CARTESIAN) {
           pspec->polar_axis = true;
-        else
-          pspec->polar_axis = pin->GetOrAddBoolean(pib->block_name,"polar_axis",false);
+        } else {
+          // Without a face there is no surface normal to measure against, so every
+          // escaper is binned against the polar axis; a face makes its normal the default.
+          const bool no_face = (pspec->face == BoundaryFace::undef);
+          pspec->polar_axis = pin->GetOrAddBoolean(pib->block_name,"polar_axis",no_face);
+          if (!pspec->polar_axis && no_face) {
+            std::stringstream msg;
+            msg << "### FATAL ERROR in MCOutputs constructor" << std::endl
+                << "<" << pib->block_name << "> sets polar_axis = false without a face: "
+                << "the angles are then measured against a boundary normal, so name the "
+                << "boundary with face = outer_x1 (or another face), or leave polar_axis "
+                << "unset to bin every escaping sample against the polar axis."
+                << std::endl;
+            ATHENA_ERROR(msg);
+          }
+        }
         pspec->nsrun = 0;
         // Check for coordinate range
         if (pfirst == nullptr)
@@ -1492,19 +1506,11 @@ void Spectrum::WriteSpectrum(std::string fname, Real tint_out) {
     emid[i] = 0.5*(energies(i)+energies(i+1));
     dnu[i] = (energies(i+1)-energies(i))/h;
   }
-  // First compute normalized intensities, stokes vectors, and errors
-  Real norms;
-  if (nsrun != pmy_mc->nsamp) {
-    norms = static_cast<Real>(nsrun)/static_cast<Real>(pmy_mc->nsamp);
-    printf("nsrun != nsamp: %lld %lld\n",static_cast<long long>(nsrun),
-           static_cast<long long>(pmy_mc->nsamp));
-  } else {
-    norms = 1.;
-  }
+  // First compute normalized intensities, stokes vectors, and errors.
   AthenaArray<Real> intens, errors;
   intens.NewAthenaArray(nintens,nphi,nmu,ne);
   errors.NewAthenaArray(nintens,nphi,nmu,ne);
-  Real fac1 = norms*static_cast<Real>(nmu)*static_cast<Real>(nphi)/2./PI;
+  Real fac1 = static_cast<Real>(nmu)*static_cast<Real>(nphi)/2./PI;
   // One normalization for every plane, intensity and Stokes alike, which is what
   // make_spectrum in athena_mc.py does: it builds a single factor and applies it to the
   // whole intensity array.
@@ -1588,10 +1594,7 @@ void MCOutput::OutputSpectrum(bool wtflag) {
       }
 #endif
       if (Globals::my_rank == 0) {
-        // Add spectrum from this process.  This has to happen with or without MPI: the
-        // copy constructor allocates pspecout empty and sets nsrun = 0, so a serial run
-        // that skipped this wrote an all-zero spectrum -- WriteSpectrum normalizes by
-        // nsrun/nsamp, which is zero, scaling every bin to zero.
+        // Add spectrum from this process.  This has to happen with or without MPI
         pspecout->AddSpectrum(pspect);
 
         std::string filename;

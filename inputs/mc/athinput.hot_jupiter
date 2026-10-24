@@ -1,7 +1,7 @@
 <comment>
 problem = Base hot jupiter problem - volume emissivity of Lya, resonant scattering, ionization tracked with passive scalar
 reference =
-note = for a quick test set <meshblock> nx2 = nx3 = 3 (and <mesh> to match), nlyarec = 0 and lya_surface_emis = false
+note = for a quick test set <meshblock> nx2 = nx3 = 3 (and <mesh> to match), nlyarec = 0 and ntype = 1
 configure = --coord spherical_polar --prob mc_hotjupiter -mc -mpi -hdf5 -h5double --nscalars=1
 
 <job>
@@ -88,7 +88,7 @@ dfloor = 1.e-30
 sfloor = 1.e-30
 
 <montecarlo>
-ntype = 1
+ntype = 2           # one per nonzero sample count below: nion and nlyarec
 iseed   = 123456      # pseudorandom number seed
 tmax = 1.e5
 scattering = user
@@ -111,18 +111,9 @@ nion    = 1000000  # number of euv photon samples
 
 user_dt = 1.e11
 
-# Flags for turning on individual sources of emission
-lya_volume_emis = false
-lya_surface_emis = true
-ion_surface_emis = true
-
 #ion_eqwt = true  # use eq. weight scheme for euv
 #lys_eqwt = true  # use eq. weight scheme for stellar lya
 #lyr_eqwt = true  # use eq. weight scheme for recomb. lya
-
-# Debug flag for turning off opacity entirely
-zero_opacity = false
-escape_after_scatter = false
 
 # Geometry
 incident_from_z = false

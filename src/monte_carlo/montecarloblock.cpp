@@ -422,12 +422,19 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   if (mom_flag_com) moments_com.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
   if (mom_flag_coord)
     moments_coord.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
-  if (pmy_mc->nuser_mom > 0)
+  if (pmy_mc->nuser_mom > 0) {
     moments_user.NewAthenaArray(pmy_mc->nuser_mom,ncells3,ncells2,ncells1);
+    if (pmy_mc->dynamic)
+      userrate.NewAthenaArray(ntype,pmy_mc->nuser_mom,ncells3,ncells2,ncells1);
+  }
   nsrc = 10;
   if (call_srcterms) {
     sourceterms.NewAthenaArray(nsrc,ncells3,ncells2,ncells1);
     sourceterms_error.NewAthenaArray(3,ncells3,ncells2,ncells1);
+    if (pmy_mc->dynamic) {
+      srcrate.NewAthenaArray(ntype,nsrc,ncells3,ncells2,ncells1);
+      srcrate_error.NewAthenaArray(ntype,3,ncells3,ncells2,ncells1);
+    }
   }
   if (mom_flag_scat) {
     // the bins of the scattering moments are those of the mcscat output's own block,
@@ -439,6 +446,10 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     emax_scat = pin->GetReal(scat_block,"emax") * everg;
     moments_scat.NewAthenaArray(nf_scat,ncells3,ncells2,ncells1);
     moments_scat_error.NewAthenaArray(nf_scat,ncells3,ncells2,ncells1);
+    if (pmy_mc->dynamic) {
+      scatrate.NewAthenaArray(ntype,nf_scat,ncells3,ncells2,ncells1);
+      scatrate_error.NewAthenaArray(ntype,nf_scat,ncells3,ncells2,ncells1);
+    }
     dloge_scat = (std::log10(emax_scat/emin_scat))/static_cast<Real>(nf_scat);
     energy_scat.NewAthenaArray(nf_scat+1);
     freq_scat_mid.NewAthenaArray(nf_scat);
@@ -549,6 +560,12 @@ MonteCarloBlock::~MonteCarloBlock() {
     sourceterms.DeleteAthenaArray();
     sourceterms_error.DeleteAthenaArray();
   }
+  // the held rates of a dynamic run; deleting an array never allocated is a no-op
+  srcrate.DeleteAthenaArray();
+  srcrate_error.DeleteAthenaArray();
+  scatrate.DeleteAthenaArray();
+  scatrate_error.DeleteAthenaArray();
+  userrate.DeleteAthenaArray();
   if (pmy_mc->emission_array) emission.DeleteAthenaArray();
   if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) emit_count_.DeleteAthenaArray();
   if (importance.GetSize() > 0) importance.DeleteAthenaArray();
@@ -667,6 +684,11 @@ void MonteCarloBlock::PackForTransfer(std::vector<int> &ib, std::vector<Real> &r
   PackArray(rb, moments_scat_error);
   PackArray(rb, sourceterms);
   PackArray(rb, sourceterms_error);
+  PackArray(rb, srcrate);
+  PackArray(rb, srcrate_error);
+  PackArray(rb, scatrate);
+  PackArray(rb, scatrate_error);
+  PackArray(rb, userrate);
   PackArray(rb, emission);
   const std::string state = pran->SaveState();
   sb.assign(state.begin(), state.end());
@@ -728,6 +750,11 @@ void MonteCarloBlock::UnpackFromTransfer(const std::vector<int> &ib,
   UnpackArray(rb, pr, moments_scat_error, "moments_scat_error");
   UnpackArray(rb, pr, sourceterms, "sourceterms");
   UnpackArray(rb, pr, sourceterms_error, "sourceterms_error");
+  UnpackArray(rb, pr, srcrate, "srcrate");
+  UnpackArray(rb, pr, srcrate_error, "srcrate_error");
+  UnpackArray(rb, pr, scatrate, "scatrate");
+  UnpackArray(rb, pr, scatrate_error, "scatrate_error");
+  UnpackArray(rb, pr, userrate, "userrate");
   UnpackArray(rb, pr, emission, "emission");
   if (pi != ib.size() || pr != rb.size()) {
     std::stringstream msg;
@@ -1036,9 +1063,33 @@ void MonteCarloBlock::CoupleMonteCarloToFluid(Real dt) {
   Real edot_cgs_inv = time_cgs / (rho_cgs * SQR(vel_cgs));
   Real pdot_cgs_inv = time_cgs / (rho_cgs * vel_cgs);
 
+  MeshBlock *pmb = pmy_block;
+  if (pmy_mc->dynamic) {
+    // the held rates, summed over the emission types (StoreTypeRates)
+    const int ntype = pmy_mc->ntype;
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          Real rs0 = 0., rf1 = 0., rf2 = 0., rf3 = 0.;
+          for (int t=0; t<ntype; ++t) {
+            rs0 += srcrate(t,MCRS0,k,j,i);
+            rf1 += srcrate(t,MCRF1,k,j,i);
+            rf2 += srcrate(t,MCRF2,k,j,i);
+            rf3 += srcrate(t,MCRF3,k,j,i);
+          }
+          const Real rho = pmb->phydro->u(IDN,k,j,i);
+          pmb->phydro->u(IEN,k,j,i) += dt * edot_cgs_inv * rs0;
+          pmb->phydro->u(IM1,k,j,i) += dt * pdot_cgs_inv * rf1 * rho;
+          pmb->phydro->u(IM2,k,j,i) += dt * pdot_cgs_inv * rf2 * rho;
+          pmb->phydro->u(IM3,k,j,i) += dt * pdot_cgs_inv * rf3 * rho;
+        }
+      }
+    }
+    return;
+  }
+
   NormalizeSourceTerms(true);
 
-  MeshBlock *pmb = pmy_block;
   for (int k=pmb->ks; k<=pmb->ke; ++k) {
       for (int j=pmb->js; j<=pmb->je; ++j) {
 #pragma omp simd
@@ -1062,10 +1113,12 @@ void MonteCarloBlock::CoupleMonteCarloToFluid(Real dt) {
 //! source normalized as CoupleMonteCarloToFluid applies it
 
 Real MonteCarloBlock::HeldEnergyFraction(Real elapsed) {
-  if (!coupled) return 0.;
+  if (!coupled || srcrate.GetSize() == 0) return 0.;
   const Real edot_cgs_inv = time_cgs / (rho_cgs * SQR(vel_cgs));
-  const Real norm = elapsed * edot_cgs_inv / pmy_mc->tint;
+  // the held rates are already per unit volume and time
+  const Real norm = elapsed * edot_cgs_inv;
   const Real gm1 = pmy_block->peos->GetGamma() - 1.;
+  const int ntype = pmy_mc->ntype;
   MeshBlock *pmb = pmy_block;
   Real frac = 0.;
   for (int k=pmb->ks; k<=pmb->ke; ++k) {
@@ -1073,7 +1126,9 @@ Real MonteCarloBlock::HeldEnergyFraction(Real elapsed) {
       for (int i=pmb->is; i<=pmb->ie; ++i) {
         const Real eint = pmb->phydro->w(IPR,k,j,i) / gm1;
         if (eint > 0.) {
-          const Real de = norm * std::abs(sourceterms(MCRS0,k,j,i)) / pcoord->vol(k,j,i);
+          Real rs0 = 0.;
+          for (int t=0; t<ntype; ++t) rs0 += srcrate(t,MCRS0,k,j,i);
+          const Real de = norm * std::abs(rs0);
           frac = std::max(frac, de / eint);
         }
       }
@@ -1476,21 +1531,22 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
   // commute, but doing it here keeps the derived array in step with what is written out.
   if (mom_flag_com && !accumulate_com && normalize) DeriveComovingMoments();
 
-  // Get integration time
-  // Fix for dynamic MC
+  // the integration time: that of each type's last transport for the per-type
+  // frames, the current one for the arrays accumulated over types
   Real tint = pmy_mc->tint;
   Real norm;
 
   if (mom_flag_lab) {
     for (int m=0; m<pmy_mc->ntype; ++m) {
+      const Real tm = pmy_mc->TintOfType(m);
       for (int n=0; n<nmom-3; ++n) {
         for (int k=ks; k<=ke; ++k) {
           for (int j=js; j<=je; ++j) {
             for (int i=is; i<=ie; ++i) {
               if (normalize) {
-                norm = 1./ (tint * pcoord->vol(k,j,i));
+                norm = 1./ (tm * pcoord->vol(k,j,i));
               } else {
-                norm = tint * pcoord->vol(k,j,i);
+                norm = tm * pcoord->vol(k,j,i);
               }
               moments(m,n,k,j,i) *= norm;
             }
@@ -1514,14 +1570,15 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
 
   if (mom_flag_com) {
     for (int m=0; m<pmy_mc->ntype; ++m) {
+      const Real tm = pmy_mc->TintOfType(m);
       for (int n=0; n<nmom-3; ++n) {
         for (int k=ks; k<=ke; ++k) {
           for (int j=js; j<=je; ++j) {
             for (int i=is; i<=ie; ++i) {
               if (normalize)
-                norm = 1./ (tint * pcoord->vol(k,j,i));
+                norm = 1./ (tm * pcoord->vol(k,j,i));
               else
-                norm = tint * pcoord->vol(k,j,i);
+                norm = tm * pcoord->vol(k,j,i);
               moments_com(m,n,k,j,i) *= norm;
             }
           }
@@ -1544,14 +1601,15 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
 
   if (mom_flag_coord) {
     for (int m=0; m<pmy_mc->ntype; ++m) {
+      const Real tm = pmy_mc->TintOfType(m);
       for (int n=0; n<nmom-3; ++n) {
         for (int k=ks; k<=ke; ++k) {
           for (int j=js; j<=je; ++j) {
             for (int i=is; i<=ie; ++i) {
               if (normalize)
-                norm = 1./ (tint * pcoord->vol(k,j,i));
+                norm = 1./ (tm * pcoord->vol(k,j,i));
               else
-                norm = tint * pcoord->vol(k,j,i);
+                norm = tm * pcoord->vol(k,j,i);
               moments_coord(m,n,k,j,i) *= norm;
             }
           }
@@ -1572,11 +1630,28 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
     }
   } // end if (mom_flag_com)
 
+  // The scattering and user moments are accumulated over the types.  In a dynamic run
+  // each type's share was converted to a held rate by StoreTypeRates and the accumulator
+  // is idle between transports, so for the output it receives the rates summed over the
+  // types, the errors in quadrature, and is cleared again afterwards.
+  const int ntype = pmy_mc->ntype;
   if (mom_flag_scat) {
     for (int n=0; n<nf_scat; ++n) {
       for (int k=ks; k<=ke; ++k) {
         for (int j=js; j<=je; ++j) {
           for (int i=is; i<=ie; ++i) {
+            if (pmy_mc->dynamic) {
+              Real rate = 0., err2 = 0.;
+              if (normalize) {
+                for (int t=0; t<ntype; ++t) {
+                  rate += scatrate(t,n,k,j,i);
+                  err2 += SQR(scatrate_error(t,n,k,j,i));
+                }
+              }
+              moments_scat(n,k,j,i) = rate;
+              moments_scat_error(n,k,j,i) = std::sqrt(err2);
+              continue;
+            }
             if (normalize)
               norm = 1./ (tint * pcoord->vol(k,j,i));
             else
@@ -1599,6 +1674,13 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
       for (int k=ks; k<=ke; ++k) {
         for (int j=js; j<=je; ++j) {
           for (int i=is; i<=ie; ++i) {
+            if (pmy_mc->dynamic) {
+              Real rate = 0.;
+              if (normalize)
+                for (int t=0; t<ntype; ++t) rate += userrate(t,n,k,j,i);
+              moments_user(n,k,j,i) = rate;
+              continue;
+            }
             if (normalize)
               norm = 1./ (tint * pcoord->vol(k,j,i));
             else
@@ -1613,23 +1695,91 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MonteCarloBlock::ResetMoments()
-//! \brief set moments to zero on block
+//! \fn void MonteCarloBlock::ResetMoments(int etype)
+//! \brief set moments to zero on block: every array for etype < 0 (a static run before
+//! its transport), or one type's slot of the per-type frames plus the shared accumulators
+//! (a dynamic run before that type's transport; the other types keep their held rates)
 
-void MonteCarloBlock::ResetMoments() {
+void MonteCarloBlock::ResetMoments(int etype) {
   // Every moment array that exists, ghost cells included.  Which arrays exist depends
   // on the outputs and user moments requested, and call_moments is true if any does:
   // this used to zero the lab array alone, which is not allocated when only user
   // moments are enrolled (a segfault at the top of every dynamic cycle), and it left
   // the other frames and the user moments accumulating across cycles.
-  AthenaArray<Real> *arrays[] = {&moments, &moments_com, &moments_coord, &moments_user,
-                                 &moments_scat, &moments_scat_error};
-  for (AthenaArray<Real> *a : arrays) {
+  AthenaArray<Real> *per_type[] = {&moments, &moments_com, &moments_coord};
+  AthenaArray<Real> *shared[] = {&moments_user, &moments_scat, &moments_scat_error};
+  for (AthenaArray<Real> *a : per_type) {
+    if (a->GetSize() == 0) continue;
+    if (etype < 0) {
+      std::fill(a->data(), a->data() + a->GetSize(), 0.0);
+    } else {
+      // the slot of one type is contiguous: (type, n, k, j, i)
+      const std::size_t slot = static_cast<std::size_t>(a->GetDim4()) * a->GetDim3()
+                               * a->GetDim2() * a->GetDim1();
+      Real *p = a->data() + static_cast<std::size_t>(etype) * slot;
+      std::fill(p, p + slot, 0.0);
+    }
+  }
+  for (AthenaArray<Real> *a : shared) {
     if (a->GetSize() > 0) std::fill(a->data(), a->data() + a->GetSize(), 0.0);
   }
   // Nothing held back can belong to the cycle that is starting.
   scat_pend_sum_ = 0.0;
   scat_pend_n_ = -1;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::StoreTypeRates(int etype)
+//! \brief dynamic runs: convert the type's accumulated source terms, scattering moments
+//! and user moments to rates (per unit volume and time, errors as standard errors), hold
+//! them in the type's slot, and clear the accumulators for the next type
+
+void MonteCarloBlock::StoreTypeRates(int etype) {
+  FlushPendingErrors();
+  const Real tint = pmy_mc->tint;
+  if (srcrate.GetSize() > 0) {
+    for (int k=ks; k<=ke; ++k) {
+      for (int j=js; j<=je; ++j) {
+        for (int i=is; i<=ie; ++i) {
+          const Real norm = 1. / (tint * pcoord->vol(k,j,i));
+          for (int n=0; n<nsrc; ++n)
+            srcrate(etype,n,k,j,i) = sourceterms(n,k,j,i) * norm;
+          for (int d=0; d<3; ++d)
+            srcrate_error(etype,d,k,j,i) = std::sqrt(sourceterms_error(d,k,j,i)) * norm;
+        }
+      }
+    }
+    ResetSourceTerms();
+  }
+  if (scatrate.GetSize() > 0) {
+    for (int n=0; n<nf_scat; ++n) {
+      for (int k=ks; k<=ke; ++k) {
+        for (int j=js; j<=je; ++j) {
+          for (int i=is; i<=ie; ++i) {
+            const Real norm = 1. / (tint * pcoord->vol(k,j,i));
+            scatrate(etype,n,k,j,i) = moments_scat(n,k,j,i) * norm;
+            scatrate_error(etype,n,k,j,i) = std::sqrt(moments_scat_error(n,k,j,i)) * norm;
+          }
+        }
+      }
+    }
+    std::fill(moments_scat.data(), moments_scat.data() + moments_scat.GetSize(), 0.0);
+    std::fill(moments_scat_error.data(),
+              moments_scat_error.data() + moments_scat_error.GetSize(), 0.0);
+    scat_pend_sum_ = 0.0;
+    scat_pend_n_ = -1;
+  }
+  if (userrate.GetSize() > 0) {
+    for (int n=0; n<pmy_mc->nuser_mom; ++n) {
+      for (int k=ks; k<=ke; ++k) {
+        for (int j=js; j<=je; ++j) {
+          for (int i=is; i<=ie; ++i)
+            userrate(etype,n,k,j,i) = moments_user(n,k,j,i) / (tint * pcoord->vol(k,j,i));
+        }
+      }
+    }
+    std::fill(moments_user.data(), moments_user.data() + moments_user.GetSize(), 0.0);
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -1754,6 +1904,32 @@ void MonteCarloBlock::NormalizeSourceTerms(bool normalize) {
 
   // nothing should be pending here; see NormalizeMoments
   FlushForceError();
+
+  if (pmy_mc->dynamic) {
+    // The accumulator is idle between transports (StoreTypeRates): for the output it
+    // receives the held rates summed over the types, the errors in quadrature, and is
+    // cleared again afterwards.
+    const int ntype = pmy_mc->ntype;
+    for (int k=ks; k<=ke; ++k) {
+      for (int j=js; j<=je; ++j) {
+        for (int i=is; i<=ie; ++i) {
+          for (int n=0; n<nsrc; ++n) {
+            Real rate = 0.;
+            if (normalize)
+              for (int t=0; t<ntype; ++t) rate += srcrate(t,n,k,j,i);
+            sourceterms(n,k,j,i) = rate;
+          }
+          for (int d=0; d<3; ++d) {
+            Real err2 = 0.;
+            if (normalize)
+              for (int t=0; t<ntype; ++t) err2 += SQR(srcrate_error(t,d,k,j,i));
+            sourceterms_error(d,k,j,i) = std::sqrt(err2);
+          }
+        }
+      }
+    }
+    return;
+  }
 
   // Get integration time
   Real tint = pmy_mc->tint;

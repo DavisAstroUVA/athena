@@ -11,7 +11,9 @@ polarization fraction in percent and the polarization angle in degrees, or with 
 qu the normalized Stokes parameters Q/I and U/I; both are linear in y by default.  As in
 plot_spectrum.py, several spectra go on the same axes, --imu and --iphi pick angle bins
 ('sum' integrates over an angle, 'ave' averages over azimuth), and --xunit converts the
-x axis.  A spectrum without Stokes parameters is refused.
+x axis.  A spectrum without Stokes parameters is refused.  --shift180 draws the angle from
+0 to 180 degrees instead of -90 to 90, so that angles near +-90 degrees, which are the
+same orientation, sit together rather than at opposite edges of the panel.
 
 Feautrier comparison
 --------------------
@@ -63,6 +65,8 @@ PANELS = {'fracangle': ('polfrac', 'polangle'), 'qu': ('q', 'u')}
 # of the angle in degrees; Q/I and U/I autoscale
 PANEL_LIMITS = {'fracangle': ((0., 100.), (-90., 90.)),
                 'qu': ((None, None), (None, None))}
+# the angle panel's limits with --shift180
+SHIFT180_LIMITS = (0., 180.)
 
 # relative heights of the intensity panel and the two polarization panels
 HEIGHT_RATIOS = (3, 2, 2)
@@ -139,6 +143,9 @@ def plot_one(spectrum, axes, args, label=None, ffile=None):
                     print(f"  skipping yunit={yunit!r} at imu={imuv}, iphi={iphv}")
                     continue
                 x, y, yerr, xlabel, ylabel = result
+                if yunit == 'polangle' and args.shift180:
+                    # the angle is defined modulo 180 degrees; the error is unchanged
+                    y = np.where(y < 0., y + 180., y)
                 athenamc.make_plot(x, y, yerr=yerr, xlabel=xlabel, ylabel=ylabel, ax=ax,
                                    xscale=args.xscale, yscale=yscale,
                                    xmin=args.xmin, xmax=args.xmax, ymin=ymin, ymax=ymax,
@@ -241,7 +248,12 @@ def parse_args(argv=None):
                              '100 percent for the fraction, autoscaled for Q/I)')
     parser.add_argument('--p2lim', nargs=2, type=float, metavar=('MIN', 'MAX'),
                         help='y limits of the second polarization panel (default: -90 '
-                             'to 90 degrees for the angle, autoscaled for U/I)')
+                             'to 90 degrees for the angle, 0 to 180 with --shift180, '
+                             'autoscaled for U/I)')
+    parser.add_argument('--shift180', action='store_true',
+                        help='draw the polarization angle from 0 to 180 degrees rather '
+                             'than -90 to 90 (default limits 0 to 180); no effect with '
+                             '--panels qu')
     parser.add_argument('--rebinx', type=int,
                         help='amount to rebin x axis by')
     parser.add_argument('--ploterr', action='store_true',
@@ -268,7 +280,8 @@ def parse_args(argv=None):
     if args.p1lim is None:
         args.p1lim = PANEL_LIMITS[args.panels][0]
     if args.p2lim is None:
-        args.p2lim = PANEL_LIMITS[args.panels][1]
+        args.p2lim = (SHIFT180_LIMITS if args.shift180 and args.panels == 'fracangle'
+                      else PANEL_LIMITS[args.panels][1])
 
     # checks that involve more than one option
     if args.labels is not None and len(args.labels) != len(args.infile):
