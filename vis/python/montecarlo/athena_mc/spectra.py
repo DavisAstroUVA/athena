@@ -23,6 +23,8 @@ __all__ = [
     'get_frequency',
     'get_luminosity',
     'family_key',
+    'batch_key',
+    'jackknife',
     'finalize_family_errors',
     'make_spectrum',
 ]
@@ -59,6 +61,10 @@ def write_spectrum(filename,spectrum):
                       + ",".join(f"{k}={v!r}" for k, v in mpars.items()) + "\n")
     if spectrum.get('frame') is not None:
         outfile.write("frame="+spectrum['frame']+"\n")
+    # the jackknife batches, optional and last (see jackknife)
+    batches = spectrum.get('batches')
+    if batches is not None:
+        outfile.write("nbatch={:d}\n".format(batches.shape[0]))
     outfile.close()
 
     # Write binfaces
@@ -80,6 +86,8 @@ def write_spectrum(filename,spectrum):
     if spectrum['yerror'] == 'true':
         bin=struct.pack(myfmt,*(spectrum['errors'].reshape(nelements)))
         outfile.write(bin)
+    if batches is not None:
+        outfile.write(batches.astype('>f8').tobytes())
     outfile.close()
 
 def read_spectrum(filename):
@@ -195,6 +203,13 @@ def read_spectrum(filename):
         spectrum['frame'] = raw_data_ascii[current_index:end_of_line_index].split(' ')[0]
         current_index = end_of_line_index + 1
 
+    # the jackknife batches, written after the errors by a spectrum made with them
+    nbatch = 0
+    if raw_data_ascii.startswith("nbatch=", current_index):
+        current_index += len("nbatch=")
+        end_of_line_index = raw_data_ascii.find('\n', current_index)
+        nbatch = int(raw_data_ascii[current_index:end_of_line_index].split(' ')[0])
+        current_index = end_of_line_index + 1
     # Read in faces
     nx = spectrum['nx']
     format_string = '>' + 'd'*(nx+1)
@@ -228,6 +243,12 @@ def read_spectrum(filename):
         end_index = begin_index + 8*nelements
         vals = np.array(struct.unpack(format_string, raw_data[begin_index:end_index]))
         spectrum['errors'] = vals.reshape((nintens,nphi,nmu,nx))
+    if nbatch > 0:
+        begin_index = end_index
+        end_index = begin_index + 8*nbatch*nelements
+        spectrum['batches'] = np.frombuffer(raw_data[begin_index:end_index],
+                                            dtype='>f8').astype(float)
+        spectrum['batches'] = spectrum['batches'].reshape((nbatch,nintens,nphi,nmu,nx))
     return spectrum
 
 
@@ -348,6 +369,12 @@ def _combine_binned(bin1, bin2, method, kind, has_errors):
         if not np.allclose(bin1[key], bin2[key], rtol=1.0e-12, atol=0.0):
             raise RuntimeError(f'[{name}]: {key} do not match')
 
+    # a spectrum with jackknife batches combines only with one that has the same number
+    if ('batches' in bin1) != ('batches' in bin2) or ('batches' in bin1 and
+            bin1['batches'].shape[0] != bin2['batches'].shape[0]):
+        raise RuntimeError(f'[{name}]: one input carries jackknife batches and the other '
+                           'does not, or their numbers of batches differ')
+
     # the arrays are replaced, never written into, so a shallow copy leaves the inputs
     # untouched
     out = bin1.copy()
@@ -362,6 +389,8 @@ def _combine_binned(bin1, bin2, method, kind, has_errors):
         out['intensity'] = bin1['intensity'] + bin2['intensity']
         if has_errors:
             out['errors'] = np.sqrt(bin1['errors']**2 + bin2['errors']**2)
+        if 'batches' in bin1:
+            out['batches'] = bin1['batches'] + bin2['batches']
         if 'family_sums' in bin1 and 'family_sums' in bin2:
             out['family_sums'] = _merge_family_sums(bin1['family_sums'],
                                                     bin2['family_sums'])
@@ -378,6 +407,8 @@ def _combine_binned(bin1, bin2, method, kind, has_errors):
         if has_errors:
             out['errors'] = np.sqrt((w1*bin1['errors'])**2
                                     + (w2*bin2['errors'])**2)
+        if 'batches' in bin1:
+            out['batches'] = w1*bin1['batches'] + w2*bin2['batches']
         out['dt'] = total_dt
 
     # each list's ntot is the photons run on its rank, so the total is the sum whether
@@ -507,6 +538,54 @@ def family_key(user, tcol, ecol):
             + np.round(np.log(np.maximum(user[:, tcol], 1.))*1e6).astype(np.int64))
 
 
+def batch_key(phots, nbatch, family=None):
+    """
+    One batch index in [0, nbatch) per photon for the jackknife errors (see jackknife),
+    from a hash of the photon's own numbers (its weight, energy and exit position), so
+    that the assignment is random with respect to rank, position and time, and the same
+    whenever the tool is rerun.  With family (see family_key) the key is hashed instead,
+    so the copies a weight window makes of one birth photon share a batch and the
+    batches stay independent of each other.
+    """
+    if family is not None:
+        key = family.astype(np.uint64)
+    else:
+        bits = lambda x: np.ascontiguousarray(x, dtype=np.float64).view(np.uint64)
+        key = bits(phots.weight) ^ (bits(phots.energy) * np.uint64(0x9E3779B97F4A7C15)) \
+              ^ (bits(phots.x1) * np.uint64(0xC2B2AE3D27D4EB4F))
+    # a final mix (splitmix64), so that the low bits taken by the modulus depend on
+    # every bit of the key
+    key = key * np.uint64(0xBF58476D1CE4E5B9)
+    key ^= key >> np.uint64(31)
+    key = key * np.uint64(0x94D049BB133111EB)
+    key ^= key >> np.uint64(29)
+    return (key % np.uint64(nbatch)).astype(np.int64)
+
+
+def jackknife(batches, func, period=None):
+    """
+    Value, error and bias of func(sums) by the jackknife over the batches of a spectrum
+    (make_spectrum's batch argument, make_spectrum.py --nbatch).  With S the sum of the
+    batches, func is evaluated on S and on S less each batch in turn; the scatter of the
+    n leave-one-out values gives the error, (n-1)/n sum_k (f_k - fbar)^2, and the bias
+    estimate is (n-1)(fbar - f(S)).  func takes an array shaped like one batch and
+    returns an array; it is the point function of a derived quantity, so nothing is
+    linearized and the error holds for ratios, fractions and angles alike.  period folds
+    a periodic quantity such as an angle: the leave-one-out values are taken modulo
+    period about the full value before the scatter.
+    """
+    n = batches.shape[0]
+    total = batches.sum(axis=0)
+    value = func(total)
+    leave_out = np.array([func(total - batches[k]) for k in range(n)])
+    if period is not None:
+        leave_out = (leave_out - value + period/2.) % period - period/2. + value
+    mean = leave_out.mean(axis=0)
+    error = np.sqrt((n - 1.)/n * ((leave_out - mean)**2).sum(axis=0))
+    bias = (n - 1.) * (mean - value)
+    return value, error, bias
+
+
 def finalize_family_errors(spectrum):
     """
     Replace the errors of a spectrum made with family keys by the family-level ones:
@@ -545,12 +624,15 @@ def _merge_family_sums(fam1, fam2):
 
 def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1.,
                   nphi=1,phimin=0,phimax=2.*np.pi,yerror=True,mask=None,
-                  xfunc=None,anglebin='cartesian',family=None,**kwargs):
+                  xfunc=None,anglebin='cartesian',family=None,batch=None,nbatch=0,
+                  **kwargs):
     """
     Makes spectrum (dict) from photon object.  With family, an integer key per photon
     (see family_key), the spectrum also carries the per-family, per-bin weight sums
     that finalize_family_errors turns into family-level errors once every chunk and
-    rank of the output has been added in.
+    rank of the output has been added in.  With batch, an index in [0, nbatch) per
+    photon (see batch_key), it also carries the per-batch sums of every plane, from
+    which jackknife gives the error of any quantity derived from the spectrum.
     """
 
     # Store spectrum as a dictionary
@@ -657,6 +739,14 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
         intensity[m] = sum_into_bins(shape, bins, w)
         if yerror:
             errors[m] = sum_into_bins(shape, bins, w**2)
+    batches = None
+    if batch is not None and yerror:
+        # the per-batch sums the jackknife rests on: one more flat bincount per plane,
+        # with the batch as the leading index
+        vbatch = batch[valid_phots]
+        batches = np.zeros((nbatch, nintens, nphi, nmu, nx))
+        for m, w in enumerate(plane_weights):
+            batches[:, m] = sum_into_bins((nbatch,) + shape, (vbatch,) + bins, w)
     if family is not None and yerror:
         # one composite key per (family, plane, bin); the bin index is recovered from it
         # by finalize_family_errors, so the family key is multiplied by the bin count
@@ -714,6 +804,9 @@ def make_spectrum(phots,nx,xmin,xmax,xaxis='kev',logx=True,nmu=1,mumin=0,mumax=1
             spectrum['error_scale'] = np.broadcast_to(fac, intensity.shape).copy()
 
     spectrum['intensity'] = intensity
+    if batches is not None:
+        batches *= fac
+        spectrum['batches'] = batches
 
     # Finish computing errors on intensities
     if yerror:
