@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from .lists import is_polarized, parse_polarization, tracks_circular
-from .spectra import get_frequency
+from .spectra import get_frequency, jackknife
 
 __all__ = [
     'compute_nulnu_error',
@@ -182,6 +182,18 @@ def check_polarization(header, yunit, kind='spectrum'):
         return False
     return True
 
+def _derive(func, intensity, errors, batches, period=None):
+    """
+    Value and error of a quantity derived from the summed planes: func's own error
+    propagation, or the jackknife over the batches when the spectrum carries them (see
+    spectra.jackknife), in which case func supplies only the point value.
+    """
+    if batches is None:
+        return func(intensity, errors)
+    value, error, _ = jackknife(batches, lambda a: func(a, None)[0], period=period)
+    return value, error
+
+
 def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
                    plterr=True, nu=None, rebinx=None):
     """
@@ -223,6 +235,13 @@ def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
         errors = spectrum['errors']
     else:
         errors = None
+    # The jackknife batches, when the spectrum carries them, ride along as extra leading
+    # planes through the angle and energy selections below, which act on the other axes
+    nintens, batches = intensity.shape[0], None
+    if plterr and spectrum.get('batches') is not None:
+        nbatch = spectrum['batches'].shape[0]
+        intensity = np.concatenate([intensity, spectrum['batches'].reshape(
+            (nbatch*nintens,) + intensity.shape[1:])])
 
     # Selection for azimuthal angle
     if ((iphi == 'ave') or (iphi == 'sum')):
@@ -255,34 +274,37 @@ def plot_frequency(spectrum, imu='sum', iphi='ave', xunit='kev', yunit='nulnu',
     # Set y, yerr, and ylabel according to input units
     yerr = None
     ylabel = None
+    if plterr and spectrum.get('batches') is not None:
+        batches = intensity[nintens:].reshape((nbatch, nintens) + intensity.shape[1:])
+        intensity = intensity[:nintens]
     if yunit == 'nulnu':
         # nu L_nu and lambda L_lambda are the same quantity; name it after the axis
         if xunit == 'lambda':
             ylabel = r"$\lambda L_\lambda~{\rm (erg/s)}$"
         else:
             ylabel = r"$\nu L_\nu~{\rm (erg/s)}$"
-        y, yerr = compute_nulnu_error(intensity,nu,errors)
+        y, yerr = _derive(lambda a, e: compute_nulnu_error(a, nu, e), intensity, errors, batches)
     elif yunit == 'lnu':
         ylabel = r"$L_\nu~{\rm (erg/s/Hz)}$"
-        y, yerr = compute_lnu_error(intensity,errors)
+        y, yerr = _derive(compute_lnu_error, intensity, errors, batches)
     elif yunit == 'counts':
         ylabel = r"$N_\nu~{\rm (counts/s/Hz)}$"
-        y, yerr = compute_counts_error(intensity,nu,errors)
+        y, yerr = _derive(lambda a, e: compute_counts_error(a, nu, e), intensity, errors, batches)
     elif yunit == 'polfrac':
         ylabel = r"$\rm Pol.\; Fraction \; (\%)$"
-        y, yerr = compute_pol_frac_error(intensity,errors)
+        y, yerr = _derive(compute_pol_frac_error, intensity, errors, batches)
     elif yunit == 'polangle':
         ylabel = r"$\rm Pol.\; Angle$"
-        y, yerr = compute_pol_angle_error(intensity,errors)
+        y, yerr = _derive(compute_pol_angle_error, intensity, errors, batches, period=180.)
     elif yunit == 'q':
         ylabel = r"$Q_\nu/I_\nu$"
-        y, yerr = compute_q_error(intensity,errors)
+        y, yerr = _derive(compute_q_error, intensity, errors, batches)
     elif yunit == 'u':
         ylabel = r"$U_\nu/I_\nu$"
-        y, yerr = compute_u_error(intensity,errors)
+        y, yerr = _derive(compute_u_error, intensity, errors, batches)
     elif yunit == 'v':
         ylabel = r"$V_\nu/I_\nu$"
-        y, yerr = compute_v_error(intensity,errors)
+        y, yerr = _derive(compute_v_error, intensity, errors, batches)
     else:
         print("Error: yunit ("+yunit+") not specified correctly")
         return None
@@ -332,6 +354,13 @@ def plot_theta(spectrum,ix,iphi='ave',xunit='mu',yunit='lnu',
         errors = spectrum['errors']
     else:
         errors = None
+    # The jackknife batches, when the spectrum carries them, ride along as extra leading
+    # planes through the angle and energy selections below, which act on the other axes
+    nintens, batches = intensity.shape[0], None
+    if plterr and spectrum.get('batches') is not None:
+        nbatch = spectrum['batches'].shape[0]
+        intensity = np.concatenate([intensity, spectrum['batches'].reshape(
+            (nbatch*nintens,) + intensity.shape[1:])])
 
     # Selection for azimuthal angle
     if ((iphi == 'ave') or (iphi == 'sum')):
@@ -364,33 +393,36 @@ def plot_theta(spectrum,ix,iphi='ave',xunit='mu',yunit='lnu',
     # Set y, yerr, and ylabel according to input units
     yerr = None
     ylabel = None
+    if plterr and spectrum.get('batches') is not None:
+        batches = intensity[nintens:].reshape((nbatch, nintens) + intensity.shape[1:])
+        intensity = intensity[:nintens]
     if yunit == 'nulnu':
         ylabel = r"$\nu L_\nu {\rm (erg/s)}$"
-        y, yerr = compute_nulnu_error(intensity,nu,errors)
+        y, yerr = _derive(lambda a, e: compute_nulnu_error(a, nu, e), intensity, errors, batches)
     elif yunit == 'lnu':
         ylabel = r"$L_\nu {\rm (erg/s/Hz)}$"
-        y, yerr = compute_lnu_error(intensity,errors)
+        y, yerr = _derive(compute_lnu_error, intensity, errors, batches)
     elif yunit == 'counts':
         ylabel = r"$N_\nu {\rm (counts/s/Hz)}$"
-        y, yerr = compute_counts_error(intensity,nu,errors)
+        y, yerr = _derive(lambda a, e: compute_counts_error(a, nu, e), intensity, errors, batches)
     elif yunit == 'polfrac':
         ylabel = r"$\rm Pol.\; Fraction \; (\%)$"
-        y, yerr = compute_pol_frac_error(intensity,errors)
+        y, yerr = _derive(compute_pol_frac_error, intensity, errors, batches)
     elif yunit == 'polangle':
         ylabel = r"$\rm Pol.\; Angle$"
-        y, yerr = compute_pol_angle_error(intensity,errors)
+        y, yerr = _derive(compute_pol_angle_error, intensity, errors, batches, period=180.)
     elif yunit == 'q':
         ylabel = r"$Q_\nu/I_\nu$"
-        y, yerr = compute_q_error(intensity,errors)
+        y, yerr = _derive(compute_q_error, intensity, errors, batches)
     elif yunit == 'u':
         ylabel = r"$U_\nu/I_\nu$"
-        y, yerr = compute_u_error(intensity,errors)
+        y, yerr = _derive(compute_u_error, intensity, errors, batches)
     elif yunit == 'v':
         ylabel = r"$V_\nu/I_\nu$"
-        y, yerr = compute_v_error(intensity,errors)
+        y, yerr = _derive(compute_v_error, intensity, errors, batches)
     elif yunit == 'fluxfrac':
         ylabel = r"$I_\nu/F_\nu$"
-        y, yerr = compute_flux_frac_error(intensity,xfaces,errors)
+        y, yerr = _derive(lambda a, e: compute_flux_frac_error(a, xfaces, e), intensity, errors, batches)
 
     if verbose:
         print(yunit)
@@ -436,6 +468,13 @@ def plot_phi(spectrum, ix, imu='sum', xunit='phi', yunit='lnu',
         errors = spectrum['errors']
     else:
         errors = None
+    # The jackknife batches, when the spectrum carries them, ride along as extra leading
+    # planes through the angle and energy selections below, which act on the other axes
+    nintens, batches = intensity.shape[0], None
+    if plterr and spectrum.get('batches') is not None:
+        nbatch = spectrum['batches'].shape[0]
+        intensity = np.concatenate([intensity, spectrum['batches'].reshape(
+            (nbatch*nintens,) + intensity.shape[1:])])
 
     # Selection for polar angle
     if imu == 'sum':
@@ -467,33 +506,36 @@ def plot_phi(spectrum, ix, imu='sum', xunit='phi', yunit='lnu',
     # Set y, yerr, and ylabel according to input units
     yerr = None
     ylabel = None
+    if plterr and spectrum.get('batches') is not None:
+        batches = intensity[nintens:].reshape((nbatch, nintens) + intensity.shape[1:])
+        intensity = intensity[:nintens]
     if yunit == 'nulnu':
         ylabel = r"$\nu L_\nu~{\rm (erg/s)}$"
-        y, yerr = compute_nulnu_error(intensity,nu,errors)
+        y, yerr = _derive(lambda a, e: compute_nulnu_error(a, nu, e), intensity, errors, batches)
     elif yunit == 'lnu':
         ylabel = r"$L_\nu {\rm (erg/s/Hz)}$"
-        y, yerr = compute_lnu_error(intensity,errors)
+        y, yerr = _derive(compute_lnu_error, intensity, errors, batches)
     elif yunit == 'counts':
         ylabel = r"$N_\nu {\rm (counts/s/Hz)}$"
-        y, yerr = compute_counts_error(intensity,nu,errors)
+        y, yerr = _derive(lambda a, e: compute_counts_error(a, nu, e), intensity, errors, batches)
     elif yunit == 'polfrac':
         ylabel = r"$\rm Pol.\; Fraction \; (\%)$"
-        y, yerr = compute_pol_frac_error(intensity,errors)
+        y, yerr = _derive(compute_pol_frac_error, intensity, errors, batches)
     elif yunit == 'polangle':
         ylabel = r"$\rm Pol.\; Angle$"
-        y, yerr = compute_pol_angle_error(intensity,errors)
+        y, yerr = _derive(compute_pol_angle_error, intensity, errors, batches, period=180.)
     elif yunit == 'q':
         ylabel = r"$Q_\nu/I_\nu$"
-        y, yerr = compute_q_error(intensity,errors)
+        y, yerr = _derive(compute_q_error, intensity, errors, batches)
     elif yunit == 'u':
         ylabel = r"$U_\nu/I_\nu$"
-        y, yerr = compute_u_error(intensity,errors)
+        y, yerr = _derive(compute_u_error, intensity, errors, batches)
     elif yunit == 'v':
         ylabel = r"$V_\nu/I_\nu$"
-        y, yerr = compute_v_error(intensity,errors)
+        y, yerr = _derive(compute_v_error, intensity, errors, batches)
     elif yunit == 'fluxfrac':
         ylabel = r"$I_\nu/F_\nu$"
-        y, yerr = compute_flux_frac_error(intensity,xfaces,errors)
+        y, yerr = _derive(lambda a, e: compute_flux_frac_error(a, xfaces, e), intensity, errors, batches)
 
     # Return x and y variables, there labels, and possible error on y
     return x,y,yerr,xlabel,ylabel
