@@ -1,0 +1,437 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\newcommand{\key}[1]{\texttt{#1}}
+\newcommand{\dd}{\mathrm{d}}
+
+\title{Electron-scattering acceleration by a modified random walk:\\
+the step as implemented, in Cartesian and spherical-polar cells, at rest, in a moving
+medium and in curved spacetime}
+\author{Athena++ Monte Carlo radiation transport}
+\date{}
+
+\begin{document}
+\sloppy
+\maketitle
+
+\section{What the step does and where it lives}
+
+A photon deep inside an optically thick cell scatters many times before it leaves.
+The modified random walk (MRW) of Fleck \& Canfield (1984), as used by Min et al.\
+(2009) and simplified by Robitaille (2010), replaces those scatterings by one draw from
+the diffusion equation: the time the photon takes to reach the boundary of a region in
+which the medium is uniform, and the point on that boundary where it arrives.  For
+Thomson scattering that is the whole step.  For Compton scattering the photon's energy
+also changes along the way; given the Thomson path $\tau_{\rm path}$ the walk covered,
+the final energy is drawn from the Green's function of the Kompaneets equation at
+Compton parameter $y=\theta\tau_{\rm path}$, $\theta=kT/m_ec^2$, and with free-free
+absorption the photon carries the survival fraction $S(y)$ as a weight.  The Green's
+function, its absorbed form, the quantile tables and their validation are the subject
+of \texttt{doc/monte\-\_carlo/kompaneets/kompaneets\_greens\_method.tex} and are not
+repeated here; this document is about the step itself.
+
+The code is in \texttt{src/monte\_carlo/mrw.cpp} (the step and its tables), with the
+table reader and sampler of the Green's function in \texttt{kgreens.cpp}.  The pushers
+call it from the branch of their transport loop that would otherwise place an
+interaction inside the current cell: Cartesian and spherical-polar pushers through
+\texttt{MRWTrigger} and \texttt{MRWStep}, the general pusher through the same two with
+its own frame construction (\texttt{GeneralPusher::MRWFrame}).  The step ends the free
+flight: on return the photon has a new position, an isotropic new direction, an energy
+and a weight, and the pusher draws a fresh optical depth and continues, so the block
+loop never treats the step as an interaction.  The input keys are collected in
+Section~\ref{sec:keys}.
+
+Everything in the step is dimensionless until the last moment, so one set of tables
+serves every cell of every run.  For a diffusion coefficient $D=1/(3\chi)$, with $\chi$
+the comoving extinction, and a domain of size $L$, the natural time is
+\begin{equation}
+  s=\frac{\pi^2 D\,ct}{L^2},
+\end{equation}
+in which the slowest mode of the absorbing-boundary problem decays as $e^{-s}$ and the
+Thomson path is $\tau_{\rm path}=\chi\,ct$.
+
+\section{A fixed-time step rather than a fixed-radius one}
+\label{sec:fixedtime}
+
+The textbook step draws the first-passage time to a sphere of fixed radius $R_0$ and
+places the photon on it.  That is the right step only when the medium is at rest on the
+grid.  Three things want the time chosen first and the position second:
+\begin{itemize}
+\item In a moving medium the fluid element advects by $\beta\gamma ct$ in the lab over
+  comoving time $t$, and for a fast enough flow the region reaches a cell face by
+  advection before the photon reaches its surface by diffusion.
+\item In a dynamic run the photon has a time budget, the remainder of the cycle
+  (\texttt{Photon::dtp}), which a first-passage draw ignores.
+\item In curved spacetime the comoving frame is defined at an instant and the cell is
+  a patch of spacetime; a time is the natural thing to bound.
+\end{itemize}
+So the step is: choose a comoving time budget $t_b$; with probability $1-P(t_b)$, where
+$P$ is the fraction of walkers still inside the domain at $t_b$, the photon reached the
+boundary earlier, at a time $t_e$ drawn from the first-passage distribution conditioned
+on $t_e<t_b$, and is placed on the boundary; otherwise it is still inside at $t_b$, at a
+position drawn from the fixed-time solution, and $t_e=t_b$.  Both outcomes are isotropic
+in the new direction.  With no budget and a medium at rest the first branch is always
+taken and the step reduces to the fixed-radius one of the references.  The budget is the
+smallest of the advection room (Section~\ref{sec:advection}), the cycle remainder, and
+the time at which $P$ has fallen to \key{accel\_pmax} (0 by default, meaning no cap).
+
+\section{The domain: the cell itself, or a sphere inside it}
+\label{sec:domain}
+
+\subsection{Why the sphere leaves a dead zone}
+
+The sphere of the references is the largest that fits around the photon inside its
+cell, so a step is possible only where the distance to the nearest face exceeds the
+threshold, a fraction $((L-\tau_a)/L)^3$ of a cubic cell of optical half-width $L$ and
+threshold $\tau_a$; and every step lands the photon on the sphere, at distance zero from
+a face, from where it random-walks about $\tau_a^2$ scatterings before it can step again.
+On the gridded sphere of the tests ($8^3$ cells) the sphere domain replaced 13 percent of
+the scatterings at $\tau=100$ ($L=15.6$, $\tau_a=10$) and 66 percent at $\tau=1000$
+($L=156$, $\tau_a=20$), each within a few percent of the active-volume estimate.  The
+sphere is kept as \key{accel\_domain = sphere} for comparison and is not the default.
+
+\subsection{The cell as a box}
+
+For a rectangular box with absorbing walls the diffusion Green's function separates into
+three one-dimensional problems, so a photon anywhere in a thick cell can step, and one
+near a face steps out through it.  In one dimension, with walls at $0$ and $W$, start
+$\xi=x_0/W$ and time $\sigma=\pi^2Dct/W^2$:
+\begin{align}
+  S(\xi,\sigma)&=\sum_{n\ \rm odd}\frac{4}{n\pi}\sin(n\pi\xi)\,e^{-n^2\sigma}
+  &&\text{survival},\\
+  g(\xi,\sigma)&=-\frac{\partial\ln S}{\partial\sigma}
+  &&\text{hazard},\\
+  p_0(\xi,\sigma)&=\frac{\sum_n n\sin(n\pi\xi)e^{-n^2\sigma}}
+                       {2\sum_{n\ \rm odd}n\sin(n\pi\xi)e^{-n^2\sigma}}
+  &&\text{probability that the exit is through the wall at 0},\\
+  C(x\,|\,\xi,\sigma)&=\frac1S\sum_n\frac{2}{n\pi}\sin(n\pi\xi)\,[1-\cos(n\pi x/W)]\,e^{-n^2\sigma}
+  &&\text{position CDF, walker still inside}.
+\end{align}
+The survival of the box is the product of the three one-dimensional survivals, each with
+its own $\sigma_i=\pi^2Dct/W_i^2$, so the first-passage time of the box is the solution
+of $\prod_iS_i(\xi_i,\sigma_i(t))=1-u$ for a uniform $u$; the dimension through which the
+photon leaves is drawn in proportion to the hazard rates $\sigma_i'\,g_i$, the side from
+$p_0$, and the positions in the other two dimensions from $C$ at the exit time.  A photon
+still inside at the budget gets all three positions from $C$.
+
+All four functions are tabulated once per rank on a grid in $\xi\in[1/130,1/2]$ (the
+rest by the symmetry $\xi\to1-\xi$) and $\ln\sigma\in[\ln10^{-4},\ln40]$, the position
+quantiles from $\sigma=0.01$ up at 65 levels in single precision.  Outside the grid:
+below $\sigma_{\min}$ the two-image solution in $\mathrm{erf}$ gives $S$, $g$ and
+$p_0$, and the position is a Gaussian of width $\sqrt{2\sigma}/\pi$ about $\xi$ with the
+two nearest images removed by thinning; above $\sigma_{\max}$ only the slowest mode
+survives, $\ln S$ falls linearly in $\sigma$, $g=1$, $p_0=1/2$, and the $\sigma_{\max}$
+positions are reused.  The box survival at the budget, $\ln S_b=\sum_i\ln S_i$, and the
+inversion for the exit time are done on the fly by bisection in $\ln t$, sixty
+iterations of three table lookups each.
+
+\subsection{The sphere, for the record}
+
+The sphere branch tabulates the first-passage CDF $F(s)=1-P(s)$,
+$P(s)=2\sum_n(-1)^{n+1}e^{-n^2s}$, on $\ln s\in[\ln10^{-3},\ln40]$, and the radius of a
+walker still inside, $p(\rho\,|\,s)\propto\rho\sum_nn\sin(n\pi\rho)e^{-n^2s}$, as
+quantiles on $(\ln s,\text{level})$ from $s=0.03$ up; below that the free-space Gaussian
+in $r^2=2Dct\,\chi^2_3$ is exact to $e^{-\pi^2/4s}$.
+
+\section{Energy, weight and the scatterings the step stands for}
+\label{sec:energy}
+
+With coherent scattering (Thomson, isotropic) the energy is unchanged and the weight is
+multiplied by $\exp(-\alpha_{\rm abs}ct)$.  With Compton scattering the step uses the
+quantile table named by \key{kgreens\_file}: $y=\theta\,n_e\sigma_Tct$ with the Thomson
+coefficient of the cell, $x_i=E/kT$ the comoving energy, $\Lambda$ the free-free
+absorption parameter built from the same per-cell prefactor the opacity uses, and the
+table gives $x_f$ at a uniform level and $S$.  The weight is multiplied by $S$; the
+ordinary \key{minweight} roulette applies afterwards as it does everywhere.  Where the
+absorption is not free-free the $\Lambda=0$ slice is used together with the grey factor.
+The scattering count the path implies, $\chi_{\rm sc}ct$, is added to the photon's and
+to the block's \texttt{nmrw\_scat}, which the run report prints beside the steps taken.
+
+The step declines, and the photon scatters normally, outside the Kompaneets description:
+$\theta>0.03$, $x_i\theta>0.05$, $x_i$ outside the table, or
+$\theta\Lambda a(x_i)>0.1$ (absorption too strong for energy and space to separate).  The
+first two are also tested in the trigger, before any frame is built, since a hot corona
+fails them at every interaction and the frame is the expensive part under the general
+pusher.
+
+\section{Moments}
+\label{sec:moments}
+
+The step contributes to the lab moments of the cell it walked in as an isotropic
+comoving radiation field with energy density estimate
+\begin{equation}
+  E_c=\frac{w\,\bar E\,ct}{c},\qquad \bar E=\tfrac12(E_{\rm before}+E_{\rm after}),
+\end{equation}
+the path-length estimator with the whole path, at the mean of the two energies.  Seen
+from the lab frame in which the fluid moves at $\boldsymbol\beta$ with Lorentz factor
+$\gamma$,
+\begin{equation}
+  E=\gamma^2\Bigl(1+\tfrac{\beta^2}{3}\Bigr)E_c,\qquad
+  F^i=\tfrac43\gamma^2\beta^i cE_c,\qquad
+  P^{ij}=E_c\Bigl(\tfrac13\delta^{ij}+\tfrac43\gamma^2\beta^i\beta^j\Bigr),
+\end{equation}
+which \texttt{MonteCarloBlock::UpdateMomentsMRW} deposits into \texttt{MCIER},
+\texttt{MCIFR}$_i$ and the six pressure components.  Under the general pusher the lab
+frame is the normal observer's and $\boldsymbol\beta$ is the fluid's velocity on its
+tetrad legs.  This is exact in expectation over many steps and approximate for one; the
+scattering-source moments (\texttt{mom\_flag\_scat}), which bin the energy, receive
+nothing from the step, so the Compton source terms of a cell that is mostly walked are
+under-sampled.  In the static post-processing runs the step was built for, the moments
+are not the product; in a coupled run that would need attention.
+
+\section{A moving medium: the comoving frame and the advection room}
+\label{sec:advection}
+
+The walk is done in the comoving frame, where the medium is at rest and the Green's
+function applies.  The photon enters it with the block loop's own
+\texttt{TransformToComoving} and leaves it with \texttt{TransformToCoordinate}, so its
+energy, direction and opacities are in the right frame without new code; what is new is
+the geometry.
+
+Over comoving time $t$ the fluid element moves $\boldsymbol\beta\gamma ct$ in the lab,
+and the cell is fixed in the lab, so the domain plus that displacement has to stay inside
+the cell.  A fraction $f$ of the nearest-face distance $d$ is set aside for advection
+and the rest is the domain.  $f$ is chosen so that the expected diffusion time across
+the domain, $(1-f)^2d^2\chi/2$, carries the centre just the distance set aside,
+$fd=\beta\gamma c\,t$, i.e.\ with $a=\tfrac12\beta\gamma\chi d$,
+\begin{equation}
+  f=\frac{(2a+1)-\sqrt{4a+1}}{2a},\qquad f\le\tfrac12,
+\end{equation}
+small for a slow flow and approaching the cap when advection would cross the cell before
+the walk could leave even a small domain, in which case the thickness test fails and the
+step declines (counted as ``too thin'').  The box is shrunk on its downstream side in
+each dimension by $fd\,|\beta_i|/|\boldsymbol\beta|$ and the walk takes place in the
+shrunken box; the comoving time budget is $t_b=fd/(\beta\gamma c)$, or less if the cycle
+remainder is shorter.  On exit the lab displacement along the box axes is the comoving
+one plus $\boldsymbol\beta\gamma ct_e$, and the lab time advances by $\gamma ct_e$.
+Lorentz contraction of the box is neglected.
+
+On the gridded sphere with a uniform flow of $0.1c$ and $0.3c$ through the fixed escape
+surface, the walk agreed with the analog run of the same deck to $0.7$ and $0.6$ of the
+two-sample Kolmogorov scale in the escaping spectrum, with mean escaping energies
+1.2 and 0.6 percent low and escape paths 1.5 and 2 percent short; the energy deficit
+follows the path shortening (Section~\ref{sec:thresholds}) rather than growing with
+$\beta$.
+
+\section{Cartesian cells, and spherical-polar cells}
+\label{sec:cells}
+
+In a Cartesian cell the box is the cell and the box axes are the coordinate axes; the
+widths and the photon's offsets from the lower faces come straight from the face
+coordinates (\texttt{PhotonPusher::CellGeometry}), in code length, and the displacement
+is added to the position.
+
+A spherical-polar cell is treated as the box
+\begin{equation}
+  W_r=\Delta r,\qquad W_\theta=r\,\Delta\theta,\qquad W_\phi=r\sin\theta\,\Delta\phi
+\end{equation}
+at the photon's $r$ and $\theta$, with offsets $r-r_f$, $r(\theta-\theta_f)$,
+$r\sin\theta(\phi-\phi_f)$, in the pusher's local orthonormal $(\hat r,\hat\theta,\hat\phi)$
+basis, the one its directions and the per-cell velocity \texttt{vel} are expressed in.
+The walk's displacement, with the advection, is then a vector in that basis; it is
+carried to Cartesian components at the photon,
+\begin{equation}
+  \begin{pmatrix}e_x\\e_y\\e_z\end{pmatrix}=
+  \begin{pmatrix}\sin\theta\cos\phi&\cos\theta\cos\phi&-\sin\phi\\
+                 \sin\theta\sin\phi&\cos\theta\sin\phi&\cos\phi\\
+                 \cos\theta&-\sin\theta&0\end{pmatrix}
+  \begin{pmatrix}d_r\\d_\theta\\d_\phi\end{pmatrix},
+\end{equation}
+added to the photon's Cartesian position, and converted back to $(r,\theta,\phi)$.  The
+legacy implementation did this with sign errors in the $\hat\theta$ and $\hat\phi$
+columns; the matrix above is the orthonormal basis of spherical coordinates written out.
+
+What the box approximation means for a curvilinear cell: the faces are not planes.  The
+$\theta$ and $\phi$ faces of a cell are surfaces of constant angle, and a straight
+displacement in the local basis of the photon's starting point ends at a different $r$
+and $\theta$ from the one the box arithmetic assumed, by amounts of order the cell's
+angular extent times its size.  For cells with $\Delta\theta$ and $\Delta\phi$ of a few
+degrees, and away from the axis and the origin, this is a few percent of the cell
+width, the same order as the geodesic curvature across a Kerr-Schild cell that the
+general pusher's step also neglects, and it is caught in the same way: the cell update
+after the step finds the photon's true cell, and the boundary functions run if the
+rounding or the curvature put it across a block face.  Where the approximation is poor
+is where the cell itself is poorly described as a box, within a few cells of the origin
+in $r$, where $W_\theta$ varies across the cell by the ratio of the inner to the outer
+radius, and near the polar axis, where $W_\phi\to0$ and the general pusher has defects
+of its own that the polar-axis notes record.  The trigger will seldom fire there, since
+such cells are thin in at least one direction, but a problem that is thick near its
+origin or axis should mask those cells (\texttt{accel\_mask}) rather than trust the box.
+The spherical-polar branch of the step has run through the pusher's own tests and the
+sphere problem on a Cartesian grid; a Thomson atmosphere in spherical polar coordinates
+with boosts on, the \texttt{mc\_isoth} deck of the velocity reconstruction plan, is the
+regression that exercises it directly and is still to be run.
+
+\section{The general pusher: the step in curved spacetime}
+\label{sec:gr}
+
+Under the general pusher the lab frame is the normal observer's orthonormal tetrad at the
+photon, built from the metric pair the pusher caches at the end of its last step
+(\texttt{MetricPairAt}, \texttt{NormalObserver}, \texttt{ConstructTetrad}).  The cell's
+three coordinate edges, $(0,\Delta x^i,0,0)$ and permutations, are projected into that
+tetrad; their lengths are the box widths $W_i$ and the photon's offsets are its
+coordinate offsets scaled by $W_i/\Delta x^i$.  The fluid's four-velocity at the photon
+(\texttt{FluidFourVelocity}; in flat spacetime the per-cell \texttt{vel} carried onto
+coordinate components with the static tetrad, as \texttt{ComovingFrame} does) gives
+$\gamma=u^{\hat0}$ and the velocity on the tetrad's spatial legs, which is what the
+moments use.  The drift that sets the advection room is a different quantity: the cell
+is fixed in coordinates, so the fluid's drift relative to it is its coordinate velocity
+per unit lab proper time, $u^i/\gamma$, which carries the shift as well as the boost, and
+along box axis $i$ it is $u^i/\gamma$ in units of $W_i/\Delta x^i$.  The step then runs
+exactly as in Section~\ref{sec:advection} with that $\boldsymbol\beta$.
+
+On exit the displacement along each box axis is a fraction of the corresponding
+coordinate edge, so the coordinate position advances by $db_i\,\Delta x^i/W_i$, and the
+coordinate time by the lab proper time over the lapse, $\gamma ct_e/\alpha$.  The new
+direction is drawn isotropically in the comoving frame and carried to coordinate
+components by \texttt{TransformToCoordinate} with the comoving tetrad \emph{at the exit
+point}, which is where the change of redshift and of fluid velocity across the step
+enters, to first order in the cell size; nothing in the step itself knows about the
+metric's variation.  Curvature within the cell is neglected.  A polarized photon comes
+out of the step unpolarized: its Stokes intensity is read off the coherency tensor before
+the walk, $Q=U=V=0$ afterwards, and the tensor rebuilt for the new direction before the
+transform back.
+
+Two things learned the hard way, both fixed: the transform back to coordinate components
+must happen before the cell update, since the update can hand the photon to another
+block, which expects coordinate components, and a photon that crossed carrying a
+comoving unit direction came out with energies of either sign and time running
+backwards; and the advection room has to use the full coordinate drift $u^i/\gamma$,
+not the velocity relative to the normal observer alone, since near the hole the shift is
+as large as the boost.
+
+In flat spacetime with \key{general\_pusher = true} the same code runs with the
+Minkowski tetrad, and on the gridded sphere the general pusher's walk agreed with its
+analog run to $0.6$ (spectrum) and $0.8$ (paths) of the two-sample scale at rest and
+$0.5$ and $2.5$ at $0.1c$; the two pushers agree with each other on the same decks.  On
+the high-resolution X-ray binary snapshot in Kerr-Schild coordinates the accelerated run
+reproduced the emission run's bands within the output-to-output scatter
+($0.97\pm0.02$ at 0.1 to 0.3 keV, $0.98\pm0.04$, $1.02\pm0.03$, $1.04\pm0.11$ at 3 to
+10 keV) with 6 percent of the scatterings replaced.
+
+\section{After the step: the step never decides the cell}
+\label{sec:after}
+
+The step moves the photon; it does not decide which cell the photon ends in.  That is
+left to the same cell update (\texttt{UpdateZone}) that follows any flight, and the order
+of operations is fixed: the moments are deposited in the cell the walk happened in; the
+photon is carried back from the comoving frame to the lab with the frame of that cell,
+at its new position; only then is its cell found.
+
+Under the general pusher the box is the cell by construction: each displacement is a
+fraction of the box width applied to the cell's coordinate width, so a walk that ends on
+a wall ends on the face (plus a margin small enough that the update sees the crossing)
+and a walk that ends inside ends inside.  What is approximate is the shape of the domain
+the photon diffused in (edges measured in the tetrad at the starting point and treated
+as orthogonal, the metric and fluid velocity constant over the cell), not where it is
+put relative to the faces.  Under the legacy spherical-polar pusher the box's angular
+walls are flat while the faces are surfaces of constant angle, so a walk that ends on a
+wall can land slightly inside or slightly beyond the face.
+
+In every case the outcome is decided by where the photon actually is.  If it is still in
+the walked cell it continues there as an ordinary photon with a fresh optical depth;
+being within the face threshold of a wall, it scatters normally rather than stepping
+again until it has wandered inward.  If it is across a face, its indices move to the
+neighbour, and at a block face the boundary function buffers it to the other rank or
+ends it, exactly as for a photon whose flight crossed the face.  The legacy pushers then
+recompute the opacities in the new cell at the lab energy, as at any crossing, and the
+general pusher's loop refreshes its opacities through the comoving shift on its next
+step and discards its cached metric and connection.  A photon that lands in a
+neighbour whose fluid velocity differs was carried back to the lab with the walked
+cell's velocity; that is the same inconsistency any photon crossing a face mid-flight
+has, of order the velocity jump between neighbours.
+
+\section{Triggers, thresholds and declines}
+\label{sec:thresholds}
+
+The trigger (\texttt{MRWTrigger}) is evaluated at every interaction that would fall
+inside the cell and must be cheap.  With the cell domain it requires the cell's optical
+half-width, in the lab extinction at the photon's energy, to exceed \key{accel\_tau}
+(default 20) and the photon's distance to every face to exceed \key{accel\_face\_tau}
+(default 5); with the sphere domain, the face distance to exceed \key{accel\_tau}.  A
+cell masked by the problem generator (\texttt{accel\_mask}) never triggers; the sphere
+test masks the cells its escape surface cuts, which are not the uniform medium the step
+assumes.  The Compton pre-checks of Section~\ref{sec:energy} follow.
+
+The step itself may still decline once the comoving extinction and the advection room
+are known (``too thin''), when there is no usable frame (inside a horizon), when the
+Kompaneets guards that need $\Lambda$ fail, or when the time budget is exhausted; the
+report counts each.  Under the general pusher an attempt costs a tetrad and two
+transforms, so on a grid where most attempts decline the step can cost more than it
+saves; on the X-ray binary 69 percent of attempts declined and the run was 5 percent
+slower than the analog one.
+
+The face threshold is where the diffusion description is weakest.  The first-passage
+time of diffusion theory lets a photon leave arbitrarily soon, whereas a real photon two
+mean free paths from a face needs at least that path to reach it; steps taken close to a
+face therefore come out short.  On the gridded sphere at $\tau=100$ the escape paths
+were 3 to 4 percent short with the threshold at 2 (at $2.7$ times the two-sample scale)
+and consistent with the analog run at 5, hence the default; at the same time the step
+replaced 61 and 45 percent of the scatterings.  In a Compton-thick medium the
+shortening shows up as a lower mean escaping energy, since $y$ is proportional to the
+path, which is what the moving-medium tests saw at the percent level.  A scan of the
+threshold at a Compton-thick setting is the measurement that would replace the default
+with a number for production.
+
+\section{Keys and report lines}
+\label{sec:keys}
+
+\begin{center}
+\begin{tabular}{llp{8.2cm}}
+\toprule
+key (\texttt{<montecarlo>}) & default & meaning \\
+\midrule
+\key{acceleration} & false & turn the step on \\
+\key{accel\_domain} & \texttt{cell} & \texttt{cell} or \texttt{sphere} \\
+\key{accel\_tau} & 20 & cell optical half-width (cell domain) or face distance (sphere) a step needs \\
+\key{accel\_face\_tau} & 5 & cell domain: a photon closer than this to a face scatters normally \\
+\key{accel\_pmax} & 0 & cap the time budget where the domain survival has fallen to this; 0 is no cap \\
+\key{kgreens\_file} & -- & the Kompaneets quantile table, a flat binary from \texttt{kgreens\_export.py}; required with Compton scattering \\
+\key{accel\_report} & false & histogram the analog scatterings by the optical half-width of their cell \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The report prints, per transport, the steps taken, the scatterings their paths stand
+for, and the declines by reason; with \key{accel\_report}, the histogram that says how
+much of a run's work a step confined to one cell can reach.  On the X-ray binary that
+histogram put 9 percent of the scatterings in cells thick enough to step in at the
+default threshold and 60 percent in cells of one to sixteen mean free paths, which is
+why the in-cell step is a correctness result there and not a saving; the plan
+(\texttt{doc/monte\_carlo/compton\_mrw\_plan.md}, Section~6.7) records the region step
+that would reach those cells and why it waits.
+
+\section{Verification summary}
+
+\begin{center}
+\small
+\begin{tabular}{llrll}
+\toprule
+case & domain & replaced & spectrum & paths \\
+\midrule
+sphere $\tau=100$, $8^3$ cells, at rest & sphere & 13\% & agrees & 1\% short \\
+same, cell domain, face threshold 5 & cell & 45\% & 0.7 & 1.1 \\
+sphere $\tau=1000$, cell domain & cell & 81\% & 0.9 & 1.2 \\
+sphere $\tau=100$, $0.1c$ flow & cell & 35\% & 0.7 & 1.6 \\
+general pusher, flat, at rest & cell & 44\% & 0.6 & 0.8 \\
+general pusher, flat, $0.1c$ & cell & 35\% & 0.5 & 2.5 \\
+Thomson sphere $\tau=100$ & cell & 54\% & -- & 0.9 \\
+X-ray binary, Kerr-Schild & cell & 6\% & bands within scatter & -- \\
+\bottomrule
+\end{tabular}
+\end{center}
+The spectrum and path columns are the maximum CDF difference in units of the two-sample
+Kolmogorov scale, $\sqrt{(n_a+n_b)/n_an_b}$, between the walk and the analog run of the
+same deck; the X-ray binary comparison is band luminosities against the emission run's
+output-to-output scatter.  Every case also passes the Green's function tests of the
+sphere problem (\texttt{tst/montecarlo/sphere\_compton}) where those apply, and the C++
+table sampler reproduces the Python reference to $10^{-14}$.
+
+\end{document}

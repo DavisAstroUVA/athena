@@ -249,8 +249,8 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin) {
   // Array for each component of the tidal gravity acceleration.
   ruser_meshblock_data[0].NewAthenaArray(3,ncells3,ncells2,ncells1);
   // Photoionization rate per neutral atom (in code time units) from the last transport,
-  // which MeshBlock::UserWorkInLoop applies every cycle when the transport runs at a
-  // cadence > 1
+  // which MeshBlock::UserWorkInLoop applies every cycle when the ionizing photons run at
+  // a cadence > 1 (ion_cadence)
   ruser_meshblock_data[1].NewAthenaArray(ncells3,ncells2,ncells1);
   for (int n=0; n<ruser_meshblock_data[1].GetSize(); ++n) ruser_meshblock_data[1](n) = -1.;
 
@@ -348,6 +348,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     EnrollUserEmissionFunction(SurfaceEmissivityIonizing,etype);
     emission_geometry[etype] = EMISAREA;
     emission_face[etype] = SetEmissionSurface("outer_x1");
+    cadence_type[etype] = pin->GetOrAddInteger("problem","ion_cadence",cadence);
     etype++;
     if (report_setup && (Globals::my_rank == 0)) {
       std::cout << "Computing stellar ionizing photons emitted from surface."
@@ -368,6 +369,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     EnrollUserEmissionFunction(SurfaceEmissivityLya,etype);
     emission_geometry[etype] = EMISAREA;
     emission_face[etype] = SetEmissionSurface("outer_x1");
+    cadence_type[etype] = pin->GetOrAddInteger("problem","lya_cadence",cadence);
     etype++;
     if (report_setup && (Globals::my_rank == 0)) {
       std::cout << "Computing stellar lyman alpha photons emitted from surface."
@@ -388,6 +390,7 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     emission_geometry[etype] = EMISVOL;
     EnrollUserEmissionFunction(VolumeEmissivityLya,etype);
     emission_face[etype] = SetEmissionSurface("none");
+    cadence_type[etype] = pin->GetOrAddInteger("problem","lya_cadence",cadence);
     if (report_setup && (Globals::my_rank == 0)) {
       std::cout << "Computing recombination lyman alpha photons emitted throughout volume."
                 << std::endl;
@@ -422,15 +425,12 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
   flag_core_skipping = pin->GetOrAddBoolean("problem", "core_skip", false);
   if (flag_core_skipping) {
     // CoreSkipping compares the cell's comoving line optical depth against a threshold,
-    // so it reads MCCoord::dmin.  That array is only built under MRW acceleration or
-    // <montecarlo>/compute_dmin
-    if (!acceleration && !compute_dmin) {
+    // so it reads MCCoord::dmin, which is built only under <montecarlo>/compute_dmin
+    if (!compute_dmin) {
       std::stringstream msg;
       msg << "### FATAL ERROR in MonteCarlo::InitUserMonteCarloData" << std::endl
           << "<problem>/core_skip needs the smallest cell width, MCCoord::dmin."
-          << std::endl
-          << "Set <montecarlo>/compute_dmin = true (or acceleration = true, which also "
-          << "turns on" << std::endl << "the MRW random walk)." << std::endl;
+          << std::endl << "Set <montecarlo>/compute_dmin = true." << std::endl;
       throw std::runtime_error(msg.str());
     }
     EnrollUserWorkInMove(CoreSkipping);
@@ -1080,8 +1080,8 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
 
   Real tint = pmy_mc->tint; // in cgs
 
-  // With cadence > 1 only the rate is recorded here; MeshBlock::UserWorkInLoop updates
-  // the ionization and applies the impact cooling on every cycle
+  // With ion_cadence > 1 only the rate is recorded here; MeshBlock::UserWorkInLoop
+  // updates the ionization and applies the impact cooling on every cycle
   const bool hold = HoldIonization(pmy_mc);
   for (int k=ks; k<=ke; ++k) {
     for (int j=js; j<=je; ++j) {
@@ -2251,7 +2251,8 @@ void OutflowOuterX1 (MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 
 
 bool HoldIonization(MonteCarlo *pmc) {
-  return flag_update_nh && pmc->dynamic && pmc->cadence > 1;
+  // only the cadence of the ionizing photons matters: they alone set the rate
+  return flag_update_nh && pmc->dynamic && ion_str >= 0 && pmc->cadence_type[ion_str] > 1;
 }
 
 Real ImplicitNeutralDensity(Real nh, Real na, Real Gamma, Real tempo1e4K, Real dt,

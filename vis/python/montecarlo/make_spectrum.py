@@ -95,12 +95,16 @@ def main(args, screen_function=None):
                 raise SystemExit(f"--family-cols {tcol} {ecol} but the list carries "
                                  f"{phots.nuser} user column(s)")
             family = athenamc.family_key(phots.user, tcol, ecol)
+        batch = None
+        if args.nbatch > 0:
+            batch = athenamc.batch_key(phots, args.nbatch, family)
         return athenamc.make_spectrum(phots, args.nx, args.xmin, args.xmax,
                                       xaxis=args.xunit, logx=not args.linearx,
                                       nmu=args.nmu, mumin=args.mumin, mumax=args.mumax,
                                       nphi=args.nphi, phimin=args.phimin,
                                       phimax=args.phimax, anglebin=args.anglebin,
-                                      yerror=args.yerror, mask=mask, family=family)
+                                      yerror=args.yerror, mask=mask, family=family,
+                                      batch=batch, nbatch=args.nbatch)
 
     finish = athenamc.finalize_family_errors if args.family_cols is not None else None
     mc_cli.bin_outputs(args, 'make_spectrum.py', bin_chunk, athenamc.add_spectra,
@@ -147,8 +151,15 @@ def parse_args(argv=None):
                              'energy; errors are then summed over the copies of each '
                              'birth photon, which a weight window makes and which are '
                              'correlated (mc_readhdf* write them as columns 0 and 1)')
+    parser.add_argument('--nbatch', type=int, default=0,
+                        help='also store the sums of this many random batches of '
+                             'photons, from which the plotting tools take jackknife '
+                             'errors of every quantity (needs --yerror); 16 is a '
+                             'reasonable choice')
     parser.add_argument('--calclum', action='store_true',
                         help='report the luminosity of each output from its lists')
+    parser.add_argument('--nproc', type=int, default=1,
+                        help='bin the files of each output in this many processes')
     parser.add_argument('--screen',
                         help='name of a function in a user-supplied screen.py that takes '
                              'a Photons chunk and returns True for photons to leave out')

@@ -146,7 +146,25 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
           metric_valid = false;
         }
       }
+      // MRW acceleration for electron scattering
+      if (acceleration && !resonance && MRWTrigger(pphot,ip,chi)
+          && MRWStep(pphot,pran,ip)) {
+        acon_valid = false;
+        metric_valid = false;
+        if (pphot->statp[ip] != EVOLVING) break;
+        UpdateOpacities(pphot,pmcb,ip);
+        chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
+        oi1 = pphot->i1p[ip]; oi2 = pphot->i2p[ip]; oi3 = pphot->i3p[ip];
+        tauremaining = GetOpticalDepth(pran);
+        pphot->strp[ip] = 0.;
+        step = StepSize(pphot,ip);
+        if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
+        if (ptraj != NULL) ptraj->AddToTrajectory(pphot,ip);
+        continue;
+      }
       if (!accel_success) {// Acceleration not triggered - take standard step
+        // Stop at the nearest cell face
+        step = std::min(step, FaceStep(pphot,ip));
         Real tau_step = chi * l_cgs * step * pphot->ep[ip];
         const Real alpha = StretchFactor(pphot,ip,chi,step * pphot->ep[ip]);
         if (tauremaining > alpha * tau_step) { // Photon hasn't yet reached tauremaining
@@ -681,6 +699,28 @@ void GeneralPusher::AdvanceStep(Photon *pphot, Real step, int ip) {
     for (int j = 0; j < 4; j++)
       n1[i][j] = n0[i][j] + d2[i][j]*step;
   pphot->StoreTensor(ip, n1);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real GeneralPusher::FaceStep(Photon *pphot, int ip)
+//! \brief the affine step that attemps to carry the photon just across the nearest face
+//!        of its cell along its current wavevector, in the straight-line estimate
+
+Real GeneralPusher::FaceStep(Photon *pphot, int ip) {
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  const Real k[3] = {pphot->k1p[ip], pphot->k2p[ip], pphot->k3p[ip]};
+  const Real x[3] = {pphot->x1p[ip], pphot->x2p[ip], pphot->x3p[ip]};
+  const Real lo[3] = {pcoord->x1f(i1), pcoord->x2f(i2), pcoord->x3f(i3)};
+  const Real hi[3] = {pcoord->x1f(i1+1), pcoord->x2f(i2+1), pcoord->x3f(i3+1)};
+  Real s = HUGE_NUMBER, cross = HUGE_NUMBER;
+  for (int m=0; m<3; ++m) {
+    if (k[m] == 0.) continue;
+    const Real d = ((k[m] > 0.) ? (hi[m] - x[m]) : (lo[m] - x[m]))/k[m];
+    if (d > 0.) s = std::min(s, d);
+    cross = std::min(cross, (hi[m] - lo[m])/std::fabs(k[m]));
+  }
+  // Just across, so that the cell update sees the crossing
+  return s + 1.e-9*cross;
 }
 
 //----------------------------------------------------------------------------------------

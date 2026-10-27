@@ -6,7 +6,7 @@
 //! \file mc_sphpol.cpp
 //! \brief single-photon polarized transport test in spherical-polar coordinates
 //
-// Flat spacetime written in a curvilinear chart, which is the spherical-polar counterpart
+// Flat spacetime written in curvilinear coordinates, which is the spherical-polar counterpart
 // of mc_snake/mc_poltest.  Because the spacetime is flat, a photon travels a straight line
 // and its polarization is exactly constant when referred to the global cartesian frame,
 // whatever the connection does to the stored spherical components.  That constancy is the
@@ -17,7 +17,7 @@
 // by `chi`, which selects the plane it bends in: chi = 0 sweeps theta, chi = 90 degrees
 // sweeps phi, so the two families of connection components can be exercised separately.
 //
-// Unlike snake, this chart has no exact-zero control.  Setting snake_a = 0 degenerates to
+// Unlike snake, this coordinate system has no exact-zero control.  Setting snake_a = 0 degenerates to
 // Minkowski in cartesian coordinates, where the connection vanishes identically and the
 // residual is exactly zero; no choice of ray does that here.  A radial ray (alpha = 0) is
 // the closest thing, and it is worth running, but it is not zero: the orthonormal legs do
@@ -114,7 +114,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real rho0 = pin->GetOrAddReal("problem", "dens_code", 1.0);
   Real pgas0 = pin->GetOrAddReal("problem", "pgas_code", 1.0e-6);
   // Uniform radial drift, as a fraction of c.  Radial is chosen because e_r is
-  // unambiguous in this chart, so the comoving frame is a pure boost of the local
+  // unambiguous in this coordinate system, so the comoving frame is a pure boost of the local
   // orthonormal legs with no extra rotation to disentangle.
   Real beta = pin->GetOrAddReal("problem", "velocity", 0.0);
   int veldir = pin->GetOrAddInteger("problem", "veldir", 1);
@@ -477,7 +477,7 @@ void MonteCarloBlock::FinalizePhoton(Photon *pphot, int ip) {
   // check cannot see it either.  CoherencyToObserverStokes is what sets them, and it runs
   // only under the general pusher.
   //
-  // The comparison is legitimate because the normal observer in this chart is static, as
+  // The comparison is legitimate because the normal observer in this coordinate system is static, as
   // is the global cartesian frame, so the two differ by a rotation and Q and U referenced
   // to the same physical plane agree in both.  Everything below is built from the flat
   // frame tensor and the escape direction, with no use of the tetrad machinery being

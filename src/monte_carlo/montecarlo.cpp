@@ -10,15 +10,14 @@
 #include <algorithm>  // min, max
 #include <cmath>      // floor
 #include <limits>     // numeric_limits
-#include <cstdio>
 #include <fstream>
 #include <chrono>      // steady_clock, for the transport wall time
 #include <ctime>       // clock(), CLOCKS_PER_SEC
 #include <iostream>
 #include <random>
 #include <stdexcept>  // runtime_error
-// C++ headers
 #include <cstdint>  // uint64_t
+#include <cstdio>   // snprintf
 #include <cstring>  // strcmp, memcpy, memset
 #include <string>
 #include <vector>
@@ -33,7 +32,9 @@
 // Athena++ headers
 #include "mcexchange.hpp"
 #include "mcpartition.hpp"
+#include "kgreens.hpp"
 #include "montecarlo.hpp"
+#include "mrw.hpp"
 #include "../globals.hpp"
 #include "../parameter_input.hpp"
 #include "../mesh/mesh.hpp"
@@ -45,11 +46,82 @@
 #endif
 
 //----------------------------------------------------------------------------------------
+//! \fn void CheckRelocatedKeys(ParameterInput *pin)
+//! \brief refuse an input file that sets a key in the block it used to be read from
+//
+// The keys of the load balancer, the random-walk acceleration, the sampling schemes and
+// the scattering-moment bins were moved out of <montecarlo> into blocks of their own
+// (2026-10-22).  A key left in the old block would be read by nothing and the default
+// would apply silently, so every old location is checked here and the run stops naming
+// the new one.  This check is temporary: it goes once the input files have moved.
+
+namespace {
+struct RelocatedKey {
+  const char *old_block, *old_key, *new_block, *new_key;
+};
+const RelocatedKey relocated_keys[] = {
+  {"montecarlo", "lb_initial",           "loadbalancing", "initial"},
+  {"montecarlo", "lb_check_interval",    "loadbalancing", "check_interval"},
+  {"montecarlo", "lb_check_fraction",    "loadbalancing", "check_fraction"},
+  {"montecarlo", "lb_max_per_transport", "loadbalancing", "max_per_transport"},
+  {"montecarlo", "lb_min_window",        "loadbalancing", "min_window"},
+  {"montecarlo", "lb_min_gain",          "loadbalancing", "min_gain"},
+  {"montecarlo", "lb_partition",         "loadbalancing", "partition"},
+  {"montecarlo", "lb_cost_decay",        "loadbalancing", "cost_decay"},
+  {"montecarlo", "lb_report",            "loadbalancing", "report"},
+  {"montecarlo", "lb_test_repack",       "loadbalancing", "test_repack"},
+  {"montecarlo", "lb_test_costs",        "loadbalancing", "test_costs"},
+  {"montecarlo", "acceleration",         "randomwalk",    "enable"},
+  {"montecarlo", "accel_domain",         "randomwalk",    "domain"},
+  {"montecarlo", "accel_tau",            "randomwalk",    "tau"},
+  {"montecarlo", "accel_face_tau",       "randomwalk",    "face_tau"},
+  {"montecarlo", "accel_pmax",           "randomwalk",    "pmax"},
+  {"montecarlo", "kgreens_file",         "randomwalk",    "kgreens_file"},
+  {"montecarlo", "accel_report",         "randomwalk",    "report"},
+  {"montecarlo", "weights",              "sampling",      "weights"},
+  {"montecarlo", "equal_weight",         "sampling",      "weights"},
+  {"montecarlo", "bias_mix",             "sampling",      "bias_mix"},
+  {"montecarlo", "bias_energy",          "sampling",      "bias_energy"},
+  {"montecarlo", "bias_energy_mix",      "sampling",      "bias_energy_mix"},
+  {"montecarlo", "minweight",            "sampling",      "minweight"},
+  {"montecarlo", "roulette",             "sampling",      "roulette"},
+  {"montecarlo", "wwin_top",             "sampling",      "window_top"},
+  {"montecarlo", "wwin_bottom",          "sampling",      "window_bottom"},
+  {"montecarlo", "wwin_max_split",       "sampling",      "window_max_split"},
+  {"montecarlo", "wwin_energy",          "sampling",      "window_energy"},
+  {"montecarlo", "wwin_interp",          "sampling",      "window_interp"},
+  {"montecarlo", "stretch",              "sampling",      "stretch"},
+  {"montecarlo", "stretch_taucell",      "sampling",      "stretch_taucell"},
+  {"montecarlo", "stretch_bound",        "sampling",      "stretch_bound"},
+  {"montecarlo", "nf_scat",              "output block of the mcscat output", "ne"},
+  {"montecarlo", "emin_scat",            "output block of the mcscat output", "emin"},
+  {"montecarlo", "emax_scat",            "output block of the mcscat output", "emax"},
+};
+
+void CheckRelocatedKeys(ParameterInput *pin) {
+  std::stringstream msg;
+  int nfound = 0;
+  for (const RelocatedKey &key : relocated_keys) {
+    if (pin->DoesParameterExist(key.old_block, key.old_key)) {
+      if (nfound == 0)
+        msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+            << "keys set in a block they are no longer read from:" << std::endl;
+      msg << "  <" << key.old_block << ">/" << key.old_key << " is now <"
+          << key.new_block << ">/" << key.new_key << std::endl;
+      ++nfound;
+    }
+  }
+  if (nfound > 0) ATHENA_ERROR(msg);
+}
+}  // namespace
+
+//----------------------------------------------------------------------------------------
 //! MonteCarlo constructor, builds monte carlo using parameters in input file
 
 MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 
   std::stringstream msg;
+  CheckRelocatedKeys(pin);
 
   pmy_mesh = pmesh;
 
@@ -57,39 +129,39 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   GetEmission=nullptr;
   UserGetDensity=nullptr;
   nescape = 0;
-  bias_energy = pin->GetOrAddBoolean("montecarlo","bias_energy",true);
-  bias_mix = pin->GetOrAddReal("montecarlo","bias_mix",0.99);
+  bias_energy = pin->GetOrAddBoolean("sampling","bias_energy",true);
+  bias_mix = pin->GetOrAddReal("sampling","bias_mix",0.99);
   if (bias_mix <= 0. || bias_mix > 1.) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/bias_mix = " << bias_mix << "; use 0 < bias_mix <= 1" << std::endl;
+        << "<sampling>/bias_mix = " << bias_mix << "; use 0 < bias_mix <= 1" << std::endl;
     ATHENA_ERROR(msg);
   }
   // The energy-group draw is mixed the same way, so that the factor it puts on the
   // weight is bounded at 1/(1 - bias_energy_mix); it follows bias_mix unless set
-  bias_energy_mix = pin->GetOrAddReal("montecarlo","bias_energy_mix",bias_mix);
+  bias_energy_mix = pin->GetOrAddReal("sampling","bias_energy_mix",bias_mix);
   if (bias_energy_mix <= 0. || bias_energy_mix > 1.) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/bias_energy_mix = " << bias_energy_mix
+        << "<sampling>/bias_energy_mix = " << bias_energy_mix
         << "; use 0 < bias_energy_mix <= 1" << std::endl;
     ATHENA_ERROR(msg);
   }
   bias_scale = 1.;
   bias_mixed_ = false;
   weight_ref_bias_ = 0.;
-  wwin_top = pin->GetOrAddReal("montecarlo","wwin_top",0.);
-  wwin_bottom = pin->GetOrAddReal("montecarlo","wwin_bottom",0.);
-  wwin_max_split = pin->GetOrAddInteger("montecarlo","wwin_max_split",8);
-  wwin_energy = pin->GetOrAddBoolean("montecarlo","wwin_energy",true);
-  wwin_interp = pin->GetOrAddBoolean("montecarlo","wwin_interp",true);
+  wwin_top = pin->GetOrAddReal("sampling","window_top",0.);
+  wwin_bottom = pin->GetOrAddReal("sampling","window_bottom",0.);
+  wwin_max_split = pin->GetOrAddInteger("sampling","window_max_split",8);
+  wwin_energy = pin->GetOrAddBoolean("sampling","window_energy",true);
+  wwin_interp = pin->GetOrAddBoolean("sampling","window_interp",true);
   if ((wwin_top != 0. && wwin_top < 1.) || wwin_bottom < 0. || wwin_bottom > 1. ||
       wwin_max_split < 2) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/wwin_top = " << wwin_top << ", wwin_bottom = " << wwin_bottom
-        << ", wwin_max_split = " << wwin_max_split
-        << "; use wwin_top >= 1 or 0, 0 <= wwin_bottom <= 1, wwin_max_split >= 2"
+        << "<sampling>/window_top = " << wwin_top << ", window_bottom = " << wwin_bottom
+        << ", window_max_split = " << wwin_max_split
+        << "; use window_top >= 1 or 0, 0 <= window_bottom <= 1, window_max_split >= 2"
         << std::endl;
     ATHENA_ERROR(msg);
   }
@@ -132,19 +204,41 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   }
   last_transport_cycle = -1;
   last_transport_time = 0.;
+  last_transport_end = 0.;
   ttransport = 0.;
   boosts = pin->GetOrAddBoolean("montecarlo","boosts",false);
   polarized = GetMCPolarizationFlag(pin->GetOrAddString("montecarlo","polarized","none"));
-  acceleration = pin->GetOrAddBoolean("montecarlo","acceleration",false);
+  acceleration = pin->GetOrAddBoolean("randomwalk","enable",false);
   // MCCoord::dmin, the smallest cell width, is built for the MRW acceleration.  A user
   // hook can want it for its own reasons -- mc_hotjupiter's core skipping compares the
   // cell's comoving line optical depth against a threshold -- and reading an array that
   // was never allocated segfaults, so a problem generator that needs it asks here rather
   // than turning MRW on as a side effect.
   compute_dmin = pin->GetOrAddBoolean("montecarlo","compute_dmin",false);
-  time_acc = pin->GetOrAddBoolean("montecarlo","time_acc",false);
+  accel_tau = pin->GetOrAddReal("randomwalk","tau",20.);
+  accel_face_tau = pin->GetOrAddReal("randomwalk","face_tau",5.);
+  accel_pmax = pin->GetOrAddReal("randomwalk","pmax",0.);
+  {
+    std::string dom = pin->GetOrAddString("randomwalk","domain","cell");
+    if (dom == "cell") {
+      accel_domain = MRW_DOMAIN_CELL;
+    } else if (dom == "sphere") {
+      accel_domain = MRW_DOMAIN_SPHERE;
+    } else {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "<randomwalk>/domain must be cell or sphere, not " << dom << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+  kgreens_file = pin->GetOrAddString("randomwalk","kgreens_file","");
+  kgreens = nullptr;
+  mrw = nullptr;
+  optab = nullptr;
+  if (acceleration) mrw = new MRWTables;
+  accel_report = pin->GetOrAddBoolean("randomwalk","report",false);
   verbose = pin->GetOrAddBoolean("montecarlo", "verbose", true);
-  lb_report = pin->GetOrAddBoolean("montecarlo", "lb_report", false);
+  lb_report = pin->GetOrAddBoolean("loadbalancing", "report", false);
   raytrace_flag = pin->GetOrAddBoolean("montecarlo", "raytrace", false);
   if (raytrace_flag)
     general_pusher_flag = true;
@@ -152,6 +246,25 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     general_pusher_flag = pin->GetOrAddBoolean("montecarlo","general_pusher",false);
   scattering_meth = GetScatteringFlag(pin->GetOrAddString("montecarlo","scattering",
                                                           "none"));
+  // The random-walk step with Compton scattering draws the photon's energy change from
+  // the Kompaneets Green's function table, so the table has to be there
+  if (acceleration && scattering_meth == SCATCOMP) {
+    if (kgreens_file.empty()) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "the random walk with Compton scattering needs <randomwalk> kgreens_file"
+          << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    kgreens = new KompaneetsTable;
+    kgreens->Read(kgreens_file);
+    if (Globals::my_rank == 0)
+      std::cout << "Kompaneets table " << kgreens_file << ": lam 0, "
+                << kgreens->LamMin() << " .. " << kgreens->LamMax() << ", y "
+                << kgreens->YMin() << " .. " << kgreens->YMax() << ", xi "
+                << kgreens->XiMin() << " .. " << kgreens->XiMax() << ", "
+                << kgreens->nq << " levels" << std::endl;
+  }
   // Which metric the module integrates on.  Must come before SetGeometryTag and before
   // any MonteCarloBlock is constructed.
   SetCoordinateSystem(pin);
@@ -168,22 +281,22 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   nscat_run = 0;
 
   // Set mininmum weight if using weighting for absorption
-  weightratio = pin->GetOrAddReal("montecarlo","minweight",1.0e-20);
-  roulette = pin->GetOrAddReal("montecarlo","roulette",0.1);
+  weightratio = pin->GetOrAddReal("sampling","minweight",1.0e-20);
+  roulette = pin->GetOrAddReal("sampling","roulette",0.1);
   if (roulette < 0. || roulette >= 1.) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/roulette = " << roulette << "; use 0 <= roulette < 1" << std::endl;
+        << "<sampling>/roulette = " << roulette << "; use 0 <= roulette < 1" << std::endl;
     ATHENA_ERROR(msg);
   }
 
-  stretch = pin->GetOrAddReal("montecarlo","stretch",1.0);
-  stretch_bound = pin->GetOrAddReal("montecarlo","stretch_bound",10.0);
-  stretch_taucell = pin->GetOrAddReal("montecarlo","stretch_taucell",HUGE_NUMBER);
+  stretch = pin->GetOrAddReal("sampling","stretch",1.0);
+  stretch_bound = pin->GetOrAddReal("sampling","stretch_bound",10.0);
+  stretch_taucell = pin->GetOrAddReal("sampling","stretch_taucell",HUGE_NUMBER);
   if (stretch <= 0. || stretch_bound < 1. || stretch_taucell <= 0.) {
     std::stringstream msg;
     msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-        << "<montecarlo>/stretch = " << stretch << ", stretch_bound = " << stretch_bound
+        << "<sampling>/stretch = " << stretch << ", stretch_bound = " << stretch_bound
         << ", stretch_taucell = " << stretch_taucell
         << "; use stretch > 0, stretch_bound >= 1, stretch_taucell > 0" << std::endl;
     ATHENA_ERROR(msg);
@@ -195,6 +308,14 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   // Initialize Emmision parameters and methods
   InitializeEmission(pin);
 
+  // The multigroup opacity table, read before the problem generator's hook below, which
+  // may size its escape groups on it, and before any block is built
+  if (emission_flag == EMISTABLE
+      || pin->GetOrAddString("montecarlo","absorption","none") == "table") {
+    optab = new OpacityTable;
+    optab->Read(pin);
+  }
+
   // Set default size parameters
   max_phots_init = pin->GetOrAddInteger("montecarlo","max_phots_init",10000);
   list_size_init = pin->GetOrAddInteger("montecarlo","list_size_init",10000);
@@ -204,6 +325,18 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   // Initialize user MonteCarlo data before initializing MonteCarloBlocks
   // Should be caleld before Output constuctor
   InitUserMonteCarloData(pin);
+
+  // The problem generator may have given the emission types cadences of their own
+  for (int n=0; n<ntype; ++n) {
+    if (cadence_type[n] < 1 || (!dynamic && cadence_type[n] > 1)) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo::Initialize" << std::endl
+          << "emission type " << n << " has cadence " << cadence_type[n]
+          << "; a type's cadence is at least 1, and above 1 only with dynamic = true"
+          << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
 
   // Initialize output
   pmcout = new MCOutput(this,pin);
@@ -263,7 +396,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   MPI_Comm_dup(MPI_COMM_WORLD, &lb_comm_);
 #endif
   {
-    const std::string mode = pin->GetOrAddString("montecarlo", "lb_test_repack", "none");
+    const std::string mode = pin->GetOrAddString("loadbalancing", "test_repack", "none");
     if (mode == "none") {
       lb_test_repack = LBTEST_NONE;
     } else if (mode == "local") {
@@ -272,46 +405,46 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
       lb_test_repack = LBTEST_MESH;
     } else {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "<montecarlo>/lb_test_repack = " << mode << "; use none, local or mesh"
+          << "<loadbalancing>/test_repack = " << mode << "; use none, local or mesh"
           << std::endl;
       ATHENA_ERROR(msg);
     }
     lb_cost_file = pin->GetOrAddString("loadbalancing", "cost_file", "");
     lb_costs_loaded = false;
-    lb_min_gain = pin->GetOrAddReal("montecarlo", "lb_min_gain", 0.05);
-    lb_check_interval = pin->GetOrAddInteger("montecarlo", "lb_check_interval", 0);
-    lb_max_per_transport = pin->GetOrAddInteger("montecarlo", "lb_max_per_transport", 4);
-    lb_min_window = pin->GetOrAddInteger("montecarlo", "lb_min_window", lb_check_interval);
-    lb_check_fraction = pin->GetOrAddReal("montecarlo", "lb_check_fraction", 0.1);
-    lb_cost_decay = pin->GetOrAddReal("montecarlo", "lb_cost_decay", 1.0);
-    const std::string part = pin->GetOrAddString("montecarlo", "lb_partition", "optimal");
+    lb_min_gain = pin->GetOrAddReal("loadbalancing", "min_gain", 0.05);
+    lb_check_interval = pin->GetOrAddInteger("loadbalancing", "check_interval", 0);
+    lb_max_per_transport = pin->GetOrAddInteger("loadbalancing", "max_per_transport", 4);
+    lb_min_window = pin->GetOrAddInteger("loadbalancing", "min_window", lb_check_interval);
+    lb_check_fraction = pin->GetOrAddReal("loadbalancing", "check_fraction", 0.1);
+    lb_cost_decay = pin->GetOrAddReal("loadbalancing", "cost_decay", 1.0);
+    const std::string part = pin->GetOrAddString("loadbalancing", "partition", "optimal");
     if (part == "optimal") {
       lb_partition_optimal = true;
     } else if (part == "greedy") {
       lb_partition_optimal = false;
     } else {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "<montecarlo>/lb_partition = " << part << "; use optimal or greedy" << std::endl;
+          << "<loadbalancing>/partition = " << part << "; use optimal or greedy" << std::endl;
       ATHENA_ERROR(msg);
     }
-    const std::string init = pin->GetOrAddString("montecarlo", "lb_initial", "none");
+    const std::string init = pin->GetOrAddString("loadbalancing", "initial", "none");
     if (init == "none") {
       lb_initial_photons = false;
     } else if (init == "photons") {
       lb_initial_photons = true;
     } else {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "<montecarlo>/lb_initial = " << init << "; use none or photons" << std::endl;
+          << "<loadbalancing>/initial = " << init << "; use none or photons" << std::endl;
       ATHENA_ERROR(msg);
     }
-    const std::string cmode = pin->GetOrAddString("montecarlo", "lb_test_costs", "measured");
+    const std::string cmode = pin->GetOrAddString("loadbalancing", "test_costs", "measured");
     if (cmode == "measured") {
       lb_test_costs = LBCOST_MEASURED;
     } else if (cmode == "alternate") {
       lb_test_costs = LBCOST_ALTERNATE;
     } else {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "<montecarlo>/lb_test_costs = " << cmode << "; use measured or alternate"
+          << "<loadbalancing>/test_costs = " << cmode << "; use measured or alternate"
           << std::endl;
       ATHENA_ERROR(msg);
     }
@@ -335,8 +468,16 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 
 MonteCarlo::~MonteCarlo() {
 
+  delete kgreens;
+  delete mrw;
+  delete optab;
   delete pmcout;
   delete pexch;
+  delete[] cadence_type;
+  delete[] last_transport_cycle_type;
+  delete[] tint_type;
+  delete[] tint_last_type;
+  delete[] due_type;
 #ifdef MPI_PARALLEL
   MPI_Comm_free(&lb_comm_);
 #endif
@@ -357,6 +498,8 @@ enum AbsorptionOpacityFlag GetAbsorptionOpacityFlag(std::string input_string) {
     return ABSFF;
   } else if (input_string == "dust") {
     return ABSDUST;
+  } else if (input_string == "table") {
+    return ABSTABLE;
   } else {
     std::stringstream msg;
     msg << "### FATAL ERROR in GetAbsorptionOpacityFlag" << std::endl
@@ -458,6 +601,8 @@ enum EmissionFlag GetEmissionFlag(std::string input_string) {
     return EMISBB;
   } else if (input_string == "multi") {
     return MULTI;
+  } else if (input_string == "table") {
+    return EMISTABLE;
   } else {
     std::stringstream msg;
     msg << "### FATAL ERROR in GetEmissionFlag" << std::endl
@@ -748,6 +893,11 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
     // initialize counters to zero
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
     pmcb->nsplit = pmcb->nroul = 0;
+  pmcb->nabs_first = 0;
+    pmcb->nmrw = pmcb->nmrw_decline = 0;
+    pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
     pmcb->loop_max_size = loop_max;
 
@@ -995,6 +1145,17 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
   GetEmission = new EmisFunc_t[ntype];
   emission_geometry = new int[ntype];
   emission_face = new BoundaryFace[ntype];
+  cadence_type = new int[ntype];
+  last_transport_cycle_type = new int[ntype];
+  tint_type = new Real[ntype];
+  tint_last_type = new Real[ntype];
+  due_type = new bool[ntype];
+  for (int n=0; n<ntype; ++n) {
+    cadence_type[n] = cadence;
+    last_transport_cycle_type[n] = -1;
+    tint_type[n] = tint_last_type[n] = 0.;
+    due_type[n] = true;
+  }
   // Set emmisivity functions and flag for determining emission array
   if (emission_flag == EMISNONE) {
     GetEmission[0] = nullptr; // left unset
@@ -1016,6 +1177,14 @@ void MonteCarlo::InitializeEmission(ParameterInput *pin) {
     emission_array = true; // allocate memory for array
   } else if (emission_flag ==  EMISFF) {
     GetEmission[0] = GetEmissionFreeFree;
+    nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
+    weight_scheme[0] = GetWeightScheme(pin);
+    initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
+    absorption_method[0] = GetAbsorptionMethodFlag(abs_def);
+    emission_geometry[0] = EMISVOL; // Must be volumetric
+    emission_array = true; // allocate memory for array
+  } else if (emission_flag ==  EMISTABLE) {
+    GetEmission[0] = GetEmissionTable;
     nsamptype[0] = nsamp = pin->GetInteger64("montecarlo","nphot");
     weight_scheme[0] = GetWeightScheme(pin);
     initialize_comoving[0] = pin->GetOrAddBoolean("montecarlo","initialize_comoving",true);
@@ -1288,13 +1457,21 @@ void MonteCarlo::DistributeSamples(int etype) {
 
 //----------------------------------------------------------------------------------------
 //! \fn bool MonteCarlo::TransportDue()
-//! \brief the first cycle of a run or restart, every cadence cycles after the last
-//! transport, and with cadence_frac > 0 any cycle by whose end the held energy source
-//! would have changed a cell's internal energy by more than that fraction
+//! \brief marks the emission types due this cycle and returns whether any is: a type is
+//! due on the first cycle of a run or restart and every cadence_type cycles after its
+//! last transport; with cadence_frac > 0 every type is due on a cycle by whose end the
+//! held energy source would have changed a cell's internal energy by more than that
+//! fraction
 
 bool MonteCarlo::TransportDue() {
   const int ncycle = pmy_mesh->ncycle;
-  if (last_transport_cycle < 0 || ncycle - last_transport_cycle >= cadence) return true;
+  bool any = false;
+  for (int n=0; n<ntype; ++n) {
+    due_type[n] = (last_transport_cycle_type[n] < 0
+                   || ncycle - last_transport_cycle_type[n] >= cadence_type[n]);
+    any = any || due_type[n];
+  }
+  if (any) return true;
   if (cadence_frac > 0. && coupled) {
     const Real elapsed = pmy_mesh->time + pmy_mesh->dt - last_transport_time;
     Real frac = 0.;
@@ -1308,6 +1485,7 @@ bool MonteCarlo::TransportDue() {
         std::cout << "Monte Carlo transport at cycle " << ncycle << ", "
                   << ncycle - last_transport_cycle << " after the last: held energy "
                   << "source would change internal energy by " << frac << std::endl;
+      for (int n=0; n<ntype; ++n) due_type[n] = true;
       return true;
     }
   }
@@ -1322,22 +1500,28 @@ bool MonteCarlo::TransportDue() {
 void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                                      ParameterInput *pinput) {
 
-  // Leave if transport not due
-  if (dynamic && !TransportDue()) return;
-
+  Real time_cgs = 1.;
   if (dynamic) {
+    // Every type's next emission covers this step, whether or not the type runs now;
+    // then leave if no type is due.
+    for (int n=0; n<ntype; ++n) tint_type[n] += pmy_mesh->dt;
+    if (!TransportDue()) return;
+    // The time this cycle's transports cover is the time since the end of the last
+    // cycle that transported anything, which is what the types' emissions carry
+    // (tint_type), so the outputs' normalization by ttransport matches the weights.
+    const Real step_end = pmy_mesh->time + pmy_mesh->dt;
+    ttransport += (last_transport_cycle < 0) ? pmy_mesh->dt
+                                             : step_end - last_transport_end;
     last_transport_cycle = pmy_mesh->ncycle;
     last_transport_time = pmy_mesh->time;
-    ttransport += pmy_mesh->dt;
+    last_transport_end = step_end;
     tmax = pinput->GetOrAddReal("montecarlo","tmax",-1.);
     if (tmax < 0.)
       tmax = pmy_mesh->dt;
-    tint = pmy_mesh->dt;
-    // convert to cgs units
+    // convert to cgs units; tint is set per type inside the loop below
     Real vel_cgs = pinput->GetOrAddReal("problem","vel_cgs",1.);
     Real l_cgs = pinput->GetOrAddReal("problem","l_cgs",1.);
-    Real time_cgs = l_cgs/vel_cgs;
-    tint *= time_cgs;
+    time_cgs = l_cgs/vel_cgs;
     tmax *= time_cgs;
   }
 
@@ -1362,26 +1546,52 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // reset counters
     pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb-> nrem = 0;
     pmcb->nsplit = pmcb->nroul = 0;
+  pmcb->nabs_first = 0;
+    pmcb->nmrw = pmcb->nmrw_decline = 0;
+    pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
   }
 
-  // Reset the moments and source terms for this transport, in both modes.  Every output
-  // is an independent estimate of the same steady state.
-  for(int nb=0; nb<nblocal; ++nb) {
-    MonteCarloBlock *pmcb = my_blocks(nb);
-    if (pmcb->call_moments)
-      pmcb->ResetMoments();
-    if (pmcb->call_srcterms)
-      pmcb->ResetSourceTerms();
+  // A static run resets the moments and source terms once for this transport: every
+  // output is an independent estimate of the same steady state.  A dynamic run resets
+  // per type inside the loop, since a type that is not due keeps its held rates.
+  if (!dynamic) {
+    for(int nb=0; nb<nblocal; ++nb) {
+      MonteCarloBlock *pmcb = my_blocks(nb);
+      if (pmcb->call_moments)
+        pmcb->ResetMoments();
+      if (pmcb->call_srcterms)
+        pmcb->ResetSourceTerms();
+    }
   }
 
   for (int etype=0; etype < ntype; etype++) {
+    if (dynamic) {
+      if (!due_type[etype]) continue;
+      // this type's emission covers the steps since its last transport
+      tint = tint_type[etype] * time_cgs;
+      for (int nb=0; nb<nblocal; ++nb) {
+        MonteCarloBlock *pmcb = my_blocks(nb);
+        if (pmcb->call_moments)
+          pmcb->ResetMoments(etype);
+        if (pmcb->call_srcterms)
+          pmcb->ResetSourceTerms();
+      }
+    }
+    tint_last_type[etype] = tint;
 
       // reset counters
     for (int nb=0; nb<nblocal; nb++) {
       MonteCarloBlock *pmcb = my_blocks(nb);
       pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = 0;
       pmcb->nsplit = pmcb->nroul = 0;
+      pmcb->nabs_first = 0;
+    pmcb->nmrw = pmcb->nmrw_decline = 0;
+    pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
       pmcb->wesc_sum = pmcb->wesc_sq = 0.;
       pmcb->lb_time = 0.0;
       pmcb->lb_nstep = 0;
@@ -1461,11 +1671,25 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     // bytes past it.
     int64_t ntot = 0;
     int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0, nsplit = 0, nroul = 0;
-    Real wesc_sum = 0., wesc_sq = 0.;
+    int64_t nmrw = 0, nmrw_decline = 0, nabs_first = 0;
+    Real wesc_sum = 0., wesc_sq = 0., nmrw_scat = 0.;
+    int64_t scat_hist[MonteCarloBlock::NSCATBINS];
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] = 0;
+    int64_t declined[MonteCarloBlock::NMRWDECLINE];
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) declined[b] = 0;
+    int64_t tabc[MonteCarloBlock::NTABCOUNT];
+    for (int b=0; b<MonteCarloBlock::NTABCOUNT; ++b) tabc[b] = 0;
     for(int nb=0; nb<nblocal; ++nb) {
       MonteCarloBlock *pmcb = my_blocks(nb);
+      for (int b=0; b<MonteCarloBlock::NTABCOUNT; ++b) tabc[b] += pmcb->tab_count[b];
+      nabs_first += pmcb->nabs_first;
       nsplit += pmcb->nsplit;
       nroul += pmcb->nroul;
+      nmrw += pmcb->nmrw;
+      nmrw_decline += pmcb->nmrw_decline;
+      nmrw_scat += pmcb->nmrw_scat;
+      for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] += pmcb->scat_tau_hist[b];
+      for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) declined[b] += pmcb->nmrw_declined[b];
       wesc_sum += pmcb->wesc_sum;
       wesc_sq += pmcb->wesc_sq;
       nesc += pmcb->nesc;
@@ -1487,6 +1711,16 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&nrem,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nsplit,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nroul,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nmrw,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nmrw_decline,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nmrw_scat,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,scat_hist,MonteCarloBlock::NSCATBINS,MPI_INT64_T,MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,declined,MonteCarloBlock::NMRWDECLINE,MPI_INT64_T,MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,tabc,MonteCarloBlock::NTABCOUNT,MPI_INT64_T,MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nabs_first,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sum,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&wesc_sq,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
   #endif
@@ -1509,6 +1743,55 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       if (wwin_top > 0. || wwin_bottom > 0.)
         std::cout << "weight window: " << nsplit << " copies made, " << nroul
                   << " samples rouletted" << std::endl;
+      if (acceleration)
+        std::cout << "random walk: " << nmrw << " steps standing for " << nmrw_scat
+                  << " scatterings, " << nmrw_decline << " declined (no frame "
+                  << declined[MRW_DECLINE_FRAME] << ", too thin " << declined[MRW_DECLINE_THIN]
+                  << ", outside Kompaneets " << declined[MRW_DECLINE_COMPTON]
+                  << ", no budget " << declined[MRW_DECLINE_BUDGET] << ", other "
+                  << declined[MRW_DECLINE_OTHER] << ")" << std::endl;
+      if (optab != nullptr) {
+        // Which cells the table served and which fell off its grid: this decides whether
+        // a run used the tabulated opacity or the analytic one
+        const int64_t nt = tabc[MonteCarloBlock::TABCOUNT_TABLE];
+        const int64_t nf = tabc[MonteCarloBlock::TABCOUNT_FREEFREE];
+        const int64_t nc = tabc[MonteCarloBlock::TABCOUNT_CUT];
+        const int64_t ncell = nt + nf + nc;
+        char pct[16];
+        std::snprintf(pct, sizeof(pct), "%.2f",
+                      (ncell > 0) ? 100.*static_cast<Real>(nf)/static_cast<Real>(ncell) : 0.);
+        std::cout << "opacity table: " << nt << " cells from the table, " << nf
+                  << " off-grid using free-free (" << pct << "%)";
+        if (nc > 0) std::cout << ", " << nc << " masked";
+        std::cout << std::endl;
+        if (nf > 0)
+          std::cout << "               off-grid in density: "
+                    << tabc[MonteCarloBlock::TABCOUNT_OFF_RHO] << ", in temperature: "
+                    << tabc[MonteCarloBlock::TABCOUNT_OFF_TEMP] << std::endl;
+        if (optab->two_band && nabs > 0) {
+          // samples that never left their first step: under two bands, the high-band
+          // emission of cells where it is not thermalized
+          char pct2[16];
+          std::snprintf(pct2, sizeof(pct2), "%.1f",
+                        100.*static_cast<Real>(nabs_first)/static_cast<Real>(nabs));
+          std::cout << "two band: " << nabs_first << " of " << nabs
+                    << " absorbed samples died in their first step (" << pct2 << "%)"
+                    << std::endl;
+        }
+      }
+      if (accel_report) {
+        // the share of the analog scatterings by the optical half-width of their cell
+        int64_t tot = 0;
+        for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) tot += scat_hist[b];
+        std::cout << "scatterings by cell optical half-width (" << tot << " binned):";
+        for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) {
+          if (scat_hist[b] == 0) continue;
+          std::cout << " [" << std::ldexp(1., b-4) << "," << std::ldexp(1., b-3) << ") "
+                    << 100.*static_cast<Real>(scat_hist[b])/static_cast<Real>(std::max<int64_t>(tot,1))
+                    << "%";
+        }
+        std::cout << std::endl;
+      }
       // (sum w)^2 / sum w^2 over the escaped samples: the number of equal-weight
       // samples with the same variance
       if (wesc_sq > 0.)
@@ -1523,6 +1806,13 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
 
     for(int nb=0; nb<nblocal; ++nb) {
       my_blocks(nb)->UserWorkAfterTransfer(etype);
+    }
+    if (dynamic) {
+      // hold this type's source terms and shared moments as rates until it runs again
+      for(int nb=0; nb<nblocal; ++nb)
+        my_blocks(nb)->StoreTypeRates(etype);
+      last_transport_cycle_type[etype] = pmy_mesh->ncycle;
+      tint_type[etype] = 0.;
     }
   } // end loop over ntype
 
@@ -1807,6 +2097,8 @@ void MonteCarlo::SetupBlockFromFluid(MonteCarloBlock *pmcb) {
   pmcb->GetTemperature();
   pmcb->GetNumberDensity();
   pmcb->ComputeFreeFreePrefactor();
+  // after the number densities: a problem generator's number-density hook may mask cells
+  pmcb->BuildOpacityTables();
   if (boosts) {
     pmcb->GetVelocity();
     pmcb->ComputeTransformations();
@@ -1926,6 +2218,11 @@ MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
   SetupBlockFromFluid(pmcb);
   pmcb->nscat = pmcb->nesc = pmcb->nabs = pmcb->ndes = pmcb->nrem = 0;
   pmcb->nsplit = pmcb->nroul = 0;
+  pmcb->nabs_first = 0;
+    pmcb->nmrw = pmcb->nmrw_decline = 0;
+    pmcb->nmrw_scat = 0.;
+    for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
+    for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
   pmcb->loop_max_size = ComputeLoopMax();
   // The problem generator runs before the payload is unpacked, exactly as at startup:
   // it supplies per-block state that is neither fluid-derived nor carried (photon
@@ -2815,23 +3112,16 @@ void MCRandom::SampleMultinomial(int n, int m, Real *prob, int *counts) {
 
 //----------------------------------------------------------------------------------------
 //! \fn enum WeightScheme GetWeightScheme(ParameterInput *pin)
-//! \brief read <montecarlo>/weights, the sample allocation and weighting scheme
+//! \brief read <sampling>/weights, the sample allocation and weighting scheme
 
 enum WeightScheme GetWeightScheme(ParameterInput *pin) {
-  if (pin->DoesParameterExist("montecarlo","equal_weight")) {
-    std::stringstream msg;
-    msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
-        << "<montecarlo>/equal_weight is not an option; use weights = emission | equal"
-        << " | biased" << std::endl;
-    ATHENA_ERROR(msg);
-  }
-  std::string s = pin->GetOrAddString("montecarlo","weights","emission");
+  std::string s = pin->GetOrAddString("sampling","weights","emission");
   if (s == "emission") return WEIGHTS_EMISSION;
   if (s == "equal") return WEIGHTS_EQUAL;
   if (s == "biased") return WEIGHTS_BIASED;
   std::stringstream msg;
   msg << "### FATAL ERROR in function [GetWeightScheme]" << std::endl
-      << "<montecarlo>/weights = " << s << " is not one of emission, equal, biased"
+      << "<sampling>/weights = " << s << " is not one of emission, equal, biased"
       << std::endl;
   ATHENA_ERROR(msg);
   return WEIGHTS_EMISSION;

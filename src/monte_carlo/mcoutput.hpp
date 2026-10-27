@@ -231,6 +231,8 @@ public:
   bool mom_flag_src;
   bool mom_flag_usr;
   bool mom_flag_scat;
+  std::string scat_block;  // the <output[n]> block of the mcscat output, whose ne, emin
+                           // and emax (eV) are the bins of the scattering moments
   
   Real time_cgs;
 

@@ -31,6 +31,7 @@
 #include "photon_frames.hpp"
 #include "polarization.hpp"
 #include "tetrad.hpp"
+#include "opacity_table.hpp"
 
 // GSL library
 #if GSL
@@ -46,6 +47,17 @@ class ParameterInput;
 class Photon;
 class PhotonPusher;
 class MCRandom;
+class KompaneetsTable;
+class MRWTables;
+
+//! diffusion domain of the random-walk step: the cell itself, or the largest sphere
+//! around the photon that fits in it
+enum MRWDomain {MRW_DOMAIN_CELL = 0, MRW_DOMAIN_SPHERE = 1};
+//! why a random-walk step declined: no usable frame; the domain too thin once the
+//! comoving extinction and the advection room are known; outside the Kompaneets
+//! description (theta, x theta, absorption, the table's x range); no time budget left
+enum MRWDecline {MRW_DECLINE_FRAME = 0, MRW_DECLINE_THIN = 1, MRW_DECLINE_COMPTON = 2,
+                 MRW_DECLINE_BUDGET = 3, MRW_DECLINE_OTHER = 4};
 class MCBoundaryValues;
 class MCOutoupt;
 class MCCoord;
@@ -76,11 +88,13 @@ static const Real oscf_lya = 0.4164; // oscilator strength for Lya
 } // namespace MCConstants
 
 // Flags for controlling monte carlo emission, scattering, absorption, bcs
-enum EmissionFlag {EMISUSER = 0, EMISNONE = 1, EMISFF = 2, EMISBB = 3, MULTI = 4};
+enum EmissionFlag {EMISUSER = 0, EMISNONE = 1, EMISFF = 2, EMISBB = 3, MULTI = 4,
+                   EMISTABLE = 5};
 enum EmissionGeometry {EMISVOL = 0, EMISAREA = 1, EMISGNONE = 2};
-enum AbsorptionOpacityFlag {ABSUSER = 0, ABSNONE = 1, ABSFF = 2, ABSDUST =3};
+enum AbsorptionOpacityFlag {ABSUSER = 0, ABSNONE = 1, ABSFF = 2, ABSDUST = 3,
+                            ABSTABLE = 4};
 enum AbsorptionMethodFlag {ABSWEIGHT = 0, ABSPROB = 1, ABSTAU = 2};
-// How samples are allocated to cells and weighted, <montecarlo>/weights:
+// How samples are allocated to cells and weighted, <sampling>/weights:
 //   emission  cells are drawn uniformly and the cell's emission goes into the weight
 //   equal     cells are drawn in proportion to their emission and every sample carries
 //             the same weight em_tot/nphot
@@ -142,15 +156,19 @@ Real ThomsonOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
 Real ComptonOpacity(MonteCarloBlock *pmcb,  Photon *pphot, int ip);
 Real ResonanceLineOpacity(MonteCarloBlock *pmcb,  Photon *pphot, int ip);
 Real DustScatteringOpacity(MonteCarloBlock *pmcb,  Photon *pphot, int ip);
+//! the tabulated absorption (absorption = table), see opacity_table.hpp
+Real TableAbsorptionOpacity(MonteCarloBlock *pmcb, Photon *pphot, int ip);
 void GenerateComptonTable(int io);
 Real ComptonCrossSection(Real energy, Real theta);
+//! the thermal Compton cross section [cm^2] at photon energy edim = E/(m_e c^2) and
+//! electron temperature theta = kT/(m_e c^2), from the table GenerateComptonTable built
+Real ComptonSigma(Real edim, Real theta);
 Real Maxwell(Real theta, Real gamma);
 Real KleinNishina(Real x);
 Real ResLinePre();
 Real XsecLorentzian(Real nu);
 Real XsecDoppler(Real nu, Real tgas);
 Real XsecVoigt(Real nu, Real tgas);
-void InitializeAccelerationOpacity(MonteCarloBlock *pmcb);
 //--------------------- prototypes for scatter.cpp functions -----------------------------
 void NoScatter(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe);
 void ScatterIsotropic(MonteCarloBlock *pmcb, Photon *pphot, int ips, int ipe);
@@ -172,6 +190,9 @@ Real GetEmissionFreeFree(MonteCarloBlock *pmcb, int k, int j, int i, int etype);
 void PhotonEmitFreeFree(MonteCarloBlock *pmcb, Photon *pphot, Real lemin, Real lemax,
                         int ip);
 Real GetEmissionBlackbody(MonteCarloBlock *pmcb, int k, int j, int i, int etype);
+//! emission = table: the cell's tabulated emission, and a photon drawn from it
+Real GetEmissionTable(MonteCarloBlock *pmcb, int k, int j, int i, int etype);
+void PhotonEmitTable(MonteCarloBlock *pmcb, Photon *pphot, int ip);
 void PhotonEmitBlackbody(MonteCarloBlock *pmcb, Photon *pphot, BoundaryFace face, int ip);
 Real PlanckDist(Real temp, MCRandom *pran);
 void GetZonePositionCartesian(Photon *pphot, MCRandom *pran, MCCoord *pco, int ip);
@@ -253,11 +274,23 @@ public:
 
   Real tint;   // Monte Carlo timestep
   Real tmax;   // Maximum evolution time
-  int cadence; // cycle cadence MC called in dynamic runs
+  int cadence; // default cycle cadence of every emission type in dynamic runs
   Real cadence_frac; // energy fraction threshold for cadence > 1
-  int last_transport_cycle; // -1 until the first transport
+  int last_transport_cycle; // -1 until the first transport (of any type)
   Real last_transport_time; // mesh time at the start of the last transport's step
+  Real last_transport_end; // mesh time at the end of the last transport's step
   Real ttransport; // simulation time the transport has covered, in code units
+  // Per emission type, so that the types of a multi run can transport at their own
+  // cadences in a dynamic run
+  int *cadence_type; // cadence of each type
+  int *last_transport_cycle_type; // cycle of each type's last transport
+  Real *tint_type; // code time each type's next transport has to cover
+  Real *tint_last_type; // cgs tint of each type's last transport
+  bool *due_type; // whether each type is due this cycle
+  //! the tint an emission type's moments are normalized by (tint before any transport)
+  Real TintOfType(int etype) const {
+    return (tint_last_type[etype] > 0.) ? tint_last_type[etype] : tint;
+  }
   Real weightratio; // used for setting minimum weight for absorption
   Real roulette; // determines if low weight samples are absorbed or survive
   // Path stretching paramters
@@ -320,11 +353,17 @@ public:
 
   MCPolarization polarized;// how much of the polarization state is tracked
   bool acceleration;  // use MRW acceleration
-  bool computedmin;
-  //! <montecarlo>/compute_dmin: build MCCoord::dmin even without MRW acceleration, for a
-  //! user hook that needs the smallest cell width
   bool compute_dmin;
-  bool time_acc;  // use MRW acceleration with time limit
+  Real accel_tau;
+  Real accel_pmax; // cap steps time
+  std::string kgreens_file; // green's function table file
+  KompaneetsTable *kgreens;
+  MRWDomain accel_domain; // cell (default) or sphere
+  Real accel_face_tau; // cell depth that triggers MRW
+  MRWTables *mrw; // MRW table link
+  //! the multigroup opacity table of emission = table / absorption = table, else null
+  OpacityTable *optab;
+  bool accel_report; // report on MRW usage and success
   bool raytrace_flag; // Will trace photons rather than scatter
   bool general_pusher_flag; // Use integration for photon movement
   bool verbose; // print out more information during run
@@ -418,13 +457,13 @@ public:
     std::vector<Real> rb;
     std::vector<char> sb;
   };
-  //! <montecarlo> lb_test_repack: none; local -- at the top of every RunMonteCarlo pack,
+  //! <loadbalancing> test_repack: none; local -- at the top of every RunMonteCarlo pack,
   //! destroy and rebuild every block in place, no mesh call, which must be bitwise
   //! neutral; mesh -- run the mesh's redistribution with unchanged costs and treat every
   //! block as departing and arriving, which exercises the hooks end to end.
   enum LbTestMode {LBTEST_NONE = 0, LBTEST_LOCAL = 1, LBTEST_MESH = 2};
   LbTestMode lb_test_repack;
-  //! <montecarlo> lb_test_costs: measured (the default) or alternate -- synthetic block
+  //! <loadbalancing> test_costs: measured (the default) or alternate -- synthetic block
   //! costs of 3 and 1 on the two halves of the gid range, swapped every balance, so that
   //! a known set of blocks changes rank each time.  Needs <loadbalancing> balancer =
   //! manual, whose cost path reads MeshBlock::cost_ as given.
@@ -445,7 +484,7 @@ public:
   //! and read back at startup, so a run on the same mesh starts balanced
   std::string lb_cost_file;
   bool lb_costs_loaded;
-  //! <montecarlo> lb_min_gain: a redistribution is taken only if the busiest rank of the
+  //! <loadbalancing> min_gain: a redistribution is taken only if the busiest rank of the
   //! partition the mesh would choose is at least this fraction below the current one.
   //! The mesh tests whether the current layout is imbalanced, not whether its greedy
   //! contiguous partition improves on it, and with few blocks per rank it can be worse.
@@ -463,17 +502,17 @@ public:
   //! gather and judge, in one blocking step
   bool RedistributionWorthwhile();
   //! the partition of a cost list the mesh will use when it redistributes: the
-  //! module's optimal contiguous one under <montecarlo> lb_partition = optimal (the
+  //! module's optimal contiguous one under <loadbalancing> partition = optimal (the
   //! default), the mesh's greedy CalculateLoadBalance under greedy.  Called by the mesh
   //! from RedistributeAndRefineMeshBlocks and by the prediction guard, so the two agree.
   void Partition(double *cost, int nb, int *rlist, int *slist, int *nlist) const;
   bool lb_partition_optimal;
-  //! <montecarlo> lb_cost_decay: after every balance check the accumulated block costs
+  //! <loadbalancing> cost_decay: after every balance check the accumulated block costs
   //! are scaled by this, so what the next check sees leans toward the recent window.
   //! 1 (the default) keeps everything since the last redistribution.
   Real lb_cost_decay;
   void DecayCosts();
-  //! <montecarlo> lb_initial = none|photons: with photons and no cost file, the first
+  //! <loadbalancing> initial = none|photons: with photons and no cost file, the first
   //! transport is balanced on each block's share of the photons to emit before any is
   //! moved.  Informative for equal-weight emission, where that share follows the
   //! emissivity; uniform, and so useless, for the variable-weight scheme.
@@ -620,8 +659,59 @@ public:
   bool coupled; // Whether time dependent code is coupled to hydro
   bool coherent_scattering; // photon does notchange energy after scattering
   bool acceleration;  // use MRW acceleration
-  bool computedmin;
-  bool time_acc;  // use MRW acceleration with time limit
+  AthenaArray<int> accel_mask; // cell mask for MRW acceleration
+  int64_t nmrw, nmrw_decline; // MRW steps taken and declined
+  Real nmrw_scat;
+  static const int NMRWDECLINE = 5;
+  int64_t nmrw_declined[NMRWDECLINE]; // the declines by reason (MRWDecline)
+  //! scatterings by cell optical half-width, bin k holding [2^(k-4), 2^(k-3))
+  static const int NSCATBINS = 20;
+  int64_t scat_tau_hist[NSCATBINS];
+  void BinScatteringDepth(Photon *pphot, int ip);
+
+  // Tabulated opacities (pmy_mc->optab != nullptr), active cells only; see
+  // opacity_table.hpp and BuildOpacityTables
+  //! 1 where the table applies, 0 where a problem generator masks a cell out (ghost
+  //! inclusive, indexed like rho)
+  AthenaArray<int> tab_mask;
+  //! each active cell's place on the (T, rho) grid, [TableIndex(kt,jt,it)]
+  std::vector<TableCell> tab_cell;
+  //! the cell's total emission [photons/cm^3/s], (kt,jt,it)
+  AthenaArray<Real> tab_emis_tot;
+  //! cell storage only: the nabs extinctions [1/cm] and the ngroups+1 values of the
+  //! normalized cumulative emission of each cell, (kt,jt,it,l)
+  AthenaArray<Real> tab_abs, tab_emis_cum;
+  //! cell storage with two_band: the high and low band extinctions, the high-band
+  //! fraction (1 where the group is one band) and whether the high band is thermalized
+  AthenaArray<Real> tab_abs_hi, tab_abs_lo, tab_w;
+  AthenaArray<int> tab_thick;
+  bool table_two_band;  // optab->two_band, read per interaction
+  Real table_decorrelate;  // optab->tb_decorrelate, read per cell crossing
+  //! global storage scratch: 5 nabs values then ngroups+1 cumulative values
+  std::vector<Real> tab_scratch_;
+  //! samples absorbed in their first step, before any scattering: with two_band the
+  //! cost of the high band's emission in cells where it is not thermalized
+  int64_t nabs_first;
+  //! cells by source over the last build: table, free-free fallback, masked; and the
+  //! off-grid counts by axis (a cell can be off both)
+  enum {TABCOUNT_TABLE = 0, TABCOUNT_FREEFREE = 1, TABCOUNT_CUT = 2, TABCOUNT_OFF_RHO = 3,
+        TABCOUNT_OFF_TEMP = 4, NTABCOUNT = 5};
+  int64_t tab_count[NTABCOUNT];
+  int TableIndex(int kt, int jt, int it) const { return (kt*nx2 + jt)*nx1 + it; }
+  void BuildOpacityTables();
+  //! extinction l of cell (i3,i2,i1) [1/cm]: group l (mean reading) or node l (edge)
+  Real TableExtinction(int i3, int i2, int i1, int l) const;
+  //! the cell's normalized cumulative emission over its groups; returns the total
+  Real TableEmissionCumulative(int i3, int i2, int i1, const Real *&cum);
+  //! the bands of group l of cell (i3,i2,i1): the Planck extinction, the high and low
+  //! band extinctions, the high-band fraction, and whether the high band is thermalized
+  void TableBands(int i3, int i2, int i1, int l, Real &chi, Real &chi_h, Real &chi_l,
+                  Real &w, bool &thick);
+  //! the cell's scattering per gram for group g: Thomson or thermal Compton on
+  //! species(0), zero for other scattering choices
+  Real TableScatteringPerGram(int g, int i3, int i2, int i1) const;
+  //! the cell's size [cm], the cube root of its volume
+  Real TableCellWidth(int i3, int i2, int i1) const;
 
   // Set flags
 
@@ -676,6 +766,10 @@ public:
   AthenaArray<Real> freq_scat_mid;
   AthenaArray<Real> sourceterms;
   AthenaArray<Real> sourceterms_error;
+  //! Dynamic runs only: the source terms, scattering moments and user moments are
+  //! accumulated over all types in the arrays above; when types run at their own cadence
+  //! contributions are converted to a rate at the end of its transport
+  AthenaArray<Real> srcrate, srcrate_error, scatrate, scatrate_error, userrate;
   Real force_pend_sum_[3];
   int force_pend_i1_, force_pend_i2_, force_pend_i3_;
   AthenaArray<Real> scalars;
@@ -693,8 +787,6 @@ public:
   AthenaArray<Real> bcc;
   AthenaArray<Real> boost_cmv;
   AthenaArray<Real> boost_lab;
-  AthenaArray<Real> planck_opacity; // for acceleration
-  AthenaArray<Real> planck_inv_opacity; // for acceleration
 
   // functions
   void InitUserMonteCarloBlockData(ParameterInput *pin);
@@ -711,6 +803,9 @@ public:
   void FinalizePhoton(Photon *pphot, int ip);
   void UpdateMoments(Photon *pphot, Real dl, Real etau, int ip);
   void UpdateMoments(Photon *pphot, Real dl, int ip);
+  //! the random-walk step: the whole path, isotropic, at one energy
+  void UpdateMomentsMRW(Photon *pphot, Real ct, Real energy, const Real beta[3], Real gam,
+                        int ip);
   void UpdateMomentsAcceleration(Photon *pphot, Real dl, Real pl, Real k1, Real k2,
                                  Real k3,Real etau, int ip);
   void NormalizeMoments(bool normalize);
@@ -725,7 +820,10 @@ public:
   void ComovingFrameMatrix(int k, int j, int i, const AthenaArray<Real> &g,
                            const AthenaArray<Real> &gi, Real lam[4][4]);
   void DeriveComovingMoments();
-  void ResetMoments();
+  //! etype < 0: every moment array; etype >= 0: that type's slot
+  void ResetMoments(int etype = -1);
+  //! Dynamic runs: hold the type's accumulated source terms
+  void StoreTypeRates(int etype);
   void UpdateSourceTerms(Photon *pphot, Real energy0, Real weight0,
                          Real k1p0, Real k2p0, Real k3p0, int ip);
   void NormalizeSourceTerms(bool normalize);
@@ -762,14 +860,21 @@ public:
   void FluidFourVelocity(const Real gcov[4][4], const Real gcon[4][4], int i3, int i2,
                          int i1, Real ucon[4]) const;
 
+  // The fluid-derived arrays: each Get function calls the user function enrolled for
+  // that quantity, else the Default one, which holds the module's own conversion and
+  // is public so that a user function can call it and modify the result.  Velocity,
+  // scalars and the magnetic field have no user function.
   void GetDensity();
-  void GetNumberDensity();
-  void ComputeFreeFreePrefactor();
-  void GetScalars();
-  void GetVelocity();
-  void SetNormalObserver();
-  void GetBField();
+  void DefaultDensity();
   void GetTemperature();
+  void DefaultTemperature();
+  void GetNumberDensity();
+  void DefaultNumberDensity();
+  void GetVelocity();
+  void GetScalars();
+  void GetBField();
+  void ComputeFreeFreePrefactor();
+  void SetNormalObserver();
   void ComputeTransformations();
   void TransformToComoving(Photon *pphot, int ips, int ipe);
   void TransformToCoordinate(Photon *pphot, int ips, int ipe);
@@ -836,5 +941,31 @@ inline void MonteCarloBlock::AccumulateMoments(AthenaArray<Real> &mom, int type,
       base[MomentSlot[a][b]*stride] += weight * n[a-1] * n[b-1];
 }
 
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MonteCarloBlock::TableExtinction(int i3, int i2, int i1, int l) const
+//! \brief extinction l of an active cell: stored in cell storage, interpolated from the
+//! rank's table in global storage.  Inline because the absorption opacity calls it per
+//! interaction, and per step under the general pusher.
+
+inline Real MonteCarloBlock::TableExtinction(int i3, int i2, int i1, int l) const {
+  const int kt = i3-ks, jt = i2-js, it = i1-is;
+#ifdef DEBUG
+  // The tables are dimensioned on active cells, so a photon in a ghost cell would read
+  // past its block's slice.  UpdateZone changes a photon's status the moment it leaves
+  // the active range, so this cannot fire; the failure it guards is a silent overread.
+  if (i1 < is || i1 > ie || i2 < js || i2 > je || i3 < ks || i3 > ke) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarloBlock::TableExtinction" << std::endl
+        << "cell (" << i3 << "," << i2 << "," << i1 << ") is outside the active range on "
+        << "gid " << pmy_block->gid << std::endl;
+    ATHENA_ERROR(msg);
+  }
+#endif
+  const OpacityTable *tab = pmy_mc->optab;
+  if (tab->cell_storage) return tab_abs(kt,jt,it,l);
+  return tab->Extinction(l, tab_cell[TableIndex(kt,jt,it)], tgas(i3,i2,i1),
+                       rho(i3,i2,i1));
+}
 
 #endif // MONTECARLO_HPP

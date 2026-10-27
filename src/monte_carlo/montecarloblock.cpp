@@ -86,7 +86,6 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   boosts = pmy_mc->boosts;
   coupled = pmy_mc->coupled;
   acceleration = pmy_mc->acceleration;
-  time_acc = pmy_mc->time_acc;
   // set in mcoutput if output requested
   mom_flag_lab = pmy_mc->pmcout->mom_flag_lab;
   mom_flag_com = pmy_mc->pmcout->mom_flag_com;
@@ -247,8 +246,6 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   }
 
   // Set up photon movement and initialization methods
-  computedmin = acceleration || pmy_mc->compute_dmin;
-  pmy_mc->computedmin = computedmin;
   tetrads = true;
   // Number of cells including ghosts, for the standalone (pmb == nullptr) constructors.
   const int mc1 = nx1+2*(NGHOST), mc2 = nx2+2*(NGHOST), mc3 = nx3+2*(NGHOST);
@@ -263,12 +260,12 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       if (pmy_mc->general_pusher_flag) {
         ppusher = new GeneralPusher(this);
         pcoord = (pmb != nullptr) ? new MCCartesian(pmb->pcoord,this)
-                                  : new MCCartesian(mc1,mc2,mc3,computedmin);
+                                  : new MCCartesian(mc1,mc2,mc3,pmy_mc->compute_dmin);
       } else {
         tetrads = false;
         ppusher = new CartesianPusher(this);
         pcoord = (pmb != nullptr) ? new MCCoord(pmb->pcoord,this)
-                                  : new MCCoord(mc1,mc2,mc3,computedmin);
+                                  : new MCCoord(mc1,mc2,mc3,pmy_mc->compute_dmin);
       }
       break;
 
@@ -277,12 +274,12 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       if (pmy_mc->general_pusher_flag) {
         ppusher = new GeneralPusher(this);
         pcoord = (pmb != nullptr) ? new MCSphericalPolar(pmb->pcoord,this)
-                                  : new MCSphericalPolar(mc1,mc2,mc3,computedmin);
+                                  : new MCSphericalPolar(mc1,mc2,mc3,pmy_mc->compute_dmin);
       } else {
         tetrads = false;
         ppusher = new SphericalPolarPusher(this);
         pcoord = (pmb != nullptr) ? new MCCoord(pmb->pcoord,this)
-                                  : new MCCoord(mc1,mc2,mc3,computedmin);
+                                  : new MCCoord(mc1,mc2,mc3,pmy_mc->compute_dmin);
       }
       break;
 
@@ -290,21 +287,21 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       GetZonePosition = GetZonePositionCylindrical;
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCCylindrical(pmb->pcoord,this)
-                                : new MCCylindrical(mc1,mc2,mc3,computedmin);
+                                : new MCCylindrical(mc1,mc2,mc3,pmy_mc->compute_dmin);
       break;
 
     case MCCOORD_MINKOWSKI:
       GetZonePosition = GetZonePositionCartesian;
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCMinkowski(pmb->pcoord,this)
-                                : new MCMinkowski(mc1,mc2,mc3,computedmin);
+                                : new MCMinkowski(mc1,mc2,mc3,pmy_mc->compute_dmin);
       break;
 
     case MCCOORD_KERR_SCHILD:
       GetZonePosition = GetZonePositionSphericalPolar;//approximate
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCKerrSchild(pmb->pcoord,this)
-                                : new MCKerrSchild(mc1,mc2,mc3,computedmin);
+                                : new MCKerrSchild(mc1,mc2,mc3,pmy_mc->compute_dmin);
       set_bh_params = (pmb == nullptr);
       break;
 
@@ -312,7 +309,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       GetZonePosition = GetZonePositionSphericalPolar;//approximate
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCBoyerLindquist(pmb->pcoord,this)
-                                : new MCBoyerLindquist(mc1,mc2,mc3,computedmin);
+                                : new MCBoyerLindquist(mc1,mc2,mc3,pmy_mc->compute_dmin);
       set_bh_params = (pmb == nullptr);
       break;
 
@@ -323,7 +320,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       // then dereferenced it for SetSpin, and read coord/a and coord/m unconditionally
       // even though the MeshBlock path already supplies them.
       pcoord = (pmb != nullptr) ? new MCKerrSchildCartesian(pmb->pcoord,this)
-                                : new MCKerrSchildCartesian(mc1,mc2,mc3,computedmin);
+                                : new MCKerrSchildCartesian(mc1,mc2,mc3,pmy_mc->compute_dmin);
       set_bh_params = (pmb == nullptr);
       break;
 
@@ -331,7 +328,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
       GetZonePosition = GetZonePositionCartesian;
       ppusher = new GeneralPusher(this);
       pcoord = (pmb != nullptr) ? new MCSnake(pmb->pcoord,this)
-                                : new MCSnake(mc1,mc2,mc3,computedmin);
+                                : new MCSnake(mc1,mc2,mc3,pmy_mc->compute_dmin);
       // Not <coord>/a: gr_user requires that name for the black hole spin and GRUser
       // reads it unconditionally, so the shear amplitude needs its own key.  Set on both
       // paths, since the MCCoord(Coordinates*) constructor has no snake parameters to
@@ -362,6 +359,8 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     AbsorptionOpacity = FreeFreeAbsorptionOpacity;
   } else if (absorption_opac == ABSDUST) {
     AbsorptionOpacity = DustAbsorptionOpacity;
+  } else if (absorption_opac == ABSTABLE) {
+    AbsorptionOpacity = TableAbsorptionOpacity;
   }
   // Get number of species
   nspec = pin->GetOrAddInteger("problem","nspec",2);
@@ -395,7 +394,9 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   //     is used rather than only where it was built.
   if (GENERAL_RELATIVITY) {
     uprim.NewAthenaArray(ncells3,ncells2,ncells1,3);
-  } else if (boosts || IsPolarized(pmy_mc->polarized)) {
+  } else if (boosts || IsPolarized(pmy_mc->polarized) || pmy_mc->general_pusher_flag) {
+    // the general pusher's frame transforms read vel in flat spacetime whether or not the
+    // fluid moves, so it exists (at rest) for them too
     vel.NewAthenaArray(ncells3,ncells2,ncells1,4);
     if (!boosts) {
       // Value is constant in time, unlike the fluid velocity, so it is set once rather than
@@ -421,20 +422,34 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   if (mom_flag_com) moments_com.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
   if (mom_flag_coord)
     moments_coord.NewAthenaArray(ntype,nmom,ncells3,ncells2,ncells1);
-  if (pmy_mc->nuser_mom > 0)
+  if (pmy_mc->nuser_mom > 0) {
     moments_user.NewAthenaArray(pmy_mc->nuser_mom,ncells3,ncells2,ncells1);
+    if (pmy_mc->dynamic)
+      userrate.NewAthenaArray(ntype,pmy_mc->nuser_mom,ncells3,ncells2,ncells1);
+  }
   nsrc = 10;
   if (call_srcterms) {
     sourceterms.NewAthenaArray(nsrc,ncells3,ncells2,ncells1);
     sourceterms_error.NewAthenaArray(3,ncells3,ncells2,ncells1);
+    if (pmy_mc->dynamic) {
+      srcrate.NewAthenaArray(ntype,nsrc,ncells3,ncells2,ncells1);
+      srcrate_error.NewAthenaArray(ntype,3,ncells3,ncells2,ncells1);
+    }
   }
   if (mom_flag_scat) {
-    nf_scat = pin->GetInteger("montecarlo","nf_scat");
+    // the bins of the scattering moments are those of the mcscat output's own block,
+    // named as a spectrum output names its bins
+    const std::string &scat_block = pmy_mc->pmcout->scat_block;
+    nf_scat = pin->GetInteger(scat_block,"ne");
     Real everg = 1.602176634e-12;
-    emin_scat = pin->GetReal("montecarlo","emin_scat") * everg;
-    emax_scat = pin->GetReal("montecarlo","emax_scat") * everg;
+    emin_scat = pin->GetReal(scat_block,"emin") * everg;
+    emax_scat = pin->GetReal(scat_block,"emax") * everg;
     moments_scat.NewAthenaArray(nf_scat,ncells3,ncells2,ncells1);
     moments_scat_error.NewAthenaArray(nf_scat,ncells3,ncells2,ncells1);
+    if (pmy_mc->dynamic) {
+      scatrate.NewAthenaArray(ntype,nf_scat,ncells3,ncells2,ncells1);
+      scatrate_error.NewAthenaArray(ntype,nf_scat,ncells3,ncells2,ncells1);
+    }
     dloge_scat = (std::log10(emax_scat/emin_scat))/static_cast<Real>(nf_scat);
     energy_scat.NewAthenaArray(nf_scat+1);
     freq_scat_mid.NewAthenaArray(nf_scat);
@@ -471,10 +486,38 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     if (pmy_mc->nescape > 0) escape_prob.NewAthenaArray(nx3,nx2,nx1,pmy_mc->nescape);
   }
   wesc_sum = wesc_sq = 0.;
-  if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
-    planck_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
-    planck_inv_opacity.NewAthenaArray(ncells3,ncells2,ncells1);
+  nmrw = nmrw_decline = 0;
+  nmrw_scat = 0.;
+  for (int b=0; b<NSCATBINS; ++b) scat_tau_hist[b] = 0;
+  for (int b=0; b<NMRWDECLINE; ++b) nmrw_declined[b] = 0;
+  if (acceleration) {
+    accel_mask.NewAthenaArray(ncells3,ncells2,ncells1);
+    for (int n=0; n<accel_mask.GetSize(); ++n) accel_mask(n) = 1;
   }
+  if (pmy_mc->optab != nullptr) {
+    // Tabulated opacities: the mask covers the ghosts like rho so a problem generator
+    // can index it the same way; the tables themselves cover the active cells only.
+    const int nabs = pmy_mc->optab->nabs, ncum = pmy_mc->optab->ngroups+1;
+    tab_mask.NewAthenaArray(ncells3,ncells2,ncells1);
+    for (int n=0; n<tab_mask.GetSize(); ++n) tab_mask(n) = 1;
+    tab_cell.resize(static_cast<std::size_t>(nx1)*nx2*nx3);
+    tab_emis_tot.NewAthenaArray(nx3,nx2,nx1);
+    if (pmy_mc->optab->cell_storage) {
+      tab_abs.NewAthenaArray(nx3,nx2,nx1,nabs);
+      tab_emis_cum.NewAthenaArray(nx3,nx2,nx1,ncum);
+      if (pmy_mc->optab->two_band) {
+        tab_abs_hi.NewAthenaArray(nx3,nx2,nx1,nabs);
+        tab_abs_lo.NewAthenaArray(nx3,nx2,nx1,nabs);
+        tab_w.NewAthenaArray(nx3,nx2,nx1,nabs);
+        tab_thick.NewAthenaArray(nx3,nx2,nx1,nabs);
+      }
+    }
+    tab_scratch_.resize(5*nabs + ncum);
+    for (int n=0; n<NTABCOUNT; ++n) tab_count[n] = 0;
+  }
+  table_two_band = (pmy_mc->optab != nullptr) && pmy_mc->optab->two_band;
+  table_decorrelate = table_two_band ? pmy_mc->optab->tb_decorrelate : 0.;
+  nabs_first = 0;
 
  // Create user monte carlo block data
   InitUserMonteCarloBlockData(pin);
@@ -517,14 +560,25 @@ MonteCarloBlock::~MonteCarloBlock() {
     sourceterms.DeleteAthenaArray();
     sourceterms_error.DeleteAthenaArray();
   }
+  // the held rates of a dynamic run; deleting an array never allocated is a no-op
+  srcrate.DeleteAthenaArray();
+  srcrate_error.DeleteAthenaArray();
+  scatrate.DeleteAthenaArray();
+  scatrate_error.DeleteAthenaArray();
+  userrate.DeleteAthenaArray();
   if (pmy_mc->emission_array) emission.DeleteAthenaArray();
   if (pmy_mc->weight_scheme[0] != WEIGHTS_EMISSION) emit_count_.DeleteAthenaArray();
   if (importance.GetSize() > 0) importance.DeleteAthenaArray();
   if (escape_prob.GetSize() > 0) escape_prob.DeleteAthenaArray();
-  if (acceleration && !(coherent_scattering) && !(scattering_meth == SCATRES)) {
-    planck_opacity.DeleteAthenaArray();
-    planck_inv_opacity.DeleteAthenaArray();
-  }
+  if (accel_mask.GetSize() > 0) accel_mask.DeleteAthenaArray();
+  if (tab_mask.GetSize() > 0) tab_mask.DeleteAthenaArray();
+  if (tab_emis_tot.GetSize() > 0) tab_emis_tot.DeleteAthenaArray();
+  if (tab_abs.GetSize() > 0) tab_abs.DeleteAthenaArray();
+  if (tab_emis_cum.GetSize() > 0) tab_emis_cum.DeleteAthenaArray();
+  if (tab_abs_hi.GetSize() > 0) tab_abs_hi.DeleteAthenaArray();
+  if (tab_abs_lo.GetSize() > 0) tab_abs_lo.DeleteAthenaArray();
+  if (tab_w.GetSize() > 0) tab_w.DeleteAthenaArray();
+  if (tab_thick.GetSize() > 0) tab_thick.DeleteAthenaArray();
 }
 
 //----------------------------------------------------------------------------------------
@@ -630,6 +684,11 @@ void MonteCarloBlock::PackForTransfer(std::vector<int> &ib, std::vector<Real> &r
   PackArray(rb, moments_scat_error);
   PackArray(rb, sourceterms);
   PackArray(rb, sourceterms_error);
+  PackArray(rb, srcrate);
+  PackArray(rb, srcrate_error);
+  PackArray(rb, scatrate);
+  PackArray(rb, scatrate_error);
+  PackArray(rb, userrate);
   PackArray(rb, emission);
   const std::string state = pran->SaveState();
   sb.assign(state.begin(), state.end());
@@ -691,6 +750,11 @@ void MonteCarloBlock::UnpackFromTransfer(const std::vector<int> &ib,
   UnpackArray(rb, pr, moments_scat_error, "moments_scat_error");
   UnpackArray(rb, pr, sourceterms, "sourceterms");
   UnpackArray(rb, pr, sourceterms_error, "sourceterms_error");
+  UnpackArray(rb, pr, srcrate, "srcrate");
+  UnpackArray(rb, pr, srcrate_error, "srcrate_error");
+  UnpackArray(rb, pr, scatrate, "scatrate");
+  UnpackArray(rb, pr, scatrate_error, "scatrate_error");
+  UnpackArray(rb, pr, userrate, "userrate");
   UnpackArray(rb, pr, emission, "emission");
   if (pi != ib.size() || pr != rb.size()) {
     std::stringstream msg;
@@ -770,6 +834,7 @@ void MonteCarloBlock::RayTracePhotonsOnBlock(int etype) {
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
+        if (pphot->nscp[ip] == 0 && pphot->nmvp[ip] <= 1) nabs_first++;
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == DESTROYED) {
         ndes++;
@@ -907,6 +972,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         FromScatteringBasis(this, pphot, ip);
       nscat++;
       pphot->nscp[ip]++;
+      if (pmy_mc->accel_report) BinScatteringDepth(pphot,ip);
       // Scattering starts a new free flight
       pphot->nmvp[ip] = 0;
       pphot->strp[ip] = 0.;
@@ -924,9 +990,12 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         }
       }
 
-      // Update the absorption and scattering extinction coefficients
-      // if scattering can change sample energy.
-      if (!coherent_scattering) {
+      // Update the absorption and scattering extinction coefficients if scattering can
+      // change the sample's energy, or its band: with two_band the electron's thermal
+      // Doppler shift moves the photon between the lines and the gaps of its group, so
+      // the band rank is redrawn and the absorption follows.
+      if (table_two_band) pphot->ubp[ip] = pran->uniform();
+      if (!coherent_scattering || table_two_band) {
         pphot->acp[ip] = AbsorptionOpacity(this,pphot,ip);
         pphot->scp[ip] = ScatteringOpacity(this,pphot,ip);
       }
@@ -970,6 +1039,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == ABSORBED) {
         nabs++;
+        if (pphot->nscp[ip] == 0 && pphot->nmvp[ip] <= 1) nabs_first++;
         pphot->RemoveOneParticle(ip);
       } else if (pphot->statp[ip] == DESTROYED) {
         pphot->RemoveOneParticle(ip);
@@ -994,9 +1064,33 @@ void MonteCarloBlock::CoupleMonteCarloToFluid(Real dt) {
   Real edot_cgs_inv = time_cgs / (rho_cgs * SQR(vel_cgs));
   Real pdot_cgs_inv = time_cgs / (rho_cgs * vel_cgs);
 
+  MeshBlock *pmb = pmy_block;
+  if (pmy_mc->dynamic) {
+    // the held rates, summed over the emission types (StoreTypeRates)
+    const int ntype = pmy_mc->ntype;
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          Real rs0 = 0., rf1 = 0., rf2 = 0., rf3 = 0.;
+          for (int t=0; t<ntype; ++t) {
+            rs0 += srcrate(t,MCRS0,k,j,i);
+            rf1 += srcrate(t,MCRF1,k,j,i);
+            rf2 += srcrate(t,MCRF2,k,j,i);
+            rf3 += srcrate(t,MCRF3,k,j,i);
+          }
+          const Real rho = pmb->phydro->u(IDN,k,j,i);
+          pmb->phydro->u(IEN,k,j,i) += dt * edot_cgs_inv * rs0;
+          pmb->phydro->u(IM1,k,j,i) += dt * pdot_cgs_inv * rf1 * rho;
+          pmb->phydro->u(IM2,k,j,i) += dt * pdot_cgs_inv * rf2 * rho;
+          pmb->phydro->u(IM3,k,j,i) += dt * pdot_cgs_inv * rf3 * rho;
+        }
+      }
+    }
+    return;
+  }
+
   NormalizeSourceTerms(true);
 
-  MeshBlock *pmb = pmy_block;
   for (int k=pmb->ks; k<=pmb->ke; ++k) {
       for (int j=pmb->js; j<=pmb->je; ++j) {
 #pragma omp simd
@@ -1020,10 +1114,12 @@ void MonteCarloBlock::CoupleMonteCarloToFluid(Real dt) {
 //! source normalized as CoupleMonteCarloToFluid applies it
 
 Real MonteCarloBlock::HeldEnergyFraction(Real elapsed) {
-  if (!coupled) return 0.;
+  if (!coupled || srcrate.GetSize() == 0) return 0.;
   const Real edot_cgs_inv = time_cgs / (rho_cgs * SQR(vel_cgs));
-  const Real norm = elapsed * edot_cgs_inv / pmy_mc->tint;
+  // the held rates are already per unit volume and time
+  const Real norm = elapsed * edot_cgs_inv;
   const Real gm1 = pmy_block->peos->GetGamma() - 1.;
+  const int ntype = pmy_mc->ntype;
   MeshBlock *pmb = pmy_block;
   Real frac = 0.;
   for (int k=pmb->ks; k<=pmb->ke; ++k) {
@@ -1031,7 +1127,9 @@ Real MonteCarloBlock::HeldEnergyFraction(Real elapsed) {
       for (int i=pmb->is; i<=pmb->ie; ++i) {
         const Real eint = pmb->phydro->w(IPR,k,j,i) / gm1;
         if (eint > 0.) {
-          const Real de = norm * std::abs(sourceterms(MCRS0,k,j,i)) / pcoord->vol(k,j,i);
+          Real rs0 = 0.;
+          for (int t=0; t<ntype; ++t) rs0 += srcrate(t,MCRS0,k,j,i);
+          const Real de = norm * std::abs(rs0);
           frac = std::max(frac, de / eint);
         }
       }
@@ -1434,21 +1532,22 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
   // commute, but doing it here keeps the derived array in step with what is written out.
   if (mom_flag_com && !accumulate_com && normalize) DeriveComovingMoments();
 
-  // Get integration time
-  // Fix for dynamic MC
+  // the integration time: that of each type's last transport for the per-type
+  // frames, the current one for the arrays accumulated over types
   Real tint = pmy_mc->tint;
   Real norm;
 
   if (mom_flag_lab) {
     for (int m=0; m<pmy_mc->ntype; ++m) {
+      const Real tm = pmy_mc->TintOfType(m);
       for (int n=0; n<nmom-3; ++n) {
         for (int k=ks; k<=ke; ++k) {
           for (int j=js; j<=je; ++j) {
             for (int i=is; i<=ie; ++i) {
               if (normalize) {
-                norm = 1./ (tint * pcoord->vol(k,j,i));
+                norm = 1./ (tm * pcoord->vol(k,j,i));
               } else {
-                norm = tint * pcoord->vol(k,j,i);
+                norm = tm * pcoord->vol(k,j,i);
               }
               moments(m,n,k,j,i) *= norm;
             }
@@ -1472,14 +1571,15 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
 
   if (mom_flag_com) {
     for (int m=0; m<pmy_mc->ntype; ++m) {
+      const Real tm = pmy_mc->TintOfType(m);
       for (int n=0; n<nmom-3; ++n) {
         for (int k=ks; k<=ke; ++k) {
           for (int j=js; j<=je; ++j) {
             for (int i=is; i<=ie; ++i) {
               if (normalize)
-                norm = 1./ (tint * pcoord->vol(k,j,i));
+                norm = 1./ (tm * pcoord->vol(k,j,i));
               else
-                norm = tint * pcoord->vol(k,j,i);
+                norm = tm * pcoord->vol(k,j,i);
               moments_com(m,n,k,j,i) *= norm;
             }
           }
@@ -1502,14 +1602,15 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
 
   if (mom_flag_coord) {
     for (int m=0; m<pmy_mc->ntype; ++m) {
+      const Real tm = pmy_mc->TintOfType(m);
       for (int n=0; n<nmom-3; ++n) {
         for (int k=ks; k<=ke; ++k) {
           for (int j=js; j<=je; ++j) {
             for (int i=is; i<=ie; ++i) {
               if (normalize)
-                norm = 1./ (tint * pcoord->vol(k,j,i));
+                norm = 1./ (tm * pcoord->vol(k,j,i));
               else
-                norm = tint * pcoord->vol(k,j,i);
+                norm = tm * pcoord->vol(k,j,i);
               moments_coord(m,n,k,j,i) *= norm;
             }
           }
@@ -1530,11 +1631,28 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
     }
   } // end if (mom_flag_com)
 
+  // The scattering and user moments are accumulated over the types.  In a dynamic run
+  // each type's share was converted to a held rate by StoreTypeRates and the accumulator
+  // is idle between transports, so for the output it receives the rates summed over the
+  // types, the errors in quadrature, and is cleared again afterwards.
+  const int ntype = pmy_mc->ntype;
   if (mom_flag_scat) {
     for (int n=0; n<nf_scat; ++n) {
       for (int k=ks; k<=ke; ++k) {
         for (int j=js; j<=je; ++j) {
           for (int i=is; i<=ie; ++i) {
+            if (pmy_mc->dynamic) {
+              Real rate = 0., err2 = 0.;
+              if (normalize) {
+                for (int t=0; t<ntype; ++t) {
+                  rate += scatrate(t,n,k,j,i);
+                  err2 += SQR(scatrate_error(t,n,k,j,i));
+                }
+              }
+              moments_scat(n,k,j,i) = rate;
+              moments_scat_error(n,k,j,i) = std::sqrt(err2);
+              continue;
+            }
             if (normalize)
               norm = 1./ (tint * pcoord->vol(k,j,i));
             else
@@ -1557,6 +1675,13 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
       for (int k=ks; k<=ke; ++k) {
         for (int j=js; j<=je; ++j) {
           for (int i=is; i<=ie; ++i) {
+            if (pmy_mc->dynamic) {
+              Real rate = 0.;
+              if (normalize)
+                for (int t=0; t<ntype; ++t) rate += userrate(t,n,k,j,i);
+              moments_user(n,k,j,i) = rate;
+              continue;
+            }
             if (normalize)
               norm = 1./ (tint * pcoord->vol(k,j,i));
             else
@@ -1571,23 +1696,91 @@ void MonteCarloBlock::NormalizeMoments(bool normalize) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void MonteCarloBlock::ResetMoments()
-//! \brief set moments to zero on block
+//! \fn void MonteCarloBlock::ResetMoments(int etype)
+//! \brief set moments to zero on block: every array for etype < 0 (a static run before
+//! its transport), or one type's slot of the per-type frames plus the shared accumulators
+//! (a dynamic run before that type's transport; the other types keep their held rates)
 
-void MonteCarloBlock::ResetMoments() {
+void MonteCarloBlock::ResetMoments(int etype) {
   // Every moment array that exists, ghost cells included.  Which arrays exist depends
   // on the outputs and user moments requested, and call_moments is true if any does:
   // this used to zero the lab array alone, which is not allocated when only user
   // moments are enrolled (a segfault at the top of every dynamic cycle), and it left
   // the other frames and the user moments accumulating across cycles.
-  AthenaArray<Real> *arrays[] = {&moments, &moments_com, &moments_coord, &moments_user,
-                                 &moments_scat, &moments_scat_error};
-  for (AthenaArray<Real> *a : arrays) {
+  AthenaArray<Real> *per_type[] = {&moments, &moments_com, &moments_coord};
+  AthenaArray<Real> *shared[] = {&moments_user, &moments_scat, &moments_scat_error};
+  for (AthenaArray<Real> *a : per_type) {
+    if (a->GetSize() == 0) continue;
+    if (etype < 0) {
+      std::fill(a->data(), a->data() + a->GetSize(), 0.0);
+    } else {
+      // the slot of one type is contiguous: (type, n, k, j, i)
+      const std::size_t slot = static_cast<std::size_t>(a->GetDim4()) * a->GetDim3()
+                               * a->GetDim2() * a->GetDim1();
+      Real *p = a->data() + static_cast<std::size_t>(etype) * slot;
+      std::fill(p, p + slot, 0.0);
+    }
+  }
+  for (AthenaArray<Real> *a : shared) {
     if (a->GetSize() > 0) std::fill(a->data(), a->data() + a->GetSize(), 0.0);
   }
   // Nothing held back can belong to the cycle that is starting.
   scat_pend_sum_ = 0.0;
   scat_pend_n_ = -1;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::StoreTypeRates(int etype)
+//! \brief dynamic runs: convert the type's accumulated source terms, scattering moments
+//! and user moments to rates (per unit volume and time, errors as standard errors), hold
+//! them in the type's slot, and clear the accumulators for the next type
+
+void MonteCarloBlock::StoreTypeRates(int etype) {
+  FlushPendingErrors();
+  const Real tint = pmy_mc->tint;
+  if (srcrate.GetSize() > 0) {
+    for (int k=ks; k<=ke; ++k) {
+      for (int j=js; j<=je; ++j) {
+        for (int i=is; i<=ie; ++i) {
+          const Real norm = 1. / (tint * pcoord->vol(k,j,i));
+          for (int n=0; n<nsrc; ++n)
+            srcrate(etype,n,k,j,i) = sourceterms(n,k,j,i) * norm;
+          for (int d=0; d<3; ++d)
+            srcrate_error(etype,d,k,j,i) = std::sqrt(sourceterms_error(d,k,j,i)) * norm;
+        }
+      }
+    }
+    ResetSourceTerms();
+  }
+  if (scatrate.GetSize() > 0) {
+    for (int n=0; n<nf_scat; ++n) {
+      for (int k=ks; k<=ke; ++k) {
+        for (int j=js; j<=je; ++j) {
+          for (int i=is; i<=ie; ++i) {
+            const Real norm = 1. / (tint * pcoord->vol(k,j,i));
+            scatrate(etype,n,k,j,i) = moments_scat(n,k,j,i) * norm;
+            scatrate_error(etype,n,k,j,i) = std::sqrt(moments_scat_error(n,k,j,i)) * norm;
+          }
+        }
+      }
+    }
+    std::fill(moments_scat.data(), moments_scat.data() + moments_scat.GetSize(), 0.0);
+    std::fill(moments_scat_error.data(),
+              moments_scat_error.data() + moments_scat_error.GetSize(), 0.0);
+    scat_pend_sum_ = 0.0;
+    scat_pend_n_ = -1;
+  }
+  if (userrate.GetSize() > 0) {
+    for (int n=0; n<pmy_mc->nuser_mom; ++n) {
+      for (int k=ks; k<=ke; ++k) {
+        for (int j=js; j<=je; ++j) {
+          for (int i=is; i<=ie; ++i)
+            userrate(etype,n,k,j,i) = moments_user(n,k,j,i) / (tint * pcoord->vol(k,j,i));
+        }
+      }
+    }
+    std::fill(moments_user.data(), moments_user.data() + moments_user.GetSize(), 0.0);
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -1712,6 +1905,32 @@ void MonteCarloBlock::NormalizeSourceTerms(bool normalize) {
 
   // nothing should be pending here; see NormalizeMoments
   FlushForceError();
+
+  if (pmy_mc->dynamic) {
+    // The accumulator is idle between transports (StoreTypeRates): for the output it
+    // receives the held rates summed over the types, the errors in quadrature, and is
+    // cleared again afterwards.
+    const int ntype = pmy_mc->ntype;
+    for (int k=ks; k<=ke; ++k) {
+      for (int j=js; j<=je; ++j) {
+        for (int i=is; i<=ie; ++i) {
+          for (int n=0; n<nsrc; ++n) {
+            Real rate = 0.;
+            if (normalize)
+              for (int t=0; t<ntype; ++t) rate += srcrate(t,n,k,j,i);
+            sourceterms(n,k,j,i) = rate;
+          }
+          for (int d=0; d<3; ++d) {
+            Real err2 = 0.;
+            if (normalize)
+              for (int t=0; t<ntype; ++t) err2 += SQR(srcrate_error(t,d,k,j,i));
+            sourceterms_error(d,k,j,i) = std::sqrt(err2);
+          }
+        }
+      }
+    }
+    return;
+  }
 
   // Get integration time
   Real tint = pmy_mc->tint;
@@ -2078,10 +2297,15 @@ void MonteCarloBlock::WeightWindow(Photon *pphot, int ip) {
 //! \fn void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip)
 //! \brief a sample below the minimum weight survives with probability roulette and
 //! carries 1/roulette times its weight, or is absorbed; the expected weight is unchanged
+//
+// A sample whose weight is exactly zero is absorbed without a draw: there is nothing to
+// amplify, and a zero-weight survivor would go on to the scattering step, which with
+// scattering = none destroys it.  Weight absorption with no scattering takes every
+// sample through here at its first interaction.
 
 void MonteCarloBlock::RouletteOrAbsorb(Photon *pphot, int ip) {
   const Real p = pmy_mc->roulette;
-  if (p > 0. && pran->uniform() < p)
+  if (pphot->wp[ip] > 0. && p > 0. && pran->uniform() < p)
     pphot->wp[ip] /= p;
   else
     pphot->statp[ip] = ABSORBED;
@@ -2377,8 +2601,13 @@ void MonteCarloBlock::SetEmissionCellWeightArea(Photon *pphot, BoundaryFace face
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetDensity()
-//! \brief Make hard copy of density from MeshBlock to MonteCarloBlock.
-//  Uses hard copy so that rho is always in cgs units
+//! \brief the density in cgs: the enrolled user function, else the default
+//
+// The fluid-derived arrays each have a Get function, which calls the user function
+// enrolled for that quantity or else the Default one, and a public Default function
+// holding the module's own conversion of the fluid state, so that a user function can
+// call the default and then modify its result instead of repeating it.  rho is a copy
+// in cgs rather than a view of the fluid array, so that every reader sees cgs.
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::FillBounds(int &il, int &iu, int &jl, int &ju,
@@ -2467,6 +2696,15 @@ void MonteCarloBlock::GetDensity() {
     pmy_mc->UserGetDensity(this);
     return;
   }
+  DefaultDensity();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DefaultDensity()
+//! \brief the default density: the fluid density times rho_cgs
+
+void MonteCarloBlock::DefaultDensity() {
+
   int il, iu, jl, ju, kl, ku;
   FillBounds(il, iu, jl, ju, kl, ku);
   for (int k=kl; k<=ku; ++k) {
@@ -2480,7 +2718,7 @@ void MonteCarloBlock::GetDensity() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetNumberDensity()
-//! \brief default function for computing number densities if no user function provided.
+//! \brief the number densities: the enrolled user function, else the default
 
 void MonteCarloBlock::GetNumberDensity() {
 
@@ -2488,6 +2726,16 @@ void MonteCarloBlock::GetNumberDensity() {
     pmy_mc->UserGetNumberDensity(this);
     return;
   }
+  DefaultNumberDensity();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DefaultNumberDensity()
+//! \brief the default number densities: the ionized hydrogen-helium mixture of heabund,
+//! or neutral hydrogen for resonant scattering, with the electron density from the
+//! opacity table's free electrons under table_ne
+
+void MonteCarloBlock::DefaultNumberDensity() {
 
   if (pmy_mc->scattering_meth == SCATRES) {
     // Default for resonant scattering assumes pure hydrogen
@@ -2505,10 +2753,10 @@ void MonteCarloBlock::GetNumberDensity() {
     return;
   }
 
-  // For all other cases, the default assumes a composition of hydrogen and helium with
-  // <problem>/heabund helium nuclei per hydrogen nucleus, fully ionized, and computes
-  // the electron and ion number densities.  This is used for electron scattering and
-  // free-free emission/absorption.  species(1) carries sum(Z^2 n_ion).
+  // table_ne = true -> the electron density comes from the opacity table's
+  // free electrons per atom, rho N_free / (Abar m_u), which falls below full ionization
+  // where the gas is cool; the ion density stays that of the ionized mixture.
+  const bool table_ne = (pmy_mc->optab != nullptr) && pmy_mc->optab->table_ne;
 
   Real mp = 1.67262192369e-24;
 
@@ -2520,7 +2768,10 @@ void MonteCarloBlock::GetNumberDensity() {
         Real nh = rho(k,j,i) / (mp*(1.+4.*heabund));
         Real nhe = nh*heabund;
         species(1,k,j,i) = nh + 4. * nhe; // nion
-        species(0,k,j,i) = nh + 2. * nhe; // nel
+        if (table_ne)
+          species(0,k,j,i) = pmy_mc->optab->ElectronDensity(tgas(k,j,i), rho(k,j,i));
+        else
+          species(0,k,j,i) = nh + 2. * nhe; // nel
       }
     }
   }
@@ -2687,8 +2938,7 @@ Real MonteCarloBlock::GasConstant(Real heabund) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::GetTemperature()
-//! \brief default function for computing temperature if no user function provided.
-//  Assumes EOS of the form P=RTd.
+//! \brief the gas temperature in K: the enrolled user function, else the default
 
 void MonteCarloBlock::GetTemperature() {
 
@@ -2696,12 +2946,21 @@ void MonteCarloBlock::GetTemperature() {
     pmy_mc->UserGetTemperature(this);
     return;
   }
+  DefaultTemperature();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DefaultTemperature()
+//! \brief the default temperature: the ideal-gas inversion of pressure over density,
+//! with tgas_cgs or the gas constant of the default composition, floored and capped
+
+void MonteCarloBlock::DefaultTemperature() {
 
   Hydro* phydro = pmy_block->phydro;
 
   // Without tgas_cgs the pressure and density are taken as cgs and inverted with the
-  // gas constant of the default composition (see rgas), the same mixture the default
-  // GetNumberDensity turns into electron and ion densities.  tgas_cgs, when given, is
+  // gas constant of the default composition (see rgas), the same mixture
+  // DefaultNumberDensity turns into electron and ion densities.  tgas_cgs, when given, is
   // the caller's own p/rho to T conversion and is used as is.
   Real tconv;
   if (tgas_cgs <= 0.)
@@ -3162,3 +3421,63 @@ Real MonteCarloBlock::FrequencyShiftComoving(Photon *pphot, int ip, const Real g
     mcb_bcs[BoundaryFace::outer_x3] = input_bcs[BoundaryFace::outer_x3];
   }
   }*/
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::UpdateMomentsMRW(Photon *pphot, Real ct, Real energy, int ip)
+//! \brief the random-walk step's contribution to the lab moments of its cell: the whole
+//!        path ct, isotropic, at one energy.  Exact in expectation over many steps.
+
+void MonteCarloBlock::UpdateMomentsMRW(Photon *pphot, Real ct, Real energy,
+                                       const Real beta[3], Real gam, int ip) {
+  if (!mom_flag_lab) return;
+  const int type = pphot->type[ip];
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  // ct and energy are comoving; this is the comoving energy density estimate
+  const Real ec = pphot->wp[ip]*energy*ct/MCConstants::c_cgs;
+  if (std::isinf(ec) || std::isnan(ec)) {
+    pphot->statp[ip] = DESTROYED;
+    if (pmy_mc->verbose)
+      pphot->PrintPhoton("Warning: Nan/Inf encountered in UpdateMomentsMRW(),"
+                         " photon destroyed",ip);
+    return;
+  }
+  // an isotropic comoving field seen from the lab (the normal observer's frame in GR),
+  // beta the fluid velocity on that frame's legs: E = g^2 (1 + b^2/3) Ec,
+  // F^i = (4/3) g^2 b^i c Ec, P^ij = Ec (d^ij/3 + (4/3) g^2 b^i b^j)
+  const Real b2 = SQR(beta[0]) + SQR(beta[1]) + SQR(beta[2]);
+  const Real g2 = gam*gam;
+  moments(type,MCIER,i3,i2,i1) += g2*(1. + b2/3.)*ec;
+  const Real fc = 4./3.*g2*ec;
+  moments(type,MCIFR1,i3,i2,i1) += fc*beta[0]*MCConstants::c_cgs;
+  moments(type,MCIFR2,i3,i2,i1) += fc*beta[1]*MCConstants::c_cgs;
+  moments(type,MCIFR3,i3,i2,i1) += fc*beta[2]*MCConstants::c_cgs;
+  moments(type,MCIPR11,i3,i2,i1) += ec/3. + fc*beta[0]*beta[0];
+  moments(type,MCIPR22,i3,i2,i1) += ec/3. + fc*beta[1]*beta[1];
+  moments(type,MCIPR33,i3,i2,i1) += ec/3. + fc*beta[2]*beta[2];
+  moments(type,MCIPR12,i3,i2,i1) += fc*beta[0]*beta[1];
+  moments(type,MCIPR13,i3,i2,i1) += fc*beta[0]*beta[2];
+  moments(type,MCIPR23,i3,i2,i1) += fc*beta[1]*beta[2];
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::BinScatteringDepth(Photon *pphot, int ip)
+//! \brief count this scattering under the optical half-width of its cell, the smallest
+//!        half-width times the extinction at the photon's energy (<montecarlo>
+//!        accel_report)
+
+void MonteCarloBlock::BinScatteringDepth(Photon *pphot, int ip) {
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  Real w = pcoord->x1f(i1+1) - pcoord->x1f(i1);
+  if (topology == MCTOPO_SPHERICAL) {
+    const Real r = pphot->x1p[ip];
+    w = std::min(w, r*(pcoord->x2f(i2+1) - pcoord->x2f(i2)));
+    w = std::min(w, r*std::sin(pphot->x2p[ip])*(pcoord->x3f(i3+1) - pcoord->x3f(i3)));
+  } else {
+    w = std::min(w, pcoord->x2f(i2+1) - pcoord->x2f(i2));
+    w = std::min(w, pcoord->x3f(i3+1) - pcoord->x3f(i3));
+  }
+  const Real tau = 0.5*w*l_cgs*(pphot->scp[ip] + pphot->acp[ip]);
+  int b = (tau > 0.) ? static_cast<int>(std::floor(std::log2(tau))) + 4 : 0;
+  b = std::min(std::max(b, 0), NSCATBINS-1);
+  scat_tau_hist[b]++;
+}

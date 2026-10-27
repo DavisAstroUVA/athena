@@ -1,0 +1,59 @@
+<comment>
+problem   = Compton scattering in a uniform isothermal sphere: a point source at the
+            centre, the escaping photons binned against the Kompaneets Green's function
+            (tst/montecarlo/sphere_compton).  Set absorption = freefree for the absorbed
+            case; theta = kT/m_e c^2 = 2e-3 at this temperature.
+configure = --prob=mc_sphere_isoth -mc -mpi -hdf5
+
+<job>
+problem_id = sphcomp
+
+<output1>
+file_type = phlist
+nuser     = 3        # birth energy, scattering count, path length
+
+<output2>
+file_type = spec
+ne        = 200
+emin      = 1.
+emax      = 1.e5
+ncth      = 1
+nphi      = 1
+
+<mesh>
+nx1        = 1
+x1min      = -5.0e10
+x1max      = 5.0e10
+ix1_mc_bc  = destroy
+ox1_mc_bc  = destroy
+
+nx2        = 1
+x2min      = -5.0e10
+x2max      = 5.0e10
+ix2_mc_bc  = destroy
+ox2_mc_bc  = destroy
+
+nx3        = 1
+x3min      = -5.0e10
+x3max      = 5.0e10
+ix3_mc_bc  = destroy
+ox3_mc_bc  = destroy
+
+<hydro>
+gamma = 1.666666666666667
+
+<montecarlo>
+nphot      = 100000
+iseed      = 121500
+scattering = compton
+absorption = none      # freefree for the absorbed case
+abs_method = weight
+polarized  = none
+
+<problem>
+temp     = 1.1865e7    # K; theta = 2e-3
+tau      = 15.         # Thomson optical depth of the sphere
+x0       = 1.          # photon energy at birth in kT
+radius   = 1.e10       # cm
+srcdist  = false       # point source at the centre
+heabund  = 0.09

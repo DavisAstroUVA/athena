@@ -1,0 +1,64 @@
+<comment>
+problem   = The Compton sphere of athinput.sphere_compton laid over 32^3 cells in eight
+            meshblocks, the grid offset by half a cell so the origin is a cell centre;
+            cells are in the sphere by their centres and the escape surface stays at
+            radius.  Same comparison, now with cell and block crossings.
+configure = --prob=mc_sphere_isoth -mc -mpi -hdf5
+
+<job>
+problem_id = sphcomp
+
+<output1>
+file_type = phlist
+nuser     = 3        # birth energy, scattering count, path length
+
+<output2>
+file_type = spec
+ne        = 200
+emin      = 1.
+emax      = 1.e5
+ncth      = 1
+nphi      = 1
+
+<mesh>
+nx1        = 32
+x1min      = -1.2890625e+10
+x1max      = 1.2109375e+10
+ix1_mc_bc  = destroy
+ox1_mc_bc  = destroy
+
+nx2        = 32
+x2min      = -1.2890625e+10
+x2max      = 1.2109375e+10
+ix2_mc_bc  = destroy
+ox2_mc_bc  = destroy
+
+nx3        = 32
+x3min      = -1.2890625e+10
+x3max      = 1.2109375e+10
+ix3_mc_bc  = destroy
+ox3_mc_bc  = destroy
+
+<meshblock>
+nx1 = 16
+nx2 = 16
+nx3 = 16
+
+<hydro>
+gamma = 1.666666666666667
+
+<montecarlo>
+nphot      = 100000
+iseed      = 121500
+scattering = compton
+absorption = none      # freefree for the absorbed case
+abs_method = weight
+polarized  = none
+
+<problem>
+temp     = 1.1865e7    # K; theta = 2e-3
+tau      = 15.         # Thomson optical depth of the sphere
+x0       = 1.          # photon energy at birth in kT
+radius   = 1.e10       # cm
+srcdist  = false       # point source at the centre
+heabund  = 0.09

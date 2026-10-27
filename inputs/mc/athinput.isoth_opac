@@ -1,0 +1,87 @@
+<comment>
+problem   = isothermal atmosphere with tabulated emission and absorption
+reference = doc/monte_carlo/opacity_table_plan.md
+configure = --prob=mc_isoth_opac -mc -mpi -hdf5
+
+<job>
+problem_id = mciso        # problem ID: basename of output filenames
+
+<output1>
+file_type  = spec
+face       = outer_x3
+ne         = 100
+emin       = 1.0           # eV
+emax       = 1.0e4
+ncth       = 8
+nphi       = 1
+
+<output2>
+file_type  = phlist
+
+<output3>
+file_type  = hdf5
+variable   = mclab
+dt         = 1.e-11
+
+<output4>
+file_type  = hdf5
+variable   = uom           # kapJ: J-weighted absorption; eave: mean energy
+dt         = 1.e-11
+
+<mesh>
+nx1        = 32            # Number of cells in X1-direction
+x1min      = -5.0e11       # minimum value of X1
+x1max      = 5.0e11        # maximum value of X1
+ix1_mc_bc  = periodic      # inner-X1 boundary flag
+ox1_mc_bc  = periodic      # outer-X1 boundary flag
+
+nx2        = 32            # Number of cells in X2-direction
+x2min      = -5.0e11       # minimum value of X2
+x2max      = 5.0e11        # maximum value of X2
+ix2_mc_bc  = periodic      # inner-X2 boundary flag
+ox2_mc_bc  = periodic      # outer-X2 boundary flag
+
+nx3        = 64            # Number of cells in X3-direction
+x3min      = 0.0           # minimum value of X3
+x3max      = 1.0e12        # maximum value of X3
+ix3_mc_bc  = absorb        # inner-X3 boundary flag
+ox3_mc_bc  = escape        # outer-X3 boundary flag
+
+<meshblock>
+nx1        = 16
+nx2        = 16
+nx3        = 32
+
+<hydro>
+gamma      = 1.666666666666667  # gamma = C_p/C_v
+
+<montecarlo>
+nphot      = 100000
+iseed      = 146137
+scattering = compton
+emission   = table         # table | freefree
+absorption = table         # table | freefree
+polarized  = false
+abs_method = weight
+#abs_method   = prob        # analog absorption; weight follows dead samples with two bands
+
+<opacitytable>
+opacity_file  = out_opacity_table_nfreq32.txt  # tops_regrid.py layout
+table_groups  = mean       # mean: piecewise constant per group; edge: value at the lower bound
+table_gray    = freefree   # rows of the old tables gray in every group -> free-free
+table_storage = cell       # cell: per-cell arrays; global: interpolate per call
+#nfree_file   = out_uniform_nfreq32_solabun_nfree.txt  # free electrons per atom
+#table_ne     = true        # electron density from it
+#two_band     = true        # Planck emission, Rosseland diffusion (needs table_ne)
+#two_band_w   = 0.01        # high-band frequency fraction
+#two_band_thick = 10        # thermalize the high band where rho kappa_h W exceeds this
+#two_band_decorrelate = 0   # redraw the band rank at cell crossings with this probability
+
+<problem>
+temp       = 3.e5          # K
+dens       = 1.e-9         # g/cm^3, the density scale of the profile
+taumin     = 1.0e-3        # scattering depth at the top of the atmosphere
+taumax     = 3.0e3         # and at the bottom
+tnorm      = true          # emin/emax in units of kT (free-free emission only)
+emin       = 1.0e-02
+emax       = 3.0e+01

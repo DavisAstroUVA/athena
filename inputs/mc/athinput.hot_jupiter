@@ -1,7 +1,7 @@
-#!/bin/bash
 <comment>
 problem = Base hot jupiter problem - volume emissivity of Lya, resonant scattering, ionization tracked with passive scalar
 reference =
+note = for a quick test set <meshblock> nx2 = nx3 = 3 (and <mesh> to match), nlyarec = 0 and ntype = 1
 configure = --coord spherical_polar --prob mc_hotjupiter -mc -mpi -hdf5 -h5double --nscalars=1
 
 <job>
@@ -9,35 +9,35 @@ problem_id = mc_hotjupiter
 
 <output0>
 file_type = hst
-dt = 5.e2
+dt = 1.e2
 
 <output1>
 id = prim
 file_type = hdf5
 variable = prim
 xdmf = 0
-dt = 5.e2
+dt = 1.e2
 
 <output2>
 id = cooling
 file_type = hdf5
 variable = uov5
 xdmf = 0
-dt = 5.e2
+dt = 1.e2
 
 <output3>
 id = mclab
 file_type = hdf5
 variable = mclab
 xdmf = 0
-dt = 5.e2
+dt = 1.e2
 
 <output4>
 id = mcsrc
 file_type = hdf5
 variable = mcsrc
 xdmf = 0
-dt = 5.e2
+dt = 1.e2
 
 #<output5>
 #id = phlist
@@ -46,8 +46,8 @@ dt = 5.e2
 
 <time>
 cfl_number = 0.3
-nlim = -1
-tlim = 1.e4
+nlim = 1000000
+tlim = 2.e4
 ncycle_out = 1
 
 <mesh>
@@ -78,52 +78,42 @@ ox3_mc_bc = periodic
 
 <meshblock>
 nx1 = 8
-nx2 = 3
-nx3 = 3
+nx2 = 33
+nx3 = 33
 
 <hydro>
 gamma = 1.6666666666667
 active = true
 dfloor = 1.e-30
-pfloor = 1.e-30
 sfloor = 1.e-30
 
 <montecarlo>
-iseed = 123456      # pseudorandom number seed
-ntype = 1
+ntype = 2           # one per nonzero sample count below: nion and nlyarec
+iseed   = 123456      # pseudorandom number seed
 tmax = 1.e5
 scattering = user
 emission = multi
 absorption = user
-weights = equal
 general_pusher = true
-abs_method = tau
 stepsize = 0.1
 varystep = true
 dynamic = true
 coupled = true
 #boosts = true
 
+<sampling>
+weights = equal
+
 <problem>
 nlyastr = 0  # number of stellar lya samples
-nlyarec = 0
-#nlyarec = 100000  # number of recomb lya samples
-nion = 1000000
-#nion    = 1000000  # number of euv photon samples
-user_dt = 1.e11
+nlyarec = 100000  # number of recomb lya samples
+nion    = 1000000  # number of euv photon samples
 
-# Flags for turning on individual sources of emission
-lya_volume_emis = false
-lya_surface_emis = false
-ion_surface_emis = true
+user_dt = 1.e11
 
 #ion_eqwt = true  # use eq. weight scheme for euv
 #lys_eqwt = true  # use eq. weight scheme for stellar lya
 #lyr_eqwt = true  # use eq. weight scheme for recomb. lya
-
-# Debug flag for turning off opacity entirely
-zero_opacity = false
-escape_after_scatter = false
 
 # Geometry
 incident_from_z = false
@@ -163,5 +153,3 @@ initialize_velocity_from_file = false
 initialize_density_from_file = false
 input_filename = 
 dataset_prim = /prim
-
-#l_cgs = 1.e10
