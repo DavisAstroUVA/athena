@@ -70,6 +70,7 @@ int  flag_tidal_gravity;
 bool flag_wind = false;
 bool flag_init_neutral;
 bool flag_update_nh;
+bool flag_zero_recomb;
 
 // parameters for MC radiation transfer
 Real energy_lya;
@@ -81,6 +82,7 @@ Real chromo_temp, sigmamin;
 bool flag_incident_from_z;
 bool flag_incident_from_r;
 bool flag_finite_star;
+Real max_angle_star = PI/2.;
 bool flag_init_line_center;
 bool flag_pow_law;
 bool flag_lya_abs;
@@ -180,6 +182,7 @@ bool HoldIonization(MonteCarlo *pmc);
 // neutral H density after an implicit photoionization-recombination step of dt
 Real ImplicitNeutralDensity(Real nh, Real na, Real Gamma, Real tempo1e4K, Real dt,
                             Real time_cgs, int lid);
+Real ZeroRecombinationNeutralDensity(Real nh, Real na, Real Gamma, Real dt, Real time_cgs, int lid);
 // impact-excitation cooling rate [erg/cm^3/s]
 Real ImpactCooling(Real tempo1e4K, Real nh, Real np);
 
@@ -226,6 +229,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   // Update ionization fraction
   flag_update_nh = pin->GetOrAddBoolean("problem", "update_nh", true);
+  flag_zero_recomb = pin->GetOrAddBoolean("problem", "zero_recomb", false);
 
   // Boundary conditions
   flag_static_inner = pin->GetOrAddBoolean("problem", "static_inner", true);
@@ -250,14 +254,16 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin) {
   ruser_meshblock_data[1].NewAthenaArray(ncells3,ncells2,ncells1);
   for (int n=0; n<ruser_meshblock_data[1].GetSize(); ++n) ruser_meshblock_data[1](n) = -1.;
 
-  AllocateUserOutputVariables(7);
+  AllocateUserOutputVariables(9);
   SetUserOutputVariableName(0, "vol_emis");
   SetUserOutputVariableName(1, "surf_emis");
   SetUserOutputVariableName(2, "gravsrc_r");
   SetUserOutputVariableName(3, "gravsrc_th");
   SetUserOutputVariableName(4, "gravsrc_ph");
   SetUserOutputVariableName(5, "collisional_cooling");
-  SetUserOutputVariableName(6, "gradP");
+  SetUserOutputVariableName(6, "gradP1");
+  SetUserOutputVariableName(7, "gradP2");
+  SetUserOutputVariableName(8, "gradP3");
   return;
 }
 
@@ -277,9 +283,30 @@ void MeshBlock::UserWorkBeforeOutput(ParameterInput *pin) {
         Real pres_i = phydro->w(IPR,k,j,i);
         Real pres_im1 = phydro->w(IPR,k,j,i-1);
         Real pres_ip1 = phydro->w(IPR,k,j,i+1);
-        Real pres_m = 0.5*( pres_im1 + pres_i );
-        Real pres_p = 0.5*( pres_ip1 + pres_i );
-        uov(6,k,j,i) = (pres_p - pres_m) / (r_p - r_m);
+        Real pres_im = 0.5*( pres_im1 + pres_i );
+        Real pres_ip = 0.5*( pres_ip1 + pres_i );
+        uov(6,k,j,i) = (pres_ip - pres_im) / (r_p - r_m);
+
+        Real t_m = pcoord->x2f(j);
+        Real t_p = pcoord->x2f(j+1);
+        Real r_c = pcoord->x1v(i);
+        Real pres_j = phydro->w(IPR,k,j,i);
+        Real pres_jm1 = phydro->w(IPR,k,j-1,i);
+        Real pres_jp1 = phydro->w(IPR,k,j+1,i);
+        Real pres_jm = 0.5*( pres_jm1 + pres_j );
+        Real pres_jp = 0.5*( pres_jp1 + pres_j );
+        uov(7,k,j,i) = (pres_jp - pres_jm) / (t_p - t_m) / r_c;
+
+        Real p_m = pcoord->x3f(k);
+        Real p_p = pcoord->x3f(k+1);
+        Real t_c = pcoord->x2v(j);
+        Real sintc = std::sin(t_c);
+        Real pres_k = phydro->w(IPR,k,j,i);
+        Real pres_km1 = phydro->w(IPR,k-1,j,i);
+        Real pres_kp1 = phydro->w(IPR,k+1,j,i);
+        Real pres_km = 0.5*( pres_km1 + pres_k );
+        Real pres_kp = 0.5*( pres_kp1 + pres_k );
+        uov(8,k,j,i) = (pres_kp - pres_km) / (p_p - p_m) / r_c / sintc;
       }
     }
   }
@@ -338,8 +365,8 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
     initialize_comoving[etype] = false; // stellar  initialized in lab frame
     std::string abs_meth = pin->GetOrAddString("problem","lya_str_abs","weight");
     absorption_method[etype] = GetAbsorptionMethodFlag(abs_meth);
-    emission_geometry[etype] = EMISAREA;
     EnrollUserEmissionFunction(SurfaceEmissivityLya,etype);
+    emission_geometry[etype] = EMISAREA;
     emission_face[etype] = SetEmissionSurface("outer_x1");
     etype++;
     if (report_setup && (Globals::my_rank == 0)) {
@@ -635,6 +662,10 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
   flag_incident_from_r = pin->GetOrAddBoolean("problem","incident_from_r",false);
   flag_finite_star = pin->GetOrAddBoolean("problem","finite_star",false);
   rstar = pin->GetOrAddReal("problem","rstar",7.e10)/l_cgs;
+  if (flag_finite_star) {
+    max_angle_star = PI/2. - std::asin((rstar - pmy_mc->pmy_mesh->mesh_size.x1max)/sep);
+    //printf("max_angle_star / pi = %g\n", max_angle_star/PI);
+  }
   lya_flux = pin->GetReal("problem","lya_flux");
   ion_flux = pin->GetReal("problem","ion_flux");
 
@@ -790,6 +821,10 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
           // sampling from a finite star and planet
           Real rplanet = pmy_block->pmy_mesh->mesh_size.x1max;
           Real lsp_min2 = SQR(sep - rplanet - rstar);
+          Real mumin = std::cos(thmin);
+          Real mumax = std::cos(thmax);
+          Real mumax_s = std::cos(std::max(PI/2. - max_angle_star, 0.));
+          Real mumin_s = std::cos(std::min(PI/2. + max_angle_star, PI));
           //printf("sep=%g, rplanet=%g, rstar=%g, lspmin=%g\n", sep, rplanet, rstar, std::sqrt(lsp_min2));
 
           bool reject = true;
@@ -800,29 +835,22 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
             if (niters % 100000 == 0) printf("[WARNING] niters=%d in InitializePhoton\n", niters);
 
             // uniform sampling in cos(theta) = mu within meshblock
-            Real mumin = std::cos(thmin);
-            Real mumax = std::cos(thmax);
-            Real mup = pran->uniform() * (mumax-mumin) + mumin;
-            Real thp = std::acos(mup);
+            Real costhp = pran->uniform() * (mumax-mumin) + mumin;
+            Real sinthp = std::sqrt(1. - SQR(costhp));
 
             // uniform sampling in phi within meshblock
             Real php = pran->uniform() * (phmax-phmin) + phmin;
 
-            // uniform sampling in cos(theta) = mu on the full star
-            Real ths = std::acos(2.*pran->uniform() - 1.);
+            // uniform sampling in cos(theta) = mu on the stellar face
+            Real cosths = (mumax_s - mumin_s)*pran->uniform() + mumin_s;
+            Real sinths = std::sqrt(1. - SQR(cosths));
 
             // uniform sampling in phi on the full star
-            Real phs = pran->uniform() * 2*PI;
-
-            //printf("sampled thp=%g, php=%g, ths=%g, phs=%g\n", thp, php, ths, phs);
+            Real phs = 2*max_angle_star*pran->uniform() - max_angle_star;
 
             // compute trig functions
-            Real sinthp = std::sin(thp);
-            Real costhp = std::cos(thp);
             Real sinphp = std::sin(php);
             Real cosphp = std::cos(php);
-            Real sinths = std::sin(ths);
-            Real cosths = std::cos(ths);
             Real sinphs = std::sin(phs);
             Real cosphs = std::cos(phs);
 
@@ -854,7 +882,7 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
             reject = false;
 
             // sampling finished; cleanup
-            th = thp;
+            th = std::acos(costhp);
             ph = php;
             kr = ndoterp;
             kth = xsp*costhp*cosphp + ysp*costhp*sinphp - zsp*sinthp;
@@ -873,11 +901,11 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
             //printf("v_sp=%g\n", v_sp);
 
             // user variables
-            pphot->user[2][ip] = ths;
+            pphot->user[2][ip] = std::acos(cosths);
             pphot->user[3][ip] = phs;
-            pphot->user[4][ip] = thp;
-            pphot->user[5][ip] = php;
-           // printf("niters=%d, theta=%g, phi=%g\n", niters, th, ph);
+            pphot->user[4][ip] = th;
+            pphot->user[5][ip] = ph;
+            //printf("niters=%d, theta=%g, phi=%g\n", niters, th, ph);
 
           } // end while
 
@@ -1046,9 +1074,6 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
   if (etype != ion_str)
     return;
 
-  // Uniform test
-  //return;
-
   Real dt = pmy_block->pmy_mesh->dt;
   // for checking ionization
   //dt = 1.e10;
@@ -1089,8 +1114,11 @@ void MonteCarloBlock::UserWorkAfterTransfer(int etype) {
           continue;
         }
 
-        nh = ImplicitNeutralDensity(nh, na, Gamma, tempo1e4K, dt, time_cgs,
-                                    pmy_block->lid);
+        if (flag_zero_recomb) {
+          nh = ZeroRecombinationNeutralDensity(nh, na, Gamma, dt, time_cgs, pmy_block->lid);
+        } else {
+          nh = ImplicitNeutralDensity(nh, na, Gamma, tempo1e4K, dt, time_cgs, pmy_block->lid);
+        }
         np = na - nh;
 
         pmy_block->pscalars->s(0,k,j,i) = nh;
@@ -2241,6 +2269,22 @@ Real ImplicitNeutralDensity(Real nh, Real na, Real Gamma, Real tempo1e4K, Real d
   Real dd = SQR(bb) - 4*cc;
   Real qq = 0.5*(bb + std::sqrt(dd));
   Real update = cc/qq;
+
+  // Double-check that the implicit update gives a neutral fraction between 0 and 1 --- NOT guaranteed if dt is large
+  Real neutral_frac = update/na;
+  if (neutral_frac > 1.0000001) {
+    printf("[WARNING] (Block %d) UpdateIonizationFraction: neutral fraction %g is greater than 1\n", lid, neutral_frac);
+    neutral_frac = 1.0;
+  } else if (neutral_frac < 0.0) {
+    printf("[WARNING] (Block %d) UpdateIonizationFraction: neutral fraction %g is less than 0\n", lid, neutral_frac);
+    neutral_frac = 0.0;
+  }
+  return neutral_frac * na;
+}
+
+Real ZeroRecombinationNeutralDensity(Real nh, Real na, Real Gamma, Real dt, Real time_cgs, int lid) {
+  Real gdt = Gamma * dt * time_cgs;
+  Real update = nh / (gdt - 1.);
 
   // Double-check that the implicit update gives a neutral fraction between 0 and 1 --- NOT guaranteed if dt is large
   Real neutral_frac = update/na;
