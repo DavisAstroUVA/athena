@@ -1,0 +1,444 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\newcommand{\key}[1]{\texttt{#1}}
+\newcommand{\dd}{\mathrm{d}}
+
+\title{Discrete diffusion Monte Carlo for Compton scattering:\\
+the lattice, the interface, the energy update and the moments,\\
+as they are to be implemented (design note, phase D0)}
+\author{Athena++ Monte Carlo radiation transport}
+\date{Draft of 2026-10-28, for approval before phase D1}
+
+\begin{document}
+\sloppy
+\maketitle
+
+\section{What the method does and where it lives}
+\label{sec:what}
+
+A photon inside an optically thick cell scatters many times before it leaves, and the
+in-cell random walk of \texttt{mrw\_guide.tex} replaces those scatterings only when the
+cell is many mean free paths thick, paying a dead zone at every face.  Discrete
+diffusion Monte Carlo (DDMC; Densmore et al.\ 2007) replaces the photon in a thick cell
+by a \emph{diffusion particle}: it has a cell, an energy, a weight and a time, and no
+position or direction.  It waits in the cell for an exponential time whose rate is the
+sum of the leakage rates through the six faces, then hops to the neighbour the chosen
+face leads to; if that neighbour is thin, it is reborn there as an ordinary transport
+photon on the face.  A transport photon entering a thick cell is converted the other
+way with the probability of the asymptotic diffusion limit.  The lattice reproduces the
+diffusion equation on the grid to first order in the cell size, cell by cell, with each
+cell's own properties, and costs one draw per cell traversed rather than one per
+scattering.
+
+For Compton scattering the Thomson extinction is grey, so the leakage rates do not
+depend on the particle's energy and the energy decouples from the walk: after a dwell
+of comoving path $ct$ the energy is drawn from the Green's function of the Kompaneets
+equation at $y=\theta\,n_e\sigma_T\,ct$, exactly as the random-walk step does, with the
+free-free survival from the same table (\texttt{kgreens.cpp};
+\texttt{doc/monte\_carlo/kompaneets/}).  No energy groups exist.
+
+The code is \texttt{src/monte\_carlo/ddmc.cpp} with \texttt{ddmc.hpp}, off unless
+\key{<ddmc> enable} is set, and reaches the rest of the module through the hooks of
+the plan's Section~2.9 and no others: a branch at the top of each pusher's per-photon
+loop that runs the walk while the particle's flag is set, a conversion test where a
+transport photon's \texttt{UpdateZone} enters a new cell, the integer photon column
+\texttt{ddmcp} registered only when enabled, one guard in
+\texttt{TransferPhotonsOnBlock}, one call in \texttt{SetupBlockFromFluid} that builds
+the per-cell rate table, and the keys and report lines in \texttt{montecarlo.cpp}.
+With the feature off, lists, moments and payloads are byte-identical to a build before
+it existed.
+
+\section{Conventions and units}
+\label{sec:units}
+
+The extinction $\chi$ is the comoving Thomson extinction in cm$^{-1}$, $\chi=n_e
+\sigma_T$ with $n_e$ the electron density in \texttt{species(0,k,j,i)}, as the random
+walk uses it; the free-free absorption enters only through the Green's function's sink
+(Section~\ref{sec:energy}).  Lengths in the rate table are physical: cell widths in
+code length times \key{l\_cgs}; under the general pusher the widths are the proper
+lengths of the cell's coordinate edges in the cell-centre tetrad of the normal observer,
+which \texttt{GeneralPusher::MRWFrame} builds (\texttt{fr.W}), and in the
+spherical-polar pusher the box $\dd r\times r\,\dd\theta\times r\sin\theta\,\dd\phi$
+that \texttt{CellGeometry} makes of the cell.  The diffusion coefficient is
+$D=1/(3\chi)$, a length.  Times are comoving proper times inside the lattice; the dwell
+is converted to coordinate time once per hop (Section~\ref{sec:gr}).  Rates are kept per
+unit comoving path $c\,t$, in cm$^{-1}$, so that a leakage ``opacity'' $k_f$ competes
+with the extinction on the same footing and the dwell is drawn as a path, $c\,t = -\ln
+\xi/k_{\rm tot}$, with $\xi$ uniform.
+
+\section{The lattice and its rates}
+\label{sec:rates}
+
+Let $E_c$ be the radiation energy density of cell $c$ in its comoving frame.  The
+diffusion equation on the grid, in the finite-volume form of Densmore et al.\ (2007)
+and Smith et al.\ (2018, their equation 10), is
+\begin{equation}
+  \frac{1}{c}\frac{\partial E_c}{\partial t}
+  = \sum_{f} k_f^{(n\to c)}\,\frac{V_n}{V_c}\,E_n - \sum_f k_f^{(c\to n)}\,E_c
+  - \kappa_{a,c}E_c ,
+\end{equation}
+where the sums run over the faces $f$ of the cell, $n$ is the neighbour across $f$, and
+the leakage rate per unit path from $c$ into $n$ across a face normal to axis $i$ is
+\begin{equation}
+  k_f^{(c\to n)} = \frac{2D_c/\Delta_{c,i}}{\Delta_{c,i} + \Delta_{n,i}\,D_c/D_n}
+  = \frac{2}{3\,\Delta_{c,i}\,(\chi_c\Delta_{c,i} + \chi_n\Delta_{n,i})} .
+  \label{eq:kint}
+\end{equation}
+This is Fick's law through the two half-cells, $F = -(E_n - E_c)/\bigl(\Delta_c/2D_c +
+\Delta_n/2D_n\bigr)$, with the part proportional to $E_c$ divided by the cell width.
+In a uniform medium it is $1/(3\chi\Delta^2)$, and a particle makes about
+$(\chi\Delta)^2/3$ Thomson paths' worth of dwell per hop, which is the number of
+scatterings a hop replaces.
+
+A face whose far side is not a diffusion cell (a transport cell, a face to another
+refinement level under the rule of Section~\ref{sec:faces}, or a mesh boundary) is a
+\emph{boundary face}.  Its rate comes from the asymptotic diffusion-limit boundary
+condition of Habetler \& Matkowsky (1975), which Densmore et al.\ (2007) and
+Abdikamalov et al.\ (2012, their equations 120 to 127) use in the same way: at the face
+the mean intensity obeys
+\begin{equation}
+  \int_0^1 W(\mu)\,I_b(\mu)\,\dd\mu = J_{\rm face} - \frac{\lambda}{\chi}
+  \left.\frac{\partial J}{\partial n}\right|_{\rm face},\qquad
+  W(\mu)\simeq \mu + \tfrac32\mu^2,\qquad \lambda = 0.7104,
+  \label{eq:abc}
+\end{equation}
+with $I_b$ the intensity incident from outside, $n$ the outward normal and
+$\int_0^1 W\,\dd\mu = 1$.  Replacing the derivative by $(J_{\rm face} - J_c)/(\Delta_c/2)$
+and the face flux by Fick's law over the half-cell, $H = -(2/3\chi_c\Delta_c)(J_{\rm face}
+- J_c)$, gives
+\begin{equation}
+  H = \frac{2}{3\chi_c\Delta_c + 6\lambda}\Bigl(J_c - \int_0^1 W(\mu)\,I_b(\mu)\,\dd\mu\Bigr),
+\end{equation}
+so the leakage rate out through a boundary face is
+\begin{equation}
+  k_f^{\rm (bdy)} = \frac{2}{3\,\Delta_{c,i}\,(\chi_c\Delta_{c,i} + 2\lambda)}
+  = \frac{2D_c/\Delta_{c,i}}{\Delta_{c,i} + 2\lambda/\chi_c} ,
+  \label{eq:kbdy}
+\end{equation}
+the interior form with the far half-cell replaced by the extrapolation distance
+$\lambda/\chi_c = 2.13\,D_c$, and the incident intensity enters as a source with
+weight $W(\mu)$, which is the conversion probability of Section~\ref{sec:interface}.
+(The plan of 2026-10-06 had $2\lambda D_c$ in the denominator, a factor three short.)
+
+A cell is a diffusion cell when
+\begin{equation}
+  \tau_{\rm cell} = \chi_c \min_i \Delta_{c,i} \ge \tau_{\rm ddmc}
+\end{equation}
+with \key{<ddmc> tau} the threshold; the thinnest dimension governs because leakage
+is fastest across it.  Densmore et al.\ validate the interface down to $\tau_{\rm cell}$
+of about 2 and Smith et al.\ suggest 5; D1 scans 2, 3, 5 and 10 against the analog run
+and sets the default.  One threshold serves both directions; the asymmetry between
+entering and leaving is carried by the probabilities, and a second key is added only if
+D1 asks for it.
+
+The rate table is built once per transport cycle in \texttt{SetupBlockFromFluid},
+after the number densities, as \texttt{ddmc\_rate(7,k,j,i)}: six face rates and
+their sum, over the active cells, with the neighbour's $\chi_n$ and $\Delta_n$ read from
+the ghost zones.  Ghost zones are valid for this: \texttt{Mesh::Initialize}
+(\texttt{mesh.cpp}, the block from the conserved-variable exchange through
+\texttt{ProlongateBoundaries} to \texttt{ConservedToPrimitive} over the extended
+bounds and \texttt{ApplyPhysicalBoundaries}) fills the primitives in the ghost zones
+from the neighbours, across levels, before \texttt{MonteCarlo::Initialize} runs
+(\texttt{main.cpp}), and the former skip of the inversion for GR Monte Carlo builds is
+gone; \texttt{FillBounds} then spans the ghosts when \texttt{rho}, \texttt{tgas} and
+\texttt{species} are filled.  A problem generator's \texttt{ExcludeCells} must zero
+the species over the same bounds, which D1 asserts on a two-block run by comparing a
+ghost $\chi$ with the neighbour's active value.  Under the general pusher the widths
+need a tetrad per cell, including the ghost layer; the per-cell transformations of
+\texttt{ComputeTransformations} are where that goes.  The table is rebuilt on restart
+and redistribution like the opacity tables, so nothing is carried.
+
+\section{The particle and its life}
+\label{sec:particle}
+
+A diffusion particle is a \texttt{Photon} whose integer column \texttt{ddmcp} is 1.
+Its position is the centre of its cell, which keeps every consumer of a position
+working unchanged: \texttt{UpdateZone}, the boundary functions, the block exchange, the
+outputs, the load balancer's payload and the restart record.  Its direction columns
+are unused and its coherency tensor and Stokes parameters are zero.  Its energy
+\texttt{ep} is the comoving energy in its cell's frame; its weight, time
+\texttt{x0p}, budget \texttt{dtp}, scattering count \texttt{nscp} and type are what
+they are for a photon.  Its flight columns (\texttt{taup}, \texttt{strp}) are reset
+at rebirth.
+
+The walk, in the pusher's per-photon loop while \texttt{ddmcp} is set:
+\begin{enumerate}
+\item Read the cell's rates.  Form the path budget $c\,t_b$: the cycle budget
+  \texttt{dtp} converted to comoving path (Section~\ref{sec:gr}), and the Kompaneets
+  table's $y$ range, $c\,t \le y_{\max}/(\theta n_e\sigma_T)$.  (The random walk's
+  \key{accel\_pmax} has no analogue; the lattice has no domain survival.)
+\item Draw the path $c\,t = -\ln\xi/k_{\rm tot}$.  If it exceeds $c\,t_b$, set $c\,t =
+  c\,t_b$ and stay in the cell (the particle keeps its flag; a budget stop returns it
+  to the block loop, a table cap continues the walk).
+\item Update the energy and weight over the dwell (Section~\ref{sec:energy}); deposit
+  the moments and source terms (Section~\ref{sec:moments}); advance \texttt{x0p} and
+  \texttt{dtp}; add $n_e\sigma_T\,ct$ to \texttt{nscp} and to the report's count of
+  scatterings replaced.
+\item If a budget stop or absorption ended the dwell, return.  Otherwise choose the
+  face with probability $k_f/k_{\rm tot}$ and hop:
+  \begin{itemize}
+  \item interior face: move the particle to the neighbour's centre, transform its
+    energy into the neighbour's frame (Section~\ref{sec:moving}), deposit the face
+    counters (Section~\ref{sec:moments}); if the neighbour is a ghost cell, the particle
+    is now outside the block and \texttt{UpdateZone} buffers it to the neighbour
+    block, where it lands in the face cell with its flag and continues;
+  \item boundary face: rebirth (Section~\ref{sec:interface}), which clears the flag;
+    the loop then continues as a transport photon with a fresh optical depth, and a
+    mesh boundary is met by the ordinary boundary function on the first step.
+  \end{itemize}
+\end{enumerate}
+The general pusher invalidates its cached metric and connection after a hop, as the
+random-walk branch does.  \texttt{UserWorkInMove} is called after each hop, so a
+generator's hook (the horizon test of \texttt{mc\_readhdf\_gr}) sees the particle at
+its new centre.  \texttt{TransferPhotonsOnBlock} skips absorption and scattering for a
+particle that returns from \texttt{Move} with the flag set.
+
+\section{Faces that are not interior}
+\label{sec:faces}
+
+\textbf{Mesh boundaries.}  A face on the mesh boundary is a boundary face whatever the
+boundary condition: the particle is reborn through it and the boundary function
+(escape, absorb, periodic, polar) acts on the transport photon as it does today.  A
+periodic neighbour is in fact a real cell whose ghost values are filled, so periodic
+faces could be interior; they are left as boundary faces in the first build for
+simplicity and the report counts them.
+
+\textbf{Refinement levels.}  A face whose neighbour block is at another level (known
+from \texttt{pbval->nblevel} for the block's outer layer of cells; interior faces of a
+block never jump levels) is a boundary face in both directions: a particle reaching it
+is reborn through it, a transport photon crossing it into a thick cell converts by the
+usual probability.  This is exact and loses efficiency only at level jumps; the report
+counts hops stopped there, and the split-face rates of Densmore et al.\ (2007), which
+weight the four fine sub-faces by area, are the follow-up if the count is large on the
+XRB, whose snapshot has eight levels.
+
+\textbf{Block faces at the same level} are interior faces: the rate uses the ghost
+neighbour, and the hop is the BUFFERED exchange.
+
+\section{Energy and absorption over a dwell}
+\label{sec:energy}
+
+With $\theta = kT_c/m_ec^2$ of the cell and the particle's comoving energy $x_i = E/kT_c$,
+a dwell of path $ct$ has Compton parameter $y = \theta\,n_e\sigma_T\,ct$ and the new
+energy is $x_f kT_c$ with $x_f$ from \texttt{kgreens->Quantile(xi, y, lam, u)}; the
+weight is multiplied by \texttt{kgreens->Survival(xi, y, lam)} when the absorption is
+free-free (\texttt{lam} the cell's free-free parameter as \texttt{MRWStep} forms it from
+\texttt{ff\_cell}), and by $\exp(-\kappa_a\,ct)$ for a grey absorption that is not
+free-free.  Under \key{abs\_method = prob} the survival is a probability instead and the
+particle is ABSORBED with its complement; under \key{weight} it is a weight and the
+roulette of \texttt{RouletteOrAbsorb} applies below \key{minweight}.  The guards are
+those of \texttt{MRWTrigger} and \texttt{MRWStep}: $\theta\le0.03$, $x\theta\le0.05$,
+$x$ inside the table, the sink strength within the table's range, $n_e>0$; a particle
+whose cell fails them is not converted (a transport photon in such a cell stays a
+transport photon, and the conversion test includes the guards), and the report counts
+the declines by reason.  A long dwell is capped at the table's $y_{\max}$ and the walk
+continues with a second draw, so no energy is ever extrapolated.
+
+Only the Thomson-grey regime is covered; a Klein-Nishina dependence of the leakage
+rates on energy would be a per-group rate table, which the XRB bands below 10 keV do
+not need.
+
+\section{Moments and source terms}
+\label{sec:moments}
+
+Required: energy densities, fluxes and the radiation force must come out of diffusion
+cells.
+
+\textbf{Energy density}, per dwell, by the time-spent estimator:
+\texttt{UpdateMomentsMRW(pphot, ct, $\bar E$, beta\_tet, gam, ip)} with $\bar E$ the
+mean of the energies before and after the dwell, which deposits the isotropic comoving
+field $E_c = w\bar E\,ct/c$ boosted to the lab (its Section~4 formulas).
+
+\textbf{Flux}, by the face-hop estimator.  Each hop through a face normal to axis $i$
+adds $s\,wE$ to that face's counter of each of the two cells sharing it, $s=\pm1$ the
+direction of crossing along $+i$ and $E$ the energy carried across (the leaving cell's
+comoving energy; the frame change of the hop is second order in the flux).  Over an
+integration time the counter divided by the face area and \texttt{tint} is the flux
+through the face, and the cell-centred comoving flux along $i$ is the mean of the
+cell's two faces.  It is the discrete Fick flux of the lattice, $F=-cD\nabla E$ on the
+grid, so it is consistent with what the lattice solves and needs no model.  The
+counters are a per-block array \texttt{ddmc\_flux(6,k,j,i)} in the comoving frame;
+both sides of a block face record every crossing themselves (the leaving block when the
+particle leaves, the receiving block when it arrives), so no communication is needed.
+At normalization the cell's comoving $(E_c, F_c, P_c = E_c\delta/3)$ is boosted into
+the lab moments with the cell's velocity matrices of \texttt{ComovingFrameMatrix}, the
+isotropic part having been deposited per dwell already, so only the flux term is
+added there.
+
+\textbf{Pressure}: $E_c/3$ on the diagonal in the comoving frame, the diffusion
+closure, which is the assumption of a diffusion cell and not a measurement.
+
+\textbf{Radiation force.}  The momentum deposited in the gas of a diffusion cell per
+unit volume and time is $\chi_c F_c/c$, equal to $-\nabla E_c/3$ by Fick's law.  With
+the flux from the face counters, each hop deposits
+\begin{equation}
+  \delta p_i = s\,\frac{wE\,\chi_c\,\Delta_{c,i}}{2c}
+\end{equation}
+into \texttt{sourceterms(MCRS}$_i$\texttt{)} of each cell sharing the face, each with
+its own $\chi$ and width (the factor $1/2$ is the face average), and the same into
+\texttt{MCRF}$_i$, since the flux force and the momentum force coincide on the
+lattice.  The sign convention is that of \texttt{UpdateSourceTerms}, where the gas
+gains minus the photon's momentum change.  \textbf{Energy exchange}
+\texttt{MCRS0}: $w_{\rm after}E_{\rm after} - w_{\rm before}E_{\rm before}$ per dwell,
+through \texttt{UpdateSourceTerms} with the energy and weight before and after, which
+also covers the absorbed energy.  The per-particle contributions that
+\texttt{sourceterms\_error} holds back until the particle leaves a cell accumulate over
+its hops in that cell unchanged.
+
+\textbf{Known limits.}  The flux in a thick cell is the difference of two large hop
+counts, with a statistical error set by the gross hop rate; the analog flux there is the
+residual of near-isotropic flights and is no better.  The scattering-binned spectral
+moments (\texttt{Jnu}, \texttt{mom\_flag\_scat}) see only the energies before and
+after a dwell.  Fick's law from the energy-density estimator of neighbouring cells is a
+cross-check in the tests, not the product, since it fails in interface cells where
+transport flights also contribute.
+
+\section{The interface}
+\label{sec:interface}
+
+\textbf{Conversion}, when a transport photon's \texttt{UpdateZone} enters a diffusion
+cell $n$ through a face with direction cosine $\mu$ to the inward normal.  From
+equation~(\ref{eq:abc}) the incident intensity enters the diffusion cell with weight
+$W(\mu)$, while the incident particle flux is $\mu I_b$, so a photon is converted with
+probability
+\begin{equation}
+  P(\mu) = \frac{2}{3\chi_n\Delta_{n,i} + 6\lambda}\Bigl(1 + \tfrac32\mu\Bigr)
+  = \frac{2}{3\,(\chi_n\Delta_{n,i} + 2\lambda)}\Bigl(1 + \tfrac32\mu\Bigr),
+  \label{eq:pconv}
+\end{equation}
+which is the form of Densmore et al.\ (2007) as Abdikamalov et al.\ (2012) reproduce
+it; it derives from the same finite difference as the boundary leakage
+rate~(\ref{eq:kbdy}), and the two must be used together.  (The summary of Smith et
+al.'s equation 18 read $2(2/3+\mu)/(\chi\Delta+2\lambda)$, twice this; the derivation
+above is what the code follows, and D1's atmosphere test is the check.)  $P$ can exceed
+1 in a thin cell, which is why the threshold must stay above 1.  A converted photon
+becomes a particle at the cell's centre with its energy transformed into the cell's
+frame.  A photon not converted is returned into the cell it came from with an isotropic
+inward direction, at the face, keeping its flight state.
+
+\textbf{Rebirth}, when a particle hops through a boundary face.  The photon is placed
+at a uniform point on the face, on the transport side, with the flag cleared, an energy
+drawn in the new frame (Section~\ref{sec:moving}), weight carried, Stokes parameters
+zero, \texttt{taup} $=-1$ and \texttt{strp} $=0$ so the pusher draws a fresh flight.
+Its outward direction is drawn from one of two distributions, \key{<ddmc> rebirth}:
+\key{asymptotic}, $W(\mu) = \mu + \tfrac32\mu^2$ on the outward hemisphere, the
+flux-weighted emergent intensity $I\propto\tfrac23+\mu$ of the diffusion limit and the
+distribution consistent with equation~(\ref{eq:abc}); or \key{isotropic}, uniform in
+$\mu\in(0,1)$, which is what Densmore et al.\ (2007), Abdikamalov et al.\ (2012) and
+Smith et al.\ (2018) use.  The first is the expected default; the disk atmosphere
+against Feautrier decides in D1, since the emergent intensity versus $\mu$ is the one
+observable that sees this choice.  $W(\mu)$ is sampled by solving
+$\mu^2/2 + \mu^3/2 = \xi$ for $\mu$, a few Newton steps from $\mu=\xi^{1/2}$.
+
+\section{A moving medium}
+\label{sec:moving}
+
+The lattice is in the comoving frame of each cell: rates, dwell, energy and moments.
+At a hop the energy changes frame.  Rather than a first-order Doppler formula with a
+mean cosine (Smith et al., their equations 19 and 20), the hop samples a direction from
+the rebirth distribution about the face normal, builds the comoving wavevector of
+energy $E$ in the leaving cell, transforms it to the lab with that cell's velocity
+(\texttt{TransformToCoordinate} at the cell centre), moves to the entering cell's
+centre, transforms it into that cell's frame (\texttt{TransformToComoving}), keeps the
+energy and discards the direction.  This is exact in distribution for the diffusion
+limit, uses the transforms that exist, and costs a few operations per hop.  The dwell's
+lab time is $\gamma$ times the comoving time (Section~\ref{sec:gr}).
+
+What is not represented: the advection of the fluid past the lattice within a cell, and
+velocity gradients within a cell.  The lattice is the grid and the cell's velocity is
+one number; this is the approximation Smith et al.\ make and the moving sphere of D4
+measures (beta 0.01, 0.1, 0.3 against analog).  The random walk's advection room has no
+analogue.
+
+\section{Curved spacetime}
+\label{sec:gr}
+
+Under the general pusher the cell's widths are the proper lengths of its coordinate
+edges in the normal observer's tetrad at the cell centre (\texttt{fr.W} of
+\texttt{GeneralPusher::MRWFrame}), $\theta$ and $n_e$ are the cell's comoving values,
+and the dwell is a comoving proper time $t$.  Coordinate time advances by
+$\Delta x^0 = \gamma\,ct/(c\,\alpha)$ in code units with $\gamma = u^{\hat t}$ the
+fluid's Lorentz factor on the tetrad and $\alpha$ the lapse, exactly as
+\texttt{MRWStep} does (\texttt{dl = gam*ct/l\_cgs/fr.lapse}); \texttt{dtp} decreases by
+the same.  The hop transform of Section~\ref{sec:moving} goes through the two cells'
+tetrads at their centres, which covers the gravitational shift as well as the Doppler
+one.  The particle's coordinate position is the cell centre.  Inside the horizon of
+\texttt{mc\_readhdf\_gr} the species are zero and no cell is a diffusion cell.
+
+\section{Time and dynamic runs}
+\label{sec:time}
+
+The waiting times are physical.  In a static run \texttt{tmax} is huge and no budget
+binds.  In a dynamic run the budget is \texttt{dtp}, and a particle whose dwell would
+exceed it stops in its cell with the flag set and returns to the block loop.
+
+Finding of D0, by reading the three pushers, \texttt{TransferPhotonsOnBlock} and
+\texttt{FinishRound}: today \texttt{dtp} is only the exit condition of the pusher's
+step loop.  A transport photon that exhausts it returns EVOLVING, is scattered in place
+by the block loop at every pass, and keeps the round from finishing, since the round
+ends only when no photon is on any list.  So the budget is not a stop today, and
+dynamic runs work because \texttt{tmax} (the hydro step) does not bind on their
+photons.  A true stop, for photons and particles alike, needs a held status that the
+round accounting treats as done and the next cycle resumes, which is outside the
+plan's hook list and is a decision for the user before D6.  Until then the particle's
+budget stop is implemented as the photon's is (the particle sits, flagged, and is
+skipped by the block loop), and the Compton phases run static.
+
+\section{Keys and report lines (proposed)}
+\label{sec:keys}
+
+\begin{center}
+\begin{tabular}{llp{8.2cm}}
+\toprule
+key (\texttt{<ddmc>}) & default & meaning \\
+\midrule
+\key{enable} & false & turn the lattice on \\
+\key{tau} & 5 (D1 sets it) & cell optical depth, extinction times the smallest width, above which a cell is a diffusion cell \\
+\key{rebirth} & \texttt{asymptotic} & direction distribution at rebirth: \texttt{asymptotic} ($W(\mu)$) or \texttt{isotropic} \\
+\key{report} & false & print the counters below per transport \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Nothing is read from \texttt{<montecarlo>} or \texttt{<randomwalk>}; the random walk
+never fires in a run with the lattice on (its threshold lies above \key{tau} and a
+particle has no position), and the wiki says the two do not combine.  The report
+prints: photons converted, photons returned, particles reborn, hops, hops through
+block faces, hops stopped at level jumps and mesh boundaries, scatterings replaced,
+budget stops, table caps, declines by reason (the Kompaneets guards), and the
+\key{accel\_report} histogram of analog scatterings by cell thickness.
+
+\section{Decisions for the user before D1}
+\label{sec:decisions}
+
+\begin{enumerate}
+\item The rebirth distribution: both are built and D1's atmosphere test picks the
+  default (Section~\ref{sec:interface}).
+\item The level-jump rule: boundary face in both directions, split-face rates as the
+  follow-up (Section~\ref{sec:faces}).
+\item The dynamic budget: the lattice's stop follows the photon's non-stop today; a
+  held status is a decision before D6 (Section~\ref{sec:time}).
+\item The threshold on the smallest width, one key (Section~\ref{sec:rates}).
+\item Periodic faces as boundary faces in the first build (Section~\ref{sec:faces}).
+\item The \texttt{ddmcp} column only when enabled, so the off state is byte-identical.
+\end{enumerate}
+
+\section{References}
+
+Densmore, J. D., Urbatsch, T. J., Evans, T. M., Buksas, M. W. 2007, J. Comput. Phys.
+222, 485.  Abdikamalov, E., Burrows, A., Ott, C. D., L\"offler, F., O'Connor, E.,
+Dolence, J. C., Schnetter, E. 2012, ApJ 755, 111 (arXiv:1203.2915; the asymptotic
+boundary condition, equations 120 to 128, and the conversion rule).  Smith, A., Tsang,
+B. T.-H., Bromm, V., Milosavljevi\'c, M. 2018, MNRAS 479, 2065 (arXiv:1709.10187).
+Habetler, G. J., Matkowsky, B. J. 1975, J. Math. Phys. 16, 846.  Wollaeger, R. T.,
+van Rossum, D. R., et al. 2013, ApJS 209, 36.
+
+\end{document}
