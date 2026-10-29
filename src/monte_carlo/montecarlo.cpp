@@ -208,22 +208,22 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   ttransport = 0.;
   boosts = pin->GetOrAddBoolean("montecarlo","boosts",false);
   polarized = GetMCPolarizationFlag(pin->GetOrAddString("montecarlo","polarized","none"));
-  acceleration = pin->GetOrAddBoolean("randomwalk","enable",false);
+  mrw = pin->GetOrAddBoolean("randomwalk","enable",false);
   // MCCoord::dmin, the smallest cell width, is built for the MRW acceleration.  A user
   // hook can want it for its own reasons -- mc_hotjupiter's core skipping compares the
   // cell's comoving line optical depth against a threshold -- and reading an array that
   // was never allocated segfaults, so a problem generator that needs it asks here rather
   // than turning MRW on as a side effect.
   compute_dmin = pin->GetOrAddBoolean("montecarlo","compute_dmin",false);
-  accel_tau = pin->GetOrAddReal("randomwalk","tau",20.);
-  accel_face_tau = pin->GetOrAddReal("randomwalk","face_tau",5.);
-  accel_pmax = pin->GetOrAddReal("randomwalk","pmax",0.);
+  mrw_tau = pin->GetOrAddReal("randomwalk","tau",20.);
+  mrw_face_tau = pin->GetOrAddReal("randomwalk","face_tau",5.);
+  mrw_pmax = pin->GetOrAddReal("randomwalk","pmax",0.);
   {
     std::string dom = pin->GetOrAddString("randomwalk","domain","cell");
     if (dom == "cell") {
-      accel_domain = MRW_DOMAIN_CELL;
+      mrw_domain = MRW_DOMAIN_CELL;
     } else if (dom == "sphere") {
-      accel_domain = MRW_DOMAIN_SPHERE;
+      mrw_domain = MRW_DOMAIN_SPHERE;
     } else {
       std::stringstream msg;
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
@@ -233,10 +233,27 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
   }
   kgreens_file = pin->GetOrAddString("randomwalk","kgreens_file","");
   kgreens = nullptr;
-  mrw = nullptr;
+  mrw_tables = nullptr;
   optab = nullptr;
-  if (acceleration) mrw = new MRWTables;
-  accel_report = pin->GetOrAddBoolean("randomwalk","report",false);
+  if (mrw) mrw_tables = new MRWTables;
+  mrw_report = pin->GetOrAddBoolean("randomwalk","report",false);
+  // discrete diffusion; its checks against the other choices follow the scattering
+  ddmc = pin->GetOrAddBoolean("ddmc","enable",false);
+  ddmc_tau = pin->GetOrAddReal("ddmc","tau",3.);
+  {
+    std::string rb = pin->GetOrAddString("ddmc","emergence","asymptotic");
+    if (rb == "asymptotic") {
+      ddmc_emergence = DDMC_EMERGE_ASYMPTOTIC;
+    } else if (rb == "isotropic") {
+      ddmc_emergence = DDMC_EMERGE_ISOTROPIC;
+    } else {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "<ddmc>/emergence must be asymptotic or isotropic, not " << rb << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+  ddmc_report = pin->GetOrAddBoolean("ddmc","report",false);
   verbose = pin->GetOrAddBoolean("montecarlo", "verbose", true);
   lb_report = pin->GetOrAddBoolean("loadbalancing", "report", false);
   raytrace_flag = pin->GetOrAddBoolean("montecarlo", "raytrace", false);
@@ -248,7 +265,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
                                                           "none"));
   // The random-walk step with Compton scattering draws the photon's energy change from
   // the Kompaneets Green's function table, so the table has to be there
-  if (acceleration && scattering_meth == SCATCOMP) {
+  if (mrw && scattering_meth == SCATCOMP) {
     if (kgreens_file.empty()) {
       std::stringstream msg;
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
@@ -264,6 +281,35 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
                 << kgreens->YMin() << " .. " << kgreens->YMax() << ", xi "
                 << kgreens->XiMin() << " .. " << kgreens->XiMax() << ", "
                 << kgreens->nq << " levels" << std::endl;
+  }
+  if (ddmc) {
+    // What this build of the lattice covers: grey elastic scattering in the legacy
+    // pushers; it does not combine with the random walk, whose domain it contains
+    std::stringstream msg;
+    if (mrw) {
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "<ddmc> enable and <randomwalk> enable do not combine" << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    if (general_pusher_flag) {
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "<ddmc> enable needs the Cartesian or spherical-polar pusher (phase D4 "
+          << "adds the general pusher)" << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    if (scattering_meth != SCATTHOM && scattering_meth != SCATISO) {
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "<ddmc> enable needs <montecarlo> scattering = thomson or isotropic (phase "
+          << "D2 adds compton)" << std::endl;
+      ATHENA_ERROR(msg);
+    }
+    if (!(ddmc_tau >= 2.)) {
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "<ddmc> tau = " << ddmc_tau
+          << "; the conversion probability exceeds 1 below "
+          << "a cell depth of 1.9, so the threshold must be at least 2" << std::endl;
+      ATHENA_ERROR(msg);
+    }
   }
   // Which metric the module integrates on.  Must come before SetGeometryTag and before
   // any MonteCarloBlock is constructed.
@@ -469,7 +515,7 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
 MonteCarlo::~MonteCarlo() {
 
   delete kgreens;
-  delete mrw;
+  delete mrw_tables;
   delete optab;
   delete pmcout;
   delete pexch;
@@ -897,12 +943,15 @@ void MonteCarlo::Initialize(ParameterInput *pin) {
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
+    for (int b=0; b<NDDMCCOUNT; ++b) pmcb->nddmc[b] = 0;
+    pmcb->nddmc_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
     pmcb->loop_max_size = loop_max;
 
     // Call problem generators for Monte Carlo
     pmcb->MonteCarloProblemGenerator(pin);
+    pmcb->BuildDDMCRates(); // the hook may have set accel_mask
   }
 
   // Costs from an earlier run on this mesh, so the first transport is already balanced
@@ -1550,6 +1599,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
+    for (int b=0; b<NDDMCCOUNT; ++b) pmcb->nddmc[b] = 0;
+    pmcb->nddmc_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
     pmcb->wesc_sum = pmcb->wesc_sq = 0.;
   }
@@ -1591,6 +1642,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
+    for (int b=0; b<NDDMCCOUNT; ++b) pmcb->nddmc[b] = 0;
+    pmcb->nddmc_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
       pmcb->wesc_sum = pmcb->wesc_sq = 0.;
       pmcb->lb_time = 0.0;
@@ -1673,6 +1726,9 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0, nsplit = 0, nroul = 0;
     int64_t nmrw = 0, nmrw_decline = 0, nabs_first = 0;
     Real wesc_sum = 0., wesc_sq = 0., nmrw_scat = 0.;
+    int64_t nddmc[NDDMCCOUNT], nddmc_cells = 0;
+    Real nddmc_scat = 0.;
+    for (int b=0; b<NDDMCCOUNT; ++b) nddmc[b] = 0;
     int64_t scat_hist[MonteCarloBlock::NSCATBINS];
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] = 0;
     int64_t declined[MonteCarloBlock::NMRWDECLINE];
@@ -1688,6 +1744,9 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       nmrw += pmcb->nmrw;
       nmrw_decline += pmcb->nmrw_decline;
       nmrw_scat += pmcb->nmrw_scat;
+      for (int b=0; b<NDDMCCOUNT; ++b) nddmc[b] += pmcb->nddmc[b];
+      nddmc_scat += pmcb->nddmc_scat;
+      nddmc_cells += pmcb->nddmc_cells;
       for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] += pmcb->scat_tau_hist[b];
       for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) declined[b] += pmcb->nmrw_declined[b];
       wesc_sum += pmcb->wesc_sum;
@@ -1714,6 +1773,9 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&nmrw,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nmrw_decline,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nmrw_scat,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,nddmc,NDDMCCOUNT,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nddmc_scat,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nddmc_cells,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,scat_hist,MonteCarloBlock::NSCATBINS,MPI_INT64_T,MPI_SUM,
                   MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,declined,MonteCarloBlock::NMRWDECLINE,MPI_INT64_T,MPI_SUM,
@@ -1743,13 +1805,24 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       if (wwin_top > 0. || wwin_bottom > 0.)
         std::cout << "weight window: " << nsplit << " copies made, " << nroul
                   << " samples rouletted" << std::endl;
-      if (acceleration)
+      if (mrw)
         std::cout << "random walk: " << nmrw << " steps standing for " << nmrw_scat
                   << " scatterings, " << nmrw_decline << " declined (no frame "
                   << declined[MRW_DECLINE_FRAME] << ", too thin " << declined[MRW_DECLINE_THIN]
                   << ", outside Kompaneets " << declined[MRW_DECLINE_COMPTON]
                   << ", no budget " << declined[MRW_DECLINE_BUDGET] << ", other "
                   << declined[MRW_DECLINE_OTHER] << ")" << std::endl;
+      if (ddmc)
+        std::cout << "discrete diffusion: " << nddmc_cells << " cells, "
+                  << nddmc[DDMC_DWELL] << " dwells standing for " << nddmc_scat
+                  << " scatterings, " << nddmc[DDMC_HOP] << " hops ("
+                  << nddmc[DDMC_HOP_BLOCK] << " through block faces); converted "
+                  << nddmc[DDMC_CONVERT_FACE] << " at faces, "
+                  << nddmc[DDMC_CONVERT_BIRTH]
+                  << " at flight start; returned " << nddmc[DDMC_RETURN] << ", emerged "
+                  << nddmc[DDMC_EMERGED] << ", released " << nddmc[DDMC_RELEASE]
+                  << ", budget stops " << nddmc[DDMC_STOP] << ", P clamped "
+                  << nddmc[DDMC_PCLAMP] << std::endl;
       if (optab != nullptr) {
         // Which cells the table served and which fell off its grid: this decides whether
         // a run used the tabulated opacity or the analytic one
@@ -1779,7 +1852,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                     << std::endl;
         }
       }
-      if (accel_report) {
+      if (mrw_report || ddmc_report) {
         // the share of the analog scatterings by the optical half-width of their cell
         int64_t tot = 0;
         for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) tot += scat_hist[b];
@@ -2096,9 +2169,11 @@ void MonteCarlo::SetupBlockFromFluid(MonteCarloBlock *pmcb) {
   pmcb->GetDensity();
   pmcb->GetTemperature();
   pmcb->GetNumberDensity();
+  // ComputeFreeFreePrefactor, BuildOpacityTables, and BuildDDMCRates
+  // called after temperature and number densities have been set
   pmcb->ComputeFreeFreePrefactor();
-  // after the number densities: a problem generator's number-density hook may mask cells
   pmcb->BuildOpacityTables();
+  pmcb->BuildDDMCRates();
   if (boosts) {
     pmcb->GetVelocity();
     pmcb->ComputeTransformations();
@@ -2222,6 +2297,8 @@ MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
     pmcb->nmrw = pmcb->nmrw_decline = 0;
     pmcb->nmrw_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) pmcb->nmrw_declined[b] = 0;
+    for (int b=0; b<NDDMCCOUNT; ++b) pmcb->nddmc[b] = 0;
+    pmcb->nddmc_scat = 0.;
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) pmcb->scat_tau_hist[b] = 0;
   pmcb->loop_max_size = ComputeLoopMax();
   // The problem generator runs before the payload is unpacked, exactly as at startup:
@@ -2233,6 +2310,7 @@ MonteCarloBlock *MonteCarlo::RebuildArrival(MeshBlock *pmb, ParameterInput *pin,
   // must rebuild it in UserWorkAfterRebalance or refuse balancing, as the readers with
   // per-lid opacity tables do.
   pmcb->MonteCarloProblemGenerator(pin);
+  pmcb->BuildDDMCRates();
   pmcb->UnpackFromTransfer(payload.ib, payload.rb, payload.sb);
   return pmcb;
 }

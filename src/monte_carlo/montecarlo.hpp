@@ -50,10 +50,19 @@ class MCRandom;
 class KompaneetsTable;
 class MRWTables;
 
-//! diffusion domain of the random-walk step: the cell itself, or the largest sphere
+//! diffusion domain of the MRW step: the cell itself, or the largest sphere
 //! around the photon that fits in it
 enum MRWDomain {MRW_DOMAIN_CELL = 0, MRW_DOMAIN_SPHERE = 1};
-//! why a random-walk step declined: no usable frame; the domain too thin once the
+//! direction distribution at emergence on DDMC step
+enum DDMCEmergence {DDMC_EMERGE_ASYMPTOTIC = 0, DDMC_EMERGE_ISOTROPIC = 1};
+//! DDMC counters, per transport: photons converted at a face and at the start of a
+//! flight, returned at a face, walkers emerged, released (cell no longer a diffusion
+//! cell), dwells, hops, hops through block faces, budget stops, conversion
+//! probabilities clamped at 1
+enum DDMCCount {DDMC_CONVERT_FACE = 0, DDMC_CONVERT_BIRTH = 1, DDMC_RETURN = 2,
+                DDMC_EMERGED = 3, DDMC_RELEASE = 4, DDMC_DWELL = 5, DDMC_HOP = 6,
+                DDMC_HOP_BLOCK = 7, DDMC_STOP = 8, DDMC_PCLAMP = 9, NDDMCCOUNT = 10};
+//! why a MRW step declined: no usable frame; the domain too thin once the
 //! comoving extinction and the advection room are known; outside the Kompaneets
 //! description (theta, x theta, absorption, the table's x range); no time budget left
 enum MRWDecline {MRW_DECLINE_FRAME = 0, MRW_DECLINE_THIN = 1, MRW_DECLINE_COMPTON = 2,
@@ -352,18 +361,22 @@ public:
   enum AbsorptionMethodFlag *absorption_method; // absorption method for each emission type
 
   MCPolarization polarized;// how much of the polarization state is tracked
-  bool acceleration;  // use MRW acceleration
+  bool mrw;  // use MRW acceleration
   bool compute_dmin;
-  Real accel_tau;
-  Real accel_pmax; // cap steps time
+  Real mrw_tau;
+  Real mrw_pmax; // cap steps time
   std::string kgreens_file; // green's function table file
   KompaneetsTable *kgreens;
-  MRWDomain accel_domain; // cell (default) or sphere
-  Real accel_face_tau; // cell depth that triggers MRW
-  MRWTables *mrw; // MRW table link
+  MRWDomain mrw_domain; // cell (default) or sphere
+  Real mrw_face_tau; // cell depth that triggers MRW
+  MRWTables *mrw_tables; // MRW table link
   //! the multigroup opacity table of emission = table / absorption = table, else null
   OpacityTable *optab;
-  bool accel_report; // report on MRW usage and success
+  bool mrw_report; // report on MRW usage and success
+  bool ddmc; // use DDMC acceleration
+  Real ddmc_tau; // least Thomson depth across the smallest width of a diffusion cell
+  DDMCEmergence ddmc_emergence;
+  bool ddmc_report;
   bool raytrace_flag; // Will trace photons rather than scatter
   bool general_pusher_flag; // Use integration for photon movement
   bool verbose; // print out more information during run
@@ -658,12 +671,30 @@ public:
   bool cache_tetrads;
   bool coupled; // Whether time dependent code is coupled to hydro
   bool coherent_scattering; // photon does notchange energy after scattering
-  bool acceleration;  // use MRW acceleration
-  AthenaArray<int> accel_mask; // cell mask for MRW acceleration
+  bool mrw;  // use MRW acceleration
+  AthenaArray<int> accel_mask; // cells a generator keeps off the walk and the lattice
   int64_t nmrw, nmrw_decline; // MRW steps taken and declined
   Real nmrw_scat;
   static const int NMRWDECLINE = 5;
   int64_t nmrw_declined[NMRWDECLINE]; // the declines by reason (MRWDecline)
+  // Discrete diffusion (pmy_mc->ddmc; ddmc.cpp).  ddmc_cell is 1 where a cell is a
+  // diffusion cell, ghosts included (a ghost is tested only across a same-level block
+  // face); ddmc_rate holds, for the active cells, the six face leakage rates per cm of
+  // comoving path, their sum and the three widths in cm.  Both rebuilt by
+  // BuildDDMCRates from the fluid.
+  AthenaArray<int> ddmc_cell;
+  AthenaArray<Real> ddmc_rate;
+  enum {DDMC_RATE_TOT = 6, DDMC_RATE_W = 7, DDMC_NRATE = 10};
+  int64_t nddmc[NDDMCCOUNT];
+  Real nddmc_scat; // scatterings the dwells stood for
+  int64_t nddmc_cells; // diffusion cells on the block at the last build
+  void BuildDDMCRates();
+  //! widths of a cell along its coordinate directions at its centre, code length
+  void DDMCCellWidths(int i3, int i2, int i1, Real W[3]) const;
+  //! what a face crossing of energy we in the direction sign along axis leaves in
+  //! the cell: its flux, and the radiation force
+  void DDMCHopDeposit(int type, int i3, int i2, int i1, int axis, Real sign, Real we,
+                      Real chi);
   //! scatterings by cell optical half-width, bin k holding [2^(k-4), 2^(k-3))
   static const int NSCATBINS = 20;
   int64_t scat_tau_hist[NSCATBINS];

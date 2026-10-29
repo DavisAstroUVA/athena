@@ -551,10 +551,10 @@ bool PhotonPusher::MRWTrigger(Photon *pphot, int ip, Real chi) {
   }
   const Real l = pmcb->l_cgs;
   bool thick;
-  if (pmy_mc->accel_domain == MRW_DOMAIN_SPHERE) {
-    thick = chi*dmin*l > pmy_mc->accel_tau;
+  if (pmy_mc->mrw_domain == MRW_DOMAIN_SPHERE) {
+    thick = chi*dmin*l > pmy_mc->mrw_tau;
   } else {
-    thick = (chi*0.5*wmin*l > pmy_mc->accel_tau) && (chi*dmin*l > pmy_mc->accel_face_tau);
+    thick = (chi*0.5*wmin*l > pmy_mc->mrw_tau) && (chi*dmin*l > pmy_mc->mrw_face_tau);
   }
   if (!thick) return false;
   // The Kompaneets guards that need no frame: the cell's temperature and the photon's
@@ -578,12 +578,12 @@ bool PhotonPusher::MRWTrigger(Photon *pphot, int ip, Real chi) {
 
 bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
   MonteCarloBlock *pmcb = pmy_mcb;
-  const MRWTables *tab = mrw_;
+  const MRWTables *tab = mrw_tables_;
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
 
   const Real l_cgs = pmcb->l_cgs;
   const Real c_code = MCConstants::c_cgs / pmcb->vel_cgs;
-  const bool box = (pmy_mc->accel_domain == MRW_DOMAIN_CELL);
+  const bool box = (pmy_mc->mrw_domain == MRW_DOMAIN_CELL);
 
   // the cell as a box in the lab frame, and the fluid's velocity relative to that frame
   MRWCellFrame fr;
@@ -654,11 +654,11 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
       dpmin = std::min(dpmin, std::min(xp[m], Wp[m] - xp[m]));
       wpmin = std::min(wpmin, Wp[m]);
     }
-    if (chi*0.5*wpmin*l_cgs <= pmy_mc->accel_tau
-        || chi*dpmin*l_cgs <= pmy_mc->accel_face_tau) return decline(MRW_DECLINE_THIN);
+    if (chi*0.5*wpmin*l_cgs <= pmy_mc->mrw_tau
+        || chi*dpmin*l_cgs <= pmy_mc->mrw_face_tau) return decline(MRW_DECLINE_THIN);
   } else {
     R0 = (1. - f)*dmin_cm*(1. - kEps);
-    if (chi*R0 <= pmy_mc->accel_tau) return decline(MRW_DECLINE_THIN);
+    if (chi*R0 <= pmy_mc->mrw_tau) return decline(MRW_DECLINE_THIN);
   }
 
   // Compton: temperature, energy and absorption parameter of the cell, and the guards
@@ -718,8 +718,8 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
       }
       return std::exp(0.5*(llo + lhi));
     };
-    if (pmy_mc->accel_pmax > 0.)
-      ct_b = std::min(ct_b, invert(std::log(pmy_mc->accel_pmax), ct_b));
+    if (pmy_mc->mrw_pmax > 0.)
+      ct_b = std::min(ct_b, invert(std::log(pmy_mc->mrw_pmax), ct_b));
     const Real lns_b = (ct_b < 0.5*HUGE_NUMBER) ? lnsurv(ct_b) : -HUGE_NUMBER;
     const Real u = pran->uniform();
     const Real lnu = std::log(std::max(1. - u, 1.e-300));
@@ -752,7 +752,7 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
   } else {
     const Real s_per_ct = PI*PI*D/(R0*R0);
     Real s_b = (ct_b < 0.5*HUGE_NUMBER) ? s_per_ct*ct_b : HUGE_NUMBER;
-    if (pmy_mc->accel_pmax > 0.) s_b = std::min(s_b, mrw_s_pmax_);
+    if (pmy_mc->mrw_pmax > 0.) s_b = std::min(s_b, mrw_s_pmax_);
     const Real f_b = 1. - MRWTables::SphereInside(s_b);
     const Real v = pran->uniform();
     Real s_e, rfac;

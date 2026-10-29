@@ -46,93 +46,133 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
 
   for (int ip=ips; ip<=ipe; ip++) {
 
-    // budget of mean free paths for this flight, carried across blocks
-    Real tauremaining = (pphot->taup[ip] >= 0.) ? pphot->taup[ip] : GetOpticalDepth(pran);
+    // With discrete diffusion a walker hops before any flight, a photon that
+    // converts at a face during its flight walks after it, and a walk that ends in
+    // emergence starts a fresh flight; each pass of this loop is one flight, repeated
+    // only for a photon that converted to diffusion during it, so with ddmc off the
+    // runs once, representing a single flight.
+    Real tauremaining = 0.;
+    bool first_pass = true;
+    do {
+      // convert and walk a photon on the lattice.  A walker moves only by hops, so false
+      // (still a walker: absorbed, buffered elsewhere or out of time) means no flight
+      if (ddmc_ && !DDMCBeforeFlight(pphot, pran, ip, first_pass)) break;
+      first_pass = false;
 
-    Real& kx = pphot->k1p[ip];
-    Real& ky = pphot->k2p[ip];
-    Real& kz = pphot->k3p[ip];
+      // budget of mean free paths for this flight, carried across blocks
+      tauremaining = (pphot->taup[ip] >= 0.) ? pphot->taup[ip] : GetOpticalDepth(pran);
 
-    // Steps already taken in this free flight, plus the ones taken here.  Counted in a
-    // local so it stays in a register across a body that calls out to functions the
-    // compiler must assume could alias the photon arrays.
-    const int nmv0 = pphot->nmvp[ip];
-    int iter = 0;
+      Real& kx = pphot->k1p[ip];
+      Real& ky = pphot->k2p[ip];
+      Real& kz = pphot->k3p[ip];
 
-    while( (tauremaining > 0.) && (pphot->statp[ip] == EVOLVING) &&
-           (pphot->dtp[ip] > 0.) ) {
-      // Tested before the step is counted, so nmvp only ever counts steps actually taken.
-      if (capmove > 0 && nmv0 + iter >= capmove) {
-        pphot->statp[ip] = REMOVED;
-        break;
-      }
-      iter++;
+      // Steps already taken in this free flight, carried over from earlier Moves and
+      // blocks in nmvp, plus those taken here, counted in iter.
+      const int nmv0 = pphot->nmvp[ip];
+      int iter = 0;
 
-      // Compute distance to all faces
-      Real dlx, dly, dlz;
-      bool ascend[3];
-      if(kx > 0.0) {
-        dlx = (pco->x1f(pphot->i1p[ip]+1) - pphot->x1p[ip]) / kx;
-        ascend[0] = true;
-      } else if(kx < 0.0) {
-        dlx = (pco->x1f(pphot->i1p[ip]) - pphot->x1p[ip]) / kx;
-        ascend[0] = false;
-      } else {
-        dlx = HUGE_NUMBER;
-        ascend[0] = false;
-      }
+      while( (tauremaining > 0.) && (pphot->statp[ip] == EVOLVING) &&
+             (pphot->dtp[ip] > 0.) ) {
+        // Tested before the step is counted, so nmvp only ever counts steps actually
+        // taken.
+        if (capmove > 0 && nmv0 + iter >= capmove) {
+          pphot->statp[ip] = REMOVED;
+          break;
+        }
+        iter++;
 
-      if(ky > 0.0) {
-        dly = (pco->x2f(pphot->i2p[ip]+1)  - pphot->x2p[ip]) / ky;
-        ascend[1] = true;
-      } else if(ky < 0.0) {
-        dly = (pco->x2f(pphot->i2p[ip]) - pphot->x2p[ip]) / ky;
-        ascend[1] = false;
-      } else {
-        dly = HUGE_NUMBER;
-        ascend[1] = false;
-      }
-
-      if(kz > 0.0) {
-        dlz = (pco->x3f(pphot->i3p[ip]+1) - pphot->x3p[ip]) / kz;
-        ascend[2] = true;
-      } else if(kz < 0.0) {
-        dlz = (pco->x3f(pphot->i3p[ip]) - pphot->x3p[ip]) / kz;
-        ascend[2] = false;
-      } else {
-        dlz = HUGE_NUMBER;
-        ascend[2] = false;
-      }
-
-      int face;
-      NextFace(dlx,dly,dlz,face,dl);
-      // set total extinction coefficient
-      Real chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
-      const Real alpha = StretchFactor(pphot,ip,chi,dl);
-      const Real chi_str = alpha * chi;
-
-      if ((chi > 0.) && (dl*l_cgs > tauremaining / chi_str)) { // Photon remains in cell
-        // Use MRW if cell is sufficient optically thick
-        bool accel_success = false;
-        if (acceleration && MRWTrigger(pphot,ip,pphot->acp[ip]+pphot->scp[ip]))
-          accel_success = MRWStep(pphot,pran,ip);
-        if (accel_success) {
-          if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
-          if (pphot->statp[ip] != EVOLVING) break;
-          tauremaining = GetOpticalDepth(pran);
-          pphot->strp[ip] = 0.;
-          continue;
+        // Compute distance to all faces
+        Real dlx, dly, dlz;
+        bool ascend[3];
+        if(kx > 0.0) {
+          dlx = (pco->x1f(pphot->i1p[ip]+1) - pphot->x1p[ip]) / kx;
+          ascend[0] = true;
+        } else if(kx < 0.0) {
+          dlx = (pco->x1f(pphot->i1p[ip]) - pphot->x1p[ip]) / kx;
+          ascend[0] = false;
+        } else {
+          dlx = HUGE_NUMBER;
+          ascend[0] = false;
         }
 
-        // Perform standard displacement if acceleration not atempted or unsuccsessful
-        if (!accel_success) {
-          if (pphot->statp[ip] != EVOLVING)
-            break;
-          // compute distance remaining in cell
-          dl = tauremaining / chi_str / l_cgs;
-          pphot->dtp[ip] -= dl / c_code; // SWD: set with k0p instead
+        if(ky > 0.0) {
+          dly = (pco->x2f(pphot->i2p[ip]+1)  - pphot->x2p[ip]) / ky;
+          ascend[1] = true;
+        } else if(ky < 0.0) {
+          dly = (pco->x2f(pphot->i2p[ip]) - pphot->x2p[ip]) / ky;
+          ascend[1] = false;
+        } else {
+          dly = HUGE_NUMBER;
+          ascend[1] = false;
+        }
 
-  
+        if(kz > 0.0) {
+          dlz = (pco->x3f(pphot->i3p[ip]+1) - pphot->x3p[ip]) / kz;
+          ascend[2] = true;
+        } else if(kz < 0.0) {
+          dlz = (pco->x3f(pphot->i3p[ip]) - pphot->x3p[ip]) / kz;
+          ascend[2] = false;
+        } else {
+          dlz = HUGE_NUMBER;
+          ascend[2] = false;
+        }
+
+        int face;
+        NextFace(dlx,dly,dlz,face,dl);
+        // set total extinction coefficient
+        Real chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
+        const Real alpha = StretchFactor(pphot,ip,chi,dl);
+        const Real chi_str = alpha * chi;
+
+        if ((chi > 0.) && (dl*l_cgs > tauremaining / chi_str)) { // Photon remains in cell
+          // Use MRW if cell is sufficient optically thick
+          bool mrw_success = false;
+          if (mrw_ && MRWTrigger(pphot,ip,pphot->acp[ip]+pphot->scp[ip]))
+            mrw_success = MRWStep(pphot,pran,ip);
+          if (mrw_success) {
+            if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
+            if (pphot->statp[ip] != EVOLVING) break;
+            tauremaining = GetOpticalDepth(pran);
+            pphot->strp[ip] = 0.;
+            continue;
+          }
+
+          // Perform standard displacement if acceleration not atempted or unsuccsessful
+          if (!mrw_success) {
+            if (pphot->statp[ip] != EVOLVING)
+              break;
+            // compute distance remaining in cell
+            dl = tauremaining / chi_str / l_cgs;
+            pphot->dtp[ip] -= dl / c_code;
+
+    
+            if (pmcb->call_moments) {
+              Real dl_cgs = dl * l_cgs;
+              if (abs_tau) {
+                Real etaua = std::exp(-pphot->acp[ip] * dl_cgs);
+                pmcb->UpdateMoments(pphot,dl_cgs,etaua,ip);
+                pphot->wp[ip] *= etaua;
+              } else {
+                pmcb->UpdateMoments(pphot,dl_cgs,ip);
+              }
+            }
+            ApplyStretch(pphot,ip,alpha,chi*l_cgs*dl);
+            pphot->wp[ip] /= alpha;
+            tauremaining = 0.;
+            // update position
+            // k0p is the photon energy, not a unit time component: the coordinate time
+            // advance over a path length dl is just dl (in units where c = 1).
+            pphot->x0p[ip] += dl;
+            pphot->x1p[ip] += pphot->k1p[ip] * dl;
+            pphot->x2p[ip] += pphot->k2p[ip] * dl;
+            pphot->x3p[ip] += pphot->k3p[ip] * dl;
+          }
+          // Perform any user work
+          if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
+          break;
+
+        } else { // Photon moves to next cell and reduce tauremaining
+          // Account for absorption (if needed) and update moments
           if (pmcb->call_moments) {
             Real dl_cgs = dl * l_cgs;
             if (abs_tau) {
@@ -143,59 +183,41 @@ void CartesianPusher::Move(Photon *pphot, int ips, int ipe) {
               pmcb->UpdateMoments(pphot,dl_cgs,ip);
             }
           }
-          ApplyStretch(pphot,ip,alpha,chi*l_cgs*dl);
-          pphot->wp[ip] /= alpha;
-          tauremaining = 0.;
+
           // update position
           // k0p is the photon energy, not a unit time component: the coordinate time
-          // advance over a path length dl is just dl (in units where c = 1).
-          pphot->x0p[ip] += dl;
+            // advance over a path length dl is just dl (in units where c = 1).
+            pphot->x0p[ip] += dl;
           pphot->x1p[ip] += pphot->k1p[ip] * dl;
           pphot->x2p[ip] += pphot->k2p[ip] * dl;
           pphot->x3p[ip] += pphot->k3p[ip] * dl;
-        }
-        // Perform any user work
-        if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
-        break;
 
-      } else { // Photon moves to next cell and reduce tauremaining
-        // Account for absorption (if needed) and update moments
-        if (pmcb->call_moments) {
-          Real dl_cgs = dl * l_cgs;
-          if (abs_tau) {
-            Real etaua = std::exp(-pphot->acp[ip] * dl_cgs);
-            pmcb->UpdateMoments(pphot,dl_cgs,etaua,ip);
-            pphot->wp[ip] *= etaua;
-          } else {
-            pmcb->UpdateMoments(pphot,dl_cgs,ip);
+          tauremaining -= chi_str * l_cgs * dl;
+          ApplyStretch(pphot,ip,alpha,chi*l_cgs*dl);
+          pphot->dtp[ip] -= dl / c_code;
+
+          // Perform any user work
+          if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
+          if (pphot->statp[ip] == EVOLVING) {
+            // discrete diffusion: a face into a diffusion cell converts or returns the
+            // photon instead of crossing
+            if (ddmc_ && DDMCFaceTest(pphot,pran,ip,face,ascend)) {
+              if (pphot->ddmcp[ip] != 0 || pphot->statp[ip] != EVOLVING) break;
+              continue;
+            }
+            MovePhotonToNextZone(pphot,pco,pmcb,face,ascend,ip);
           }
         }
+      } // end while loop
+      pphot->nmvp[ip] = nmv0 + iter;
+      pmy_mcb->lb_nstep += iter;
+    } while (ddmc_ && pphot->ddmcp[ip] != 0 && pphot->statp[ip] == EVOLVING); // passes
 
-        // update position
-        // k0p is the photon energy, not a unit time component: the coordinate time
-          // advance over a path length dl is just dl (in units where c = 1).
-          pphot->x0p[ip] += dl;
-        pphot->x1p[ip] += pphot->k1p[ip] * dl;
-        pphot->x2p[ip] += pphot->k2p[ip] * dl;
-        pphot->x3p[ip] += pphot->k3p[ip] * dl;
-
-        tauremaining -= chi_str * l_cgs * dl;
-        ApplyStretch(pphot,ip,alpha,chi*l_cgs*dl);
-        pphot->dtp[ip] -= dl / c_code;
-
-        // Perform any user work
-        if (UserWorkInMove != NULL) UserWorkInMove(pmcb,pphot,this,ip);
-        if (pphot->statp[ip] == EVOLVING)
-          MovePhotonToNextZone(pphot,pco,pmcb,face,ascend,ip);
-      }
-    }
-
+    // a walker's flight state was set when it was made one
+    if (!ddmc_ || pphot->ddmcp[ip] == 0) pphot->taup[ip] = tauremaining;
     // Retire a photon whose free flight has run past the cap.  nmvp carries across Move
     // calls and blocks, which is what it takes to bound a flight; it is reset at each
     // scattering, in TransferPhotonsOnBlock.
-    pphot->nmvp[ip] = nmv0 + iter;
-    pphot->taup[ip] = tauremaining;
-    pmy_mcb->lb_nstep += iter;
     // This photon is done with whatever cell it was in, so the scattering-moment
     // contribution held back for it becomes one squared term in the error.
     pmy_mcb->FlushPendingErrors();

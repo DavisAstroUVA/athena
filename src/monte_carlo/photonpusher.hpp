@@ -67,10 +67,11 @@ public:
   // function pointers
   UserMoveFunc_t UserWorkInMove;
 
-  const MRWTables *mrw_; // MRW tables (see mrw.hpp)
-  Real mrw_s_pmax_; // sphere time at MRW fraction is accel_pmax
+  const MRWTables *mrw_tables_; // MRW tables (see mrw.hpp)
+  Real mrw_s_pmax_; // sphere time at MRW fraction is mrw_pmax
 
-  bool acceleration;
+  bool mrw_;
+  bool ddmc_; // discrete diffusion on (pmy_mc->ddmc)
   bool boosts;
   bool resonance;
   bool compton;
@@ -114,6 +115,23 @@ public:
   virtual bool MRWFrame(Photon *pphot, int ip, MRWCellFrame &fr);
   //! one step; false when it declines and leaves the photon untouched
   bool MRWStep(Photon *pphot, MCRandom *pran, int ip);
+  // DDMC functions (ddmc.cpp)
+  //! convert a photon starting a flight in a diffusion cell, then walk it;
+  bool DDMCBeforeFlight(Photon *pphot, MCRandom *pran, int ip, bool first);
+  //! convert or return a photon whose next cell is a diffusion cell
+  bool DDMCFaceTest(Photon *pphot, MCRandom *pran, int ip, int face,
+                    const bool ascend[3]);
+  void DDMCWalk(Photon *pphot, MCRandom *pran, int ip);
+  void DDMCConvert(Photon *pphot, int ip);
+  void DDMCRelease(Photon *pphot, MCRandom *pran, int ip);
+  void DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face);
+  void DDMCArrive(Photon *pphot, int ip);
+  void DDMCHop(Photon *pphot, MCRandom *pran, int ip, int face);
+  void DDMCPlaceAtCentre(Photon *pphot, int ip, int i3, int i2, int i1);
+  void DDMCSetWalker(Photon *pphot, int ip);
+  //! the walker's six face rates and their sum
+  Real DDMCRates(Photon *pphot, int ip, Real rate[6]);
+  Real DDMCNeighbourExtinction(Photon *pphot, int ip, int n3, int n2, int n1);
   // Resonant-scattering acceleration (general pusher)
   virtual Real SampleEscapeTime(MCRandom *pran, Real decayRate, Real sphereRadius,
                                 Real diffusionTime);

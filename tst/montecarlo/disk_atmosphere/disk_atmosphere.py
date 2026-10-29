@@ -144,7 +144,7 @@ def theta_cells(nx2, x2rat):
 
 def write_athinput(path, iseed, nphot, nx1=32, nx2=512, nx3=8, x2rat=0.993,
                    mb1=8, mb2=64, mb3=8, general_pusher=False, stepsize=0.5,
-                   equal_weight=False):
+                   equal_weight=False, ddmc=False, ddmc_tau=3.0, emergence="asymptotic"):
     """Write one deck.  Mirrors the cartesian slab test, in spherical-polar, with a photon
     list as the output the driver bins."""
     o = ["<comment>",
@@ -196,8 +196,17 @@ def write_athinput(path, iseed, nphot, nx1=32, nx2=512, nx3=8, x2rat=0.993,
     o += ["",
          "<sampling>",
          "weights = {0}".format("equal" if equal_weight else "emission"),
-         "",
-         "<problem>",
+         ""]
+    if ddmc:
+        # the discrete diffusion lattice (ddmc.cpp) in the cells thicker than ddmc_tau,
+        # which with the default grid is the atmosphere below tau of a few tens
+        o += ["<ddmc>",
+              "enable  = true",
+              "tau     = {0!r}".format(ddmc_tau),
+              "emergence = {0}".format(emergence),
+              "report  = true",
+              ""]
+    o += ["<problem>",
          # the z-stratified branch of the spherical setup in mc_isoth
          "radial     = false",
          "zmax       = {0:e}".format(ZMAX),
@@ -359,6 +368,9 @@ def main(**kwargs):
 
     counts = [int(kwargs["nphot"] * kwargs["refine"]**i) for i in range(kwargs["nstep"])]
     pusher = "general" if kwargs["general_pusher"] else "legacy"
+    if kwargs["ddmc"]:
+        pusher += ", discrete diffusion above cell depth {0!r} with {1} emergence".format(
+            kwargs["ddmc_tau"], kwargs["emergence"])
     d1, dmid, width_at = theta_cells(kwargs["nx2"], kwargs["x2rat"])
     top_in = width_at(math.acos(ZMAX / RIN))
     top_out = width_at(math.acos(ZMAX / ROUT))
@@ -378,7 +390,9 @@ def main(**kwargs):
                   nx1=kwargs["nx1"], nx2=kwargs["nx2"], nx3=kwargs["nx3"],
                   x2rat=kwargs["x2rat"], mb1=kwargs["mb1"], mb2=kwargs["mb2"],
                   mb3=kwargs["mb3"], general_pusher=kwargs["general_pusher"],
-                  stepsize=kwargs["stepsize"], equal_weight=kwargs["equal_weight"])
+                  stepsize=kwargs["stepsize"], equal_weight=kwargs["equal_weight"],
+                  ddmc=kwargs["ddmc"], ddmc_tau=kwargs["ddmc_tau"],
+                  emergence=kwargs["emergence"])
         spectrum, acct = bin_lists(workdir, kwargs["ncth"], kwargs["nphi"],
                                    kwargs["keep_lists"])
         # The run's own tally, and the escaping weight per photon.  Both should be
@@ -388,6 +402,9 @@ def main(**kwargs):
         # better.
         tally = [ln.strip() for ln in out.splitlines() if ln.startswith("ntot:")]
         print("      run tally: " + (tally[-1] if tally else "(not found in output)"))
+        for ln in out.splitlines():
+            if ln.startswith("discrete diffusion"):
+                print("      " + ln.strip())
         print("      escaping weight per photon: {0:.6e};  escapers dropped by count: {1:.2%}"
               .format(acct["total"] / n, acct["n_dropped"] / max(acct["n_total"], 1)))
 
@@ -495,6 +512,12 @@ if __name__ == "__main__":
                    help="use the geodesic pusher instead of the legacy spherical one")
     p.add_argument("--stepsize", type=float, default=0.5,
                    help="general pusher step, as a fraction of a cell crossing")
+    p.add_argument("--ddmc", action="store_true",
+                   help="turn the discrete diffusion lattice on in the thick cells")
+    p.add_argument("--ddmc-tau", dest="ddmc_tau", type=float, default=3.0,
+                   help="cell depth above which a cell is a diffusion cell")
+    p.add_argument("--emergence", default="asymptotic", choices=["asymptotic", "isotropic"],
+                   help="direction distribution of a walker emerging as a photon")
     p.add_argument("--nx1", type=int, default=32, help="radial cells")
     p.add_argument("--nx2", type=int, default=512,
                    help="polar cells from the pole to the midplane")

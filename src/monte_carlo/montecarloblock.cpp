@@ -85,7 +85,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   curved_metric = pmy_mc->curved_metric;
   boosts = pmy_mc->boosts;
   coupled = pmy_mc->coupled;
-  acceleration = pmy_mc->acceleration;
+  mrw = pmy_mc->mrw;
   // set in mcoutput if output requested
   mom_flag_lab = pmy_mc->pmcout->mom_flag_lab;
   mom_flag_com = pmy_mc->pmcout->mom_flag_com;
@@ -490,7 +490,15 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   nmrw_scat = 0.;
   for (int b=0; b<NSCATBINS; ++b) scat_tau_hist[b] = 0;
   for (int b=0; b<NMRWDECLINE; ++b) nmrw_declined[b] = 0;
-  if (acceleration) {
+  for (int b=0; b<NDDMCCOUNT; ++b) nddmc[b] = 0;
+  nddmc_scat = 0.;
+  nddmc_cells = 0;
+  if (pmy_mc->ddmc) {
+    ddmc_cell.NewAthenaArray(ncells3,ncells2,ncells1);
+    ddmc_rate.NewAthenaArray(DDMC_NRATE,ncells3,ncells2,ncells1);
+  }
+  // the generator's cell mask serves the lattice as it serves the random walk
+  if (mrw || pmy_mc->ddmc) {
     accel_mask.NewAthenaArray(ncells3,ncells2,ncells1);
     for (int n=0; n<accel_mask.GetSize(); ++n) accel_mask(n) = 1;
   }
@@ -571,6 +579,8 @@ MonteCarloBlock::~MonteCarloBlock() {
   if (importance.GetSize() > 0) importance.DeleteAthenaArray();
   if (escape_prob.GetSize() > 0) escape_prob.DeleteAthenaArray();
   if (accel_mask.GetSize() > 0) accel_mask.DeleteAthenaArray();
+  ddmc_cell.DeleteAthenaArray();
+  ddmc_rate.DeleteAthenaArray();
   if (tab_mask.GetSize() > 0) tab_mask.DeleteAthenaArray();
   if (tab_emis_tot.GetSize() > 0) tab_emis_tot.DeleteAthenaArray();
   if (tab_abs.GetSize() > 0) tab_abs.DeleteAthenaArray();
@@ -928,6 +938,9 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
   // perform all absorption and scattering related tasks for all samples; copies the
   // weight window appends are reached by the same loop
   for (int ip=0; ip<pphot->nphot; ip++) {
+    // a walker stopped by the cycle's budget stays as it is; its absorption
+    // acted over its dwells and it does not scatter
+    if (pmy_mc->ddmc && pphot->ddmcp[ip] != 0) continue;
     if (window && pphot->statp[ip] == EVOLVING) WeightWindow(pphot,ip);
     // record initial weight and direction
     Real weight0 = pphot->wp[ip];
@@ -972,7 +985,7 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
         FromScatteringBasis(this, pphot, ip);
       nscat++;
       pphot->nscp[ip]++;
-      if (pmy_mc->accel_report) BinScatteringDepth(pphot,ip);
+      if (pmy_mc->mrw_report || pmy_mc->ddmc_report) BinScatteringDepth(pphot,ip);
       // Scattering starts a new free flight
       pphot->nmvp[ip] = 0;
       pphot->strp[ip] = 0.;
@@ -3461,8 +3474,8 @@ void MonteCarloBlock::UpdateMomentsMRW(Photon *pphot, Real ct, Real energy,
 //----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::BinScatteringDepth(Photon *pphot, int ip)
 //! \brief count this scattering under the optical half-width of its cell, the smallest
-//!        half-width times the extinction at the photon's energy (<montecarlo>
-//!        accel_report)
+//!        half-width times the extinction at the photon's energy (the report of
+//!        <randomwalk> or <ddmc>)
 
 void MonteCarloBlock::BinScatteringDepth(Photon *pphot, int ip) {
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];

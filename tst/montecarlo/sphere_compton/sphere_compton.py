@@ -310,6 +310,10 @@ def write_athinput(args, filename):
             rw_lines += f"face_tau = {args.accel_face_tau}\n"
         if line.startswith('<problem>') and rw_lines:
             line = "<randomwalk>\n" + rw_lines + "\n" + line
+        if line.startswith('<problem>') and args.ddmc:
+            # the discrete diffusion keys have their own block, written before <problem>
+            line = (f"<ddmc>\nenable = true\ntau = {args.ddmc_tau}\nemergence = {args.emergence}\n"
+                    f"report = true\n\n" + line)
         if block == 'problem' and line.startswith('heabund') and args.beta:
             line += f"velocity = {args.beta}    # fluid velocity along z, in units of c\n"
         out.append(line)
@@ -340,6 +344,13 @@ def parse_args(argv=None):
     ap.add_argument('--accel-report', action='store_true',
                     help='print the scatterings-by-cell-depth histogram')
     ap.add_argument('--kgreens', default=None, help='Kompaneets table binary')
+    ap.add_argument('--ddmc', action='store_true',
+                    help='turn the discrete diffusion lattice on (<ddmc> enable); compare '
+                         'against an analog run with --compare-to')
+    ap.add_argument('--ddmc-tau', type=float, default=3.,
+                    help='cell depth above which a cell is a diffusion cell')
+    ap.add_argument('--emergence', default='asymptotic', choices=['asymptotic', 'isotropic'],
+                    help='direction distribution of a walker emerging as a photon')
     ap.add_argument('--general-pusher', action='store_true',
                     help='integrate with the general pusher (flat spacetime here)')
     ap.add_argument('--stepsize', type=float, default=0.02,
@@ -385,8 +396,8 @@ def main(args):
         files = sorted(glob.glob(os.path.join(args.workdir, 'sphcomp.out1.*.list')))
         params = read_athinput(deck)
         for line in open(os.path.join(args.workdir, 'athena.log')):
-            if line.startswith(('random walk', 'photons transported', 'wall time used',
-                                'ntot:', 'scatterings by cell')):
+            if line.startswith(('random walk', 'discrete diffusion', 'photons transported',
+                                'wall time used', 'ntot:', 'scatterings by cell')):
                 print('   ', line.rstrip())
     else:
         if not args.lists or not args.athinput:

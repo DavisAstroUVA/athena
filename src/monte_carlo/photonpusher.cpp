@@ -30,7 +30,8 @@ PhotonPusher::PhotonPusher(MonteCarloBlock *pmcb) {
   capmove = pmcb->pmy_mc->capmove;
 
   // MRW acceleration
-  acceleration = pmcb->acceleration;
+  mrw_ = pmcb->mrw;
+  ddmc_ = pmy_mc->ddmc;
   boosts = pmcb->boosts;
   resonance = (pmcb->scattering_meth == SCATRES);
   compton = (pmcb->scattering_meth == SCATCOMP);
@@ -40,10 +41,10 @@ PhotonPusher::PhotonPusher(MonteCarloBlock *pmcb) {
   stretch_taucell_ = pmy_mc->stretch_taucell;
   stretching_ = (stretch_ != 1.);
 
-  mrw_ = pmy_mc->mrw;
+  mrw_tables_ = pmy_mc->mrw_tables;
   mrw_s_pmax_ = HUGE_NUMBER;
-  if (acceleration && !resonance && mrw_ != nullptr && pmy_mc->accel_pmax > 0.)
-    mrw_s_pmax_ = mrw_->SphereFirstPassage(1. - pmy_mc->accel_pmax);
+  if (mrw_ && !resonance && mrw_tables_ != nullptr && pmy_mc->mrw_pmax > 0.)
+    mrw_s_pmax_ = mrw_tables_->SphereFirstPassage(1. - pmy_mc->mrw_pmax);
 }
 
 //----------------------------------------------------------------------------------------

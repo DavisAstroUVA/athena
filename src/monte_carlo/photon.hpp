@@ -131,6 +131,8 @@ public:
   static int idk0p, idk1p, idk2p, idk3p;
   static int iep, iwp, iscp, iacp;
   static int istrp, itaup, iwrefp, iubp, igrpp;
+  //! the discrete diffusion flag column, registered only with <ddmc> enable (-1 else)
+  static int iddmcp;
   static int isip, isqp, isup, isvp;
   static int iuserp;
   static int ipolp;
@@ -145,6 +147,10 @@ public:
   //! table opacities with two_band: the group the absorption was last evaluated in, so
   //! that a change of group (Compton, Doppler or gravitational shift) redraws the band
   std::vector<int> &grpp;
+  //! DDMC: 0 a transport photon, 1 a walker at the centre of its cell, 2 + f a walker that
+  //! has just crossed a block face and enters its new cell through face f (0..5)
+  std::vector<int> &ddmcp;
+  static std::vector<int> ddmc_scratch_;
   std::vector<int> &i1p, &i2p, &i3p;
   std::vector<Real> &x0p, &x1p, &x2p, &x3p;
   std::vector<Real> &k0p, &k1p, &k2p, &k3p;
