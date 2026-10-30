@@ -577,6 +577,40 @@ free-free survival check fails identically on the analog and the lattice at the 
 radius of $10^{10}$ cm, where the sink is $10^{-4}$: a deck limitation, which the radius
 of $10^7$ cm used here avoids.
 
+\section{What D3 built}
+\label{sec:d3}
+
+Built 2026-10-29.  The hop across block faces and the level-jump rule of
+Section~\ref{sec:faces} were already in place from D1, so D3 added what the plan's
+decision needs: \texttt{ddmc\_jump}, the bits of each active cell's faces that lead to a
+block at another refinement level, the count of diffusion cells with such a face, and
+the count of emergences through them, printed in the report as ``$N$ cells ($M$ at level
+jumps)'' and ``emerged $E$ ($J$ through level jumps)''.  The mask and its counts are built
+with \key{report = true} alone, without \key{enable}, so a run under the general pusher,
+where the lattice is refused until D5, still reports what the lattice would reach.
+
+Tests, in \texttt{tst/montecarlo/sphere\_compton/ddmc\_blocks.py}, on the Thomson
+sphere with the lattice on: over 8 and 64 blocks on 1, 4 and 16 ranks every run
+conserves its photons and agrees with the 8-block one-rank run within 1.1 times the
+two-sample Kolmogorov scale in the escape paths (statistical, since each block seeds its
+own generator); on one rank, plain against \texttt{<loadbalancing> test\_repack = local}
+and \texttt{mesh} gives byte-identical lists, which is the check that a walker survives
+the pack and unpack and that the lattice is rebuilt from the fluid on arrival; with a
+static level-1 block of side $0.5R$ inside the sphere, the lattice agrees with the analog
+run on the same mesh within 0.7 times the scale, with 318 of its 6511 diffusion cells
+touching the jump and 121 thousand of its 229 thousand emergences going through it.
+That last number is what Densmore's split-face rates would save on such a mesh, and the
+decision to build them waits on the same count from the X-ray binary's mesh, for which
+three report-only decks were written (threshold 2, 3 and 4).
+
+The test found a bug in the generator, not in the exchange: \texttt{mc\_sphere\_isoth}
+kept the indices of the cell holding the origin in file-scope variables that every
+block's problem generator overwrote, so the emitting block used the last block's values.
+With 8 blocks the last block holds the origin and nothing showed; with 27 or 64 the
+point source was born with wrong indices, sent to the wrong neighbour and destroyed on
+arrival, 20 to 50 percent of the photons under either pusher.  The origin cell is now
+found on the emitting block in \texttt{InitializePhoton}.
+
 \section{Decisions taken before D1}
 \label{sec:decisions}
 

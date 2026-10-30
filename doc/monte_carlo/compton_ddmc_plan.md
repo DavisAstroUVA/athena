@@ -1,6 +1,6 @@
 # Discrete diffusion Monte Carlo for Compton and resonance scattering: plan
 
-Status: **D0 and D1 done 2026-10-28, D2 done 2026-10-29, all on branch `ddmc`; D3 next.**  The 2026-10-06
+Status: **D0 and D1 done 2026-10-28, D2 and D3 done 2026-10-29, all on branch `ddmc`; the XRB count that decides D4 and D5 is with the user.**  The 2026-10-06
 outline is folded in below with the changes of Section 2.  Order decided: the Compton
 phases D0 to D3 first (they build the lattice, the interface and the block machinery that
 both scatterings share, where an exact reference exists), the XRB phases D4 and D5 as a
@@ -64,7 +64,27 @@ percent long at theta 0.01 to 0.02.  With both, the lattice agrees with the anal
 at theta 0.01 and 0.02 to 0.5 percent in the mean energy and 1 to 1.4 times the
 two-sample scale in the spectrum, while both sit 2 to 3 percent above the Thomson
 Kompaneets theory of the driver (the exact kernel's hardening, not the lattice's).
-Next step: D3.
+
+D3 (blocks, ranks, refinement, 2026-10-29): the block hop and the level-jump rule were
+already built in D1, so D3 added the report's level-jump counts (`ddmc_jump`, the faces of
+each cell that lead to another level; diffusion cells with such a face; emergences
+through them) and the mask built with `<ddmc> report = true` alone, so a run that cannot
+enable the lattice (the XRB under the general pusher) still counts its reach.  The test
+driver `ddmc_blocks.py` passes: the Thomson sphere over 8 and 64 blocks on 1, 4 and 16
+ranks conserves photons and agrees with the 8-block one-rank run within 1.1 times the
+two-sample scale; one rank plain against `test_repack = local` and `mesh` gives
+byte-identical lists; with a static level-1 block inside the sphere the lattice agrees
+with the analog run on the same mesh within 0.7 times the scale (318 of 6511 diffusion
+cells touch the jump, and 121 thousand of 229 thousand emergences go through it, the
+number the split-face rates would save).  The test found a generator bug, not an
+exchange bug: `mc_sphere_isoth` kept the origin cell's indices in globals that every
+block's setup overwrote, so with 27 or 64 blocks the point source was born with the last
+block's indices and 20 to 50 percent of the photons died on arrival in both pushers;
+fixed in `InitializePhoton`.  The decision run is three decks in the user's hands (the
+hires snapshot is 114 GB): the `d01_emis2` deck with `<ddmc> report = true`, 1000 photons
+and `tau` of 2, 3 and 4, whose report line gives the diffusion cells and the share at
+level jumps; the split-face rates are built if that share is above about a fifth.
+Next step: the user's count, then D4 or the resonance phases.
 
 ## 1. Why this and not the in-cell step
 

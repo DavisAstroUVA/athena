@@ -133,7 +133,7 @@ void MonteCarloBlock::BuildDDMCRates() {
   const BoundaryValues *pbv = pmy_block->pbval;
   const bool use_mask = (accel_mask.GetSize() > 0);
   const bool active2 = (nx2 > 1), active3 = (nx3 > 1);
-  int64_t ncell = 0;
+  int64_t ncell = 0, ncell_jump = 0;
 
   for (int k=0; k<nc3; ++k) {
     const int ox3 = (k < ks) ? -1 : (k > ke) ? 1 : 0;
@@ -180,6 +180,7 @@ void MonteCarloBlock::BuildDDMCRates() {
     for (int j=js; j<=je; ++j) {
       for (int i=is; i<=ie; ++i) {
         for (int n=0; n<DDMC_NRATE; ++n) ddmc_rate(n,k,j,i) = 0.;
+        ddmc_jump(k,j,i) = 0;
         if (ddmc_cell(k,j,i) == 0) continue;
         ++ncell;
         const Real chi_c = species(0,k,j,i)*sigt;
@@ -195,6 +196,23 @@ void MonteCarloBlock::BuildDDMCRates() {
             const int dj = (axis == 1) ? (side ? 1 : -1) : 0;
             const int dk = (axis == 2) ? (side ? 1 : -1) : 0;
             Real rate;
+            // a face into a ghost cell beyond a block face to another level: a boundary
+            // face of the lattice, flagged for the report
+            const int nn1 = i + di, nn2 = j + dj, nn3 = k + dk;
+            const int ox1 = (nn1 < is) ? -1 : (nn1 > ie) ? 1 : 0;
+            const int ox2 = (nn2 < js) ? -1 : (nn2 > je) ? 1 : 0;
+            const int ox3 = (nn3 < ks) ? -1 : (nn3 > ke) ? 1 : 0;
+            if (ox1 != 0 || ox2 != 0 || ox3 != 0) {
+              const BoundaryFace bf = (ox1 < 0) ? BoundaryFace::inner_x1
+                                    : (ox1 > 0) ? BoundaryFace::outer_x1
+                                    : (ox2 < 0) ? BoundaryFace::inner_x2
+                                    : (ox2 > 0) ? BoundaryFace::outer_x2
+                                    : (ox3 < 0) ? BoundaryFace::inner_x3
+                                                : BoundaryFace::outer_x3;
+              if (pbv->block_bcs[bf] == BoundaryFlag::block
+                  && pbv->nblevel[ox3+1][ox2+1][ox1+1] != level)
+                ddmc_jump(k,j,i) |= (1 << (2*axis + side));
+            }
             if (ddmc_cell(k+dk, j+dj, i+di) != 0) {
               const Real chi_n = species(0,k+dk,j+dj,i+di)*sigt;
               Real Wn[3];
@@ -208,10 +226,12 @@ void MonteCarloBlock::BuildDDMCRates() {
           }
         }
         ddmc_rate(DDMC_RATE_TOT, k, j, i) = total;
+        if (ddmc_jump(k,j,i) != 0) ++ncell_jump;
       }
     }
   }
   nddmc_cells = ncell;
+  nddmc_cells_jump = ncell_jump;
 }
 
 //----------------------------------------------------------------------------------------
@@ -388,6 +408,7 @@ void PhotonPusher::DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face) {
   pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb, pphot, ip);
   if (boosts) pmcb->TransformToCoordinate(pphot, ip, ip);
   pmcb->nddmc[DDMC_EMERGED]++;
+  if (pmcb->ddmc_jump(i3,i2,i1) & (1 << face)) pmcb->nddmc[DDMC_EMERGED_JUMP]++;
 }
 
 //----------------------------------------------------------------------------------------

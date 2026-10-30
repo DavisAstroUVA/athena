@@ -1733,7 +1733,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0, nsplit = 0, nroul = 0;
     int64_t nmrw = 0, nmrw_decline = 0, nabs_first = 0;
     Real wesc_sum = 0., wesc_sq = 0., nmrw_scat = 0.;
-    int64_t nddmc[NDDMCCOUNT], nddmc_cells = 0;
+    int64_t nddmc[NDDMCCOUNT], nddmc_cells = 0, nddmc_cells_jump = 0;
     Real nddmc_scat = 0.;
     for (int b=0; b<NDDMCCOUNT; ++b) nddmc[b] = 0;
     int64_t scat_hist[MonteCarloBlock::NSCATBINS];
@@ -1754,6 +1754,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       for (int b=0; b<NDDMCCOUNT; ++b) nddmc[b] += pmcb->nddmc[b];
       nddmc_scat += pmcb->nddmc_scat;
       nddmc_cells += pmcb->nddmc_cells;
+      nddmc_cells_jump += pmcb->nddmc_cells_jump;
       for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] += pmcb->scat_tau_hist[b];
       for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) declined[b] += pmcb->nmrw_declined[b];
       wesc_sum += pmcb->wesc_sum;
@@ -1783,6 +1784,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,nddmc,NDDMCCOUNT,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nddmc_scat,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nddmc_cells,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nddmc_cells_jump,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,scat_hist,MonteCarloBlock::NSCATBINS,MPI_INT64_T,MPI_SUM,
                   MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,declined,MonteCarloBlock::NMRWDECLINE,MPI_INT64_T,MPI_SUM,
@@ -1819,15 +1821,17 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   << ", outside Kompaneets " << declined[MRW_DECLINE_COMPTON]
                   << ", no budget " << declined[MRW_DECLINE_BUDGET] << ", other "
                   << declined[MRW_DECLINE_OTHER] << ")" << std::endl;
-      if (ddmc) {
-        std::cout << "discrete diffusion: " << nddmc_cells << " cells, "
+      if (ddmc || ddmc_report) {
+        std::cout << "discrete diffusion: " << nddmc_cells << " cells ("
+                  << nddmc_cells_jump << " at level jumps), "
                   << nddmc[DDMC_DWELL] << " dwells standing for " << nddmc_scat
                   << " scatterings, " << nddmc[DDMC_HOP] << " hops ("
                   << nddmc[DDMC_HOP_BLOCK] << " through block faces); converted "
                   << nddmc[DDMC_CONVERT_FACE] << " at faces, "
                   << nddmc[DDMC_CONVERT_BIRTH]
                   << " at flight start; returned " << nddmc[DDMC_RETURN] << ", emerged "
-                  << nddmc[DDMC_EMERGED] << ", released " << nddmc[DDMC_RELEASE]
+                  << nddmc[DDMC_EMERGED] << " (" << nddmc[DDMC_EMERGED_JUMP]
+                  << " through level jumps), released " << nddmc[DDMC_RELEASE]
                   << ", budget stops " << nddmc[DDMC_STOP] << ", P clamped "
                   << nddmc[DDMC_PCLAMP];
         if (scattering_meth == SCATCOMP)

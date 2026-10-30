@@ -59,11 +59,13 @@ enum DDMCEmergence {DDMC_EMERGE_ASYMPTOTIC = 0, DDMC_EMERGE_ISOTROPIC = 1};
 //! flight, returned at a face, walkers emerged, released (cell no longer a diffusion
 //! cell), dwells, hops, hops through block faces, budget stops, conversion
 //! probabilities clamped at 1, conversions declined by the Kompaneets guards (Compton),
-//! walkers released because a dwell took their energy outside the table (Compton)
+//! walkers released because a dwell took their energy outside the table (Compton),
+//! emergences through a face to a block at another refinement level (a subset of the
+//! emergences)
 enum DDMCCount {DDMC_CONVERT_FACE = 0, DDMC_CONVERT_BIRTH = 1, DDMC_RETURN = 2,
                 DDMC_EMERGED = 3, DDMC_RELEASE = 4, DDMC_DWELL = 5, DDMC_HOP = 6,
                 DDMC_HOP_BLOCK = 7, DDMC_STOP = 8, DDMC_PCLAMP = 9, DDMC_DECLINE = 10,
-                DDMC_RELEASE_ENERGY = 11, NDDMCCOUNT = 12};
+                DDMC_RELEASE_ENERGY = 11, DDMC_EMERGED_JUMP = 12, NDDMCCOUNT = 13};
 //! why a MRW step declined: no usable frame; the domain too thin once the
 //! comoving extinction and the advection room are known; outside the Kompaneets
 //! description (theta, x theta, absorption, the table's x range); no time budget left
@@ -690,6 +692,12 @@ public:
   int64_t nddmc[NDDMCCOUNT];
   Real nddmc_scat; // scatterings the dwells stood for
   int64_t nddmc_cells; // diffusion cells on the block at the last build
+  // ddmc_jump: for each active cell, the bits of its faces (0..5) that lead to a block
+  // at another refinement level, where the lattice has a boundary face; nddmc_cells_jump
+  // counts the diffusion cells with any such face.  Both are built with the mask, also
+  // when only the report is on, so a run can count what the lattice would reach
+  AthenaArray<int> ddmc_jump;
+  int64_t nddmc_cells_jump;
   void BuildDDMCRates();
   //! widths of a cell along its coordinate directions at its centre, code length
   void DDMCCellWidths(int i3, int i2, int i1, Real W[3]) const;

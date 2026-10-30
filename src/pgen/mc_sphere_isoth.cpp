@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 
 // Athena++ headers
@@ -40,7 +41,6 @@ namespace {
   Real rad0,time0;
   Real energy0,tsource;
   bool srcdist,tnorm,planckdist;
-  int i1start,i2start,i3start;
   Real logemin, logemax;
   Real tau_rho_; // the sphere's density
 
@@ -172,17 +172,15 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
 
   // Deterime cell of initial photon, which is asssumed to include
   // the origin if more than one cell is specified for each direction
-  i1start = -1;
+  int i1start = -1, i2start = -1, i3start = -1;
   for(int i=is; i<=ie; i++) {
     if ((0. > pcoord->x1f(i)) && (0. <= pcoord->x1f(i+1)))
       i1start = i;
   }
-  i2start = -1;
   for(int i=js; i<=je; i++) {
     if ((0. > pcoord->x2f(i)) && (0. <= pcoord->x2f(i+1)))
       i2start = i;
   }
-  i3start = -1;
   for(int i=ks; i<=ke; i++) {
     if ((0. > pcoord->x3f(i)) && (0. <= pcoord->x3f(i+1)))
       i3start = i;
@@ -250,6 +248,25 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
   if (pmy_mc->emission_flag == EMISFF)
     SetEmissionCellWeight(pphot,ips,ipe);
 
+  // The cell of this block that holds the origin, for the point source.  Found here
+  // and not kept from the problem generator, which runs for every block and would
+  // leave the last block's values
+  int i1origin = -1, i2origin = -1, i3origin = -1;
+  if (pmy_mc->emission_flag == EMISNONE) {
+    for (int i=is; i<=ie; i++)
+      if ((0. > pcoord->x1f(i)) && (0. <= pcoord->x1f(i+1))) i1origin = i;
+    for (int j=js; j<=je; j++)
+      if ((0. > pcoord->x2f(j)) && (0. <= pcoord->x2f(j+1))) i2origin = j;
+    for (int k=ks; k<=ke; k++)
+      if ((0. > pcoord->x3f(k)) && (0. <= pcoord->x3f(k+1))) i3origin = k;
+    if (ipe >= ips && (i1origin < 0 || i2origin < 0 || i3origin < 0)) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarloBlock::InitializePhoton" << std::endl
+          << "point-source photons on a block that does not hold the origin" << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
+
   for (int ip=ips; ip<=ipe; ip++) {
 
     // user[0] birth energy (set below), user[1] scattering count at escape,
@@ -262,10 +279,10 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
 
     // Initialize Photon weights, energy, direction, polarization
     if (pmy_mc->emission_flag == EMISNONE) {
-      // the point source: this block holds the origin
-      pphot->i1p[ip] = i1start;
-      pphot->i2p[ip] = i2start;
-      pphot->i3p[ip] = i3start;
+      // the point source: this block holds the origin, in the cell found below
+      pphot->i1p[ip] = i1origin;
+      pphot->i2p[ip] = i2origin;
+      pphot->i3p[ip] = i3origin;
       pphot->wp[ip] = 1.0;
       if (planckdist)
         pphot->ep[ip] = PlanckDist(tsource,pran);
