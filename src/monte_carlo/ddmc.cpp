@@ -25,6 +25,11 @@
 // loses energy due tothe work done on the expanding fluid, the factor
 // exp(-c t div(beta) / 3) of isotropic radiation.
 //
+// With <ddmc> line = lya the lattice has a second frequency axis. A node is a (cell, bin)
+// of one grid of comoving frequencies, spatial rates take the bin-averaged extinction
+// of the line profile in place of the Thomson one, and two bin faces are added. A spatial
+// hop keeps the energy, a frequency hop draws it uniformly in the new bin.
+//
 // Everything the DDMC lattice needs is rebuilt from the fluid in BuildDDMCRates, so
 // restarts and redistributions carry nothing but the walkers.  The table holds the rates
 // of pure Thomson scattering; a walker that is also absorbed diffuses with the total
@@ -41,6 +46,7 @@
 
 // C++ headers
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <iostream>
 #include <sstream>
@@ -159,7 +165,9 @@ void MonteCarloBlock::BuildDDMCRates() {
   const BoundaryValues *pbv = pmy_block->pbval;
   const bool use_mask = (accel_mask.GetSize() > 0);
   const bool active2 = (nx2 > 1), active3 = (nx3 > 1);
-  int64_t ncell = 0, ncell_jump = 0;
+  const bool line = (pmy_mc->ddmc_line != DDMC_LINE_NONE);
+  const int core = pmy_mc->ddmc_line_nwing + 1;
+  int64_t ncell = 0, ncell_jump = 0, nnode = 0;
 
   for (int k=0; k<nc3; ++k) {
     const int ox3 = (k < ks) ? -1 : (k > ke) ? 1 : 0;
@@ -184,18 +192,26 @@ void MonteCarloBlock::BuildDDMCRates() {
         bool diffusion = real;
         if (diffusion && use_mask && accel_mask(k,j,i) == 0) diffusion = false;
         if (diffusion) {
-          const Real chi = species(0,k,j,i)*sigt;
           Real W[3];
           DDMCCellWidths(k, j, i, W);
           Real wmin = W[0];
           if (active2) wmin = std::min(wmin, W[1]);
           if (active3) wmin = std::min(wmin, W[2]);
-          diffusion = (chi > 0.) && (chi*wmin*l_cgs >= pmy_mc->ddmc_tau)
-                      && (tgas(k,j,i) > 0.);
-          // Compton: the Kompaneets description holds for theta up to 0.03
-          if (diffusion && pmy_mc->scattering_meth == SCATCOMP
-              && MCConstants::kmec2*tgas(k,j,i) > 0.03)
-            diffusion = false;
+          if (line) {
+            // the frequency lattice
+            diffusion = (DDMCLineCell(k, j, i, wmin*l_cgs) >= 0);
+          } else {
+            const Real chi = species(0,k,j,i)*sigt;
+            diffusion = (chi > 0.) && (chi*wmin*l_cgs >= pmy_mc->ddmc_tau)
+                        && (tgas(k,j,i) > 0.);
+            // Compton: the Kompaneets description holds for theta up to 0.03
+            if (diffusion && pmy_mc->scattering_meth == SCATCOMP
+                && MCConstants::kmec2*tgas(k,j,i) > 0.03)
+              diffusion = false;
+          }
+        } else if (line) {
+          for (int b=0; b<pmy_mc->ddmc_line_nbin+2; ++b) ddmc_line_k(b,k,j,i) = 0.;
+          ddmc_line_edge(k,j,i) = -1;
         }
         ddmc_cell(k,j,i) = diffusion ? 1 : 0;
       }
@@ -209,7 +225,9 @@ void MonteCarloBlock::BuildDDMCRates() {
         ddmc_jump(k,j,i) = 0;
         if (ddmc_cell(k,j,i) == 0) continue;
         ++ncell;
-        const Real chi_c = species(0,k,j,i)*sigt;
+        if (line) nnode += 2*ddmc_line_edge(k,j,i) + 1;
+        // the table's rates: pure Thomson, or on the frequency lattice the core bin's
+        const Real chi_c = line ? ddmc_line_k(core,k,j,i) : species(0,k,j,i)*sigt;
         Real W[3];
         DDMCCellWidths(k, j, i, W);
         Real total = 0.;
@@ -240,7 +258,8 @@ void MonteCarloBlock::BuildDDMCRates() {
                 ddmc_jump(k,j,i) |= (1 << (2*axis + side));
             }
             if (ddmc_cell(k+dk, j+dj, i+di) != 0) {
-              const Real chi_n = species(0,k+dk,j+dj,i+di)*sigt;
+              const Real chi_n = line ? ddmc_line_k(core,k+dk,j+dj,i+di)
+                                      : species(0,k+dk,j+dj,i+di)*sigt;
               Real Wn[3];
               DDMCCellWidths(k+dk, j+dj, i+di, Wn);
               rate = 2./(3.*wc*(chi_c*wc + chi_n*Wn[axis]*l_cgs));
@@ -270,6 +289,7 @@ void MonteCarloBlock::BuildDDMCRates() {
   }
   nddmc_cells = ncell;
   nddmc_cells_jump = ncell_jump;
+  nddmc_nodes = nnode;
 }
 
 //----------------------------------------------------------------------------------------
@@ -327,6 +347,35 @@ void MonteCarloBlock::DDMCHopDeposit(int type, int i3, int i2, int i1, int axis,
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn bool PhotonPusher::DDMCIsNode(int i3, int i2, int i1, Real e)
+//! \brief whether a photon of comoving energy e can be a walker in cell (i3,i2,i1): the
+//!        cell is a diffusion cell (ghosts included, as BuildDDMCRates marks them) and,
+//!        on the frequency lattice, the bin holding e is a node of it
+
+bool PhotonPusher::DDMCIsNode(int i3, int i2, int i1, Real e) {
+  if (pmy_mcb->ddmc_cell(i3,i2,i1) == 0) return false;
+  return pmy_mc->ddmc_line == DDMC_LINE_NONE || pmy_mcb->DDMCLineNode(i3, i2, i1, e);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real PhotonPusher::DDMCComovingEnergy(Photon *pphot, int ip)
+//! \brief the energy of a transport photon in the frame of its cell's fluid, e gamma
+//!        (1 - beta . n) in the legacy pushers' orthonormal basis
+
+Real PhotonPusher::DDMCComovingEnergy(Photon *pphot, int ip) {
+  MonteCarloBlock *pmcb = pmy_mcb;
+  if (!boosts || pmcb->vel.GetSize() == 0) return pphot->ep[ip];
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  const Real k1 = pphot->k1p[ip], k2 = pphot->k2p[ip], k3 = pphot->k3p[ip];
+  const Real kn = std::sqrt(k1*k1 + k2*k2 + k3*k3);
+  Real gbk = 0.;
+  if (kn > 0.)
+    gbk = (pmcb->vel(i3,i2,i1,1)*k1 + pmcb->vel(i3,i2,i1,2)*k2
+           + pmcb->vel(i3,i2,i1,3)*k3)/kn;
+  return pphot->ep[ip]*(pmcb->vel(i3,i2,i1,0) - gbk);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void PhotonPusher::DDMCPlaceAtCentre(Photon *pphot, int ip, int i3, int i2,
 //!                                         int i1)
 //! \brief the walker's position: the centre of cell (i3,i2,i1) in coordinates; the
@@ -359,7 +408,11 @@ void PhotonPusher::DDMCSetWalker(Photon *pphot, int ip, bool comoving) {
   pphot->strp[ip] = 0.;
   pphot->nmvp[ip] = 0;
   pphot->acp[ip] = pmcb->AbsorptionOpacity(pmcb, pphot, ip);
-  pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb, pphot, ip);
+  // on the frequency lattice the walker diffuses with its bin's extinction
+  pphot->scp[ip] = (pmy_mc->ddmc_line != DDMC_LINE_NONE)
+                   ? pmcb->DDMCLineK(pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip],
+                                     pphot->ep[ip])
+                   : pmcb->ScatteringOpacity(pmcb, pphot, ip);
 }
 
 //----------------------------------------------------------------------------------------
@@ -381,6 +434,16 @@ void PhotonPusher::DDMCConvert(Photon *pphot, int ip) {
 //!        transport at the cell's centre with an isotropic direction
 
 void PhotonPusher::DDMCRelease(Photon *pphot, MCRandom *pran, int ip, bool energy) {
+  DDMCLeave(pphot, pran, ip);
+  pmy_mcb->nddmc[energy ? DDMC_RELEASE_ENERGY : DDMC_RELEASE]++;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonPusher::DDMCLeave(Photon *pphot, MCRandom *pran, int ip)
+//! \brief a walker becomes a transport photon where it is, with its comoving energy, an
+//!        isotropic direction in the comoving frame
+
+void PhotonPusher::DDMCLeave(Photon *pphot, MCRandom *pran, int ip) {
   MonteCarloBlock *pmcb = pmy_mcb;
   const Real mu = 2.*pran->uniform() - 1.;
   const Real smu = std::sqrt(std::max(1. - mu*mu, 0.));
@@ -395,7 +458,6 @@ void PhotonPusher::DDMCRelease(Photon *pphot, MCRandom *pran, int ip, bool energ
   pphot->acp[ip] = pmcb->AbsorptionOpacity(pmcb, pphot, ip);
   pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb, pphot, ip);
   if (boosts) pmcb->TransformToCoordinate(pphot, ip, ip);
-  pmcb->nddmc[energy ? DDMC_RELEASE_ENERGY : DDMC_RELEASE]++;
 }
 
 //----------------------------------------------------------------------------------------
@@ -448,6 +510,11 @@ void PhotonPusher::DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face,
   pphot->taup[ip] = -1.;
   pphot->strp[ip] = 0.;
   pphot->nmvp[ip] = 0;
+  // on the frequency lattice the energy is drawn uniformly in the walker's bin
+  if (pmy_mc->ddmc_line != DDMC_LINE_NONE) {
+    const int b = pmy_mc->DDMCLineBin(pphot->ep[ip]);
+    if (b >= 0) pphot->ep[ip] = pmy_mc->DDMCLineDraw(b, pran);
+  }
   // the opacities at the comoving energy, which the transform to the lab then shifts
   pphot->acp[ip] = pmcb->AbsorptionOpacity(pmcb, pphot, ip);
   pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb, pphot, ip);
@@ -471,7 +538,7 @@ void PhotonPusher::DDMCArrive(Photon *pphot, int ip) {
   // in through the lower face means moving along +axis
   const Real sign = (face & 1) ? -1. : 1.;
   DDMCSetWalker(pphot, ip, true);
-  if (hop && pmcb->ddmc_cell(pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip]) != 0)
+  if (hop && DDMCIsNode(pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip], pphot->ep[ip]))
     pmcb->DDMCHopDeposit(pphot->type[ip], pphot->i3p[ip], pphot->i2p[ip],
                          pphot->i1p[ip], axis, sign, pphot->wp[ip]*pphot->ep[ip],
                          pphot->scp[ip] + pphot->acp[ip]);
@@ -554,7 +621,7 @@ void PhotonPusher::DDMCAdvect(Photon *pphot, MCRandom *pran, int ip, int face) {
   const int n1 = i1 + ((axis == 0) ? (up ? 1 : -1) : 0);
   const int n2 = i2 + ((axis == 1) ? (up ? 1 : -1) : 0);
   const int n3 = i3 + ((axis == 2) ? (up ? 1 : -1) : 0);
-  if (pmcb->ddmc_cell(n3,n2,n1) == 0) {
+  if (!DDMCIsNode(n3, n2, n1, pphot->ep[ip])) {
     DDMCEmerge(pphot, pran, ip, face, true);
     return;
   }
@@ -608,7 +675,9 @@ Real PhotonPusher::DDMCNeighbourExtinction(Photon *pphot, int ip, int n3, int n2
   pphot->i2p[ip] = n2;
   pphot->i3p[ip] = n3;
   const Real kabs = pmcb->AbsorptionOpacity(pmcb, pphot, ip);
-  const Real ksc = pmcb->ScatteringOpacity(pmcb, pphot, ip);
+  const Real ksc = (pmy_mc->ddmc_line != DDMC_LINE_NONE)
+                   ? pmcb->DDMCLineK(n3, n2, n1, pphot->ep[ip])
+                   : pmcb->ScatteringOpacity(pmcb, pphot, ip);
   pphot->i1p[ip] = i1;
   pphot->i2p[ip] = i2;
   pphot->i3p[ip] = i3;
@@ -675,7 +744,7 @@ Real PhotonPusher::DDMCRates(Photon *pphot, int ip, Real rate[6]) {
   MonteCarloBlock *pmcb = pmy_mcb;
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
   const Real chi_thomson = pmcb->species(0,i3,i2,i1)*MCConstants::sigmat;
-  if (!(pphot->acp[ip] > 0.)
+  if (pmy_mc->ddmc_line == DDMC_LINE_NONE && !(pphot->acp[ip] > 0.)
       && std::abs(pphot->scp[ip] - chi_thomson) <= 1.e-12*chi_thomson) {
     for (int f=0; f<6; ++f) rate[f] = pmcb->ddmc_rate(f, i3, i2, i1);
     return pmcb->ddmc_rate(MonteCarloBlock::DDMC_RATE_TOT, i3, i2, i1);
@@ -693,7 +762,7 @@ Real PhotonPusher::DDMCRates(Photon *pphot, int ip, Real rate[6]) {
       const int n1 = i1 + ((axis == 0) ? (side ? 1 : -1) : 0);
       const int n2 = i2 + ((axis == 1) ? (side ? 1 : -1) : 0);
       const int n3 = i3 + ((axis == 2) ? (side ? 1 : -1) : 0);
-      if (pmcb->ddmc_cell(n3,n2,n1) != 0) {
+      if (DDMCIsNode(n3, n2, n1, pphot->ep[ip])) {
         Real Wn[3];
         pmcb->DDMCCellWidths(n3, n2, n1, Wn);
         const Real chi_n = DDMCNeighbourExtinction(pphot, ip, n3, n2, n1);
@@ -719,17 +788,19 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
   const int type = pphot->type[ip];
   const enum AbsorptionMethodFlag absm = pmy_mc->absorption_method[type];
   const bool compton = (pmy_mc->scattering_meth == SCATCOMP);
+  const bool line = (pmy_mc->ddmc_line != DDMC_LINE_NONE);
 
   if (pphot->ddmcp[ip] >= 2) DDMCArrive(pphot, ip);
 
   while (pphot->statp[ip] == EVOLVING && pphot->ddmcp[ip] == 1) {
     const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
-    if (pmcb->ddmc_cell(i3,i2,i1) == 0) {
+    if (!DDMCIsNode(i3, i2, i1, pphot->ep[ip])) {
       DDMCRelease(pphot, pran, ip);
       break;
     }
-    Real rate[6];
-    const Real ktot = DDMCRates(pphot, ip, rate);
+    Real rate[8];
+    Real ktot = DDMCRates(pphot, ip, rate);
+    if (line) ktot += DDMCLineRates(pphot, ip, rate + 6);
     if (!(ktot > 0.)) {
       DDMCRelease(pphot, pran, ip);
       break;
@@ -814,14 +885,21 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
     } else if (pphot->acp[ip] > 0.) {
       surv = std::exp(-pphot->acp[ip]*ct);
     }
-    // the work done on the fluid by isotropic radiation over the dwell, through the
+    // work done on the fluid by isotropic radiation over the dwell, through the
     // divergence of the velocity (an expanding fluid cools the radiation)
     if (moving) {
       const Real div = pmcb->ddmc_rate(MonteCarloBlock::DDMC_RATE_DIV, i3, i2, i1);
       if (div != 0.) pphot->ep[ip] *= std::exp(-ct*div/3.);
     }
+    // On a frequency lattice this shift can carry the walker over a bin edge
+    int bin_new = -1;
+    bool bin_changed = false;
+    if (line && moving) {
+      bin_new = pmy_mc->DDMCLineBin(pphot->ep[ip]);
+      bin_changed = (bin_new != pmy_mc->DDMCLineBin(e0));
+    }
     // the fraction of the dwell the walker is present in expectation: the mean weight
-    // along it for the time-spent estimator, and the scatterings it stood for
+    // along it for the time-spent estimator, and the scatterings it represents
     const Real tau_abs = (surv < 1.) ? -std::log(std::max(surv, 1.e-300)) : 0.;
     const Real fsurv = (tau_abs > 1.e-6) ? (1. - surv)/tau_abs : 1.;
     if (pmcb->call_moments) {
@@ -856,13 +934,25 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
       pphot->x2p[ip] += du[1]/l_cgs;
       pphot->x3p[ip] += du[2]/l_cgs;
     }
-    pphot->nscp[ip] += static_cast<int>(std::lround(nscat*fsurv));
+    // A dwell deep in a resonance line can stands for more scatterings than column holds
+    pphot->nscp[ip] = static_cast<int>(std::min(static_cast<Real>(INT_MAX),
+                                                pphot->nscp[ip] + std::round(nscat*fsurv)));
     pmcb->nddmc_scat += nscat*fsurv;
     pmcb->nddmc[DDMC_DWELL]++;
     pmcb->lb_nstep++;
     dl = dlab;
     if (UserWorkInMove != NULL) UserWorkInMove(pmcb, pphot, this, ip);
     if (pphot->statp[ip] != EVOLVING) break;
+    if (bin_changed) {
+      if (pmcb->DDMCLineNode(i3, i2, i1, pphot->ep[ip])) {
+        pphot->scp[ip] = pmcb->DDMCLineK(i3, i2, i1, pphot->ep[ip]);
+        pmcb->nddmc[DDMC_HOP]++;
+        pmcb->nddmc[DDMC_HOP_FREQ]++;
+      } else {
+        DDMCLineEmerge(pphot, pran, ip, bin_new, false);
+        break;
+      }
+    }
     if (compton) {
       // the opacities at the new energy; a walker whose energy left the table's
       // description goes back to transport
@@ -881,19 +971,25 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
       DDMCAdvect(pphot, pran, ip, face_drift);
       continue;
     }
-    // the face, in proportion to the rates
+    // the face, in proportion to the rates: six spatial, and on the frequency lattice
+    // the two frequency faces after them
+    const int nface = line ? 8 : 6;
     Real v = pran->uniform()*ktot;
     int face = 0;
-    while (face < 5 && v >= rate[face]) {
+    while (face < nface - 1 && v >= rate[face]) {
       v -= rate[face];
       ++face;
+    }
+    if (face >= 6) {
+      DDMCLineHop(pphot, pran, ip, face - 6);
+      continue;
     }
     const int axis = face/2;
     const bool up = (face & 1) != 0;
     const int n1 = i1 + ((axis == 0) ? (up ? 1 : -1) : 0);
     const int n2 = i2 + ((axis == 1) ? (up ? 1 : -1) : 0);
     const int n3 = i3 + ((axis == 2) ? (up ? 1 : -1) : 0);
-    if (pmcb->ddmc_cell(n3,n2,n1) != 0) {
+    if (DDMCIsNode(n3, n2, n1, pphot->ep[ip])) {
       DDMCHop(pphot, pran, ip, face);
     } else {
       DDMCEmerge(pphot, pran, ip, face);
@@ -916,7 +1012,8 @@ bool PhotonPusher::DDMCBeforeFlight(Photon *pphot, MCRandom *pran, int ip, bool 
   // DDMC lattice can escape directly from the position it was born at instead of from
   // the cell's centre
   if (first && pphot->ddmcp[ip] == 0 && pphot->taup[ip] < 0. && pphot->nscp[ip] > 0
-      && pmy_mcb->ddmc_cell(pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip]) != 0) {
+      && DDMCIsNode(pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip],
+                    DDMCComovingEnergy(pphot, ip))) {
     if (DDMCComptonOK(pphot->ep[ip], pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip]))
       DDMCConvert(pphot, ip);
     else
@@ -948,6 +1045,8 @@ bool PhotonPusher::DDMCFaceTest(Photon *pphot, MCRandom *pran, int ip, int face,
   const int n1 = i1 + ((axis == 0) ? (up ? 1 : -1) : 0);
   const int n2 = i2 + ((axis == 1) ? (up ? 1 : -1) : 0);
   const int n3 = i3 + ((axis == 2) ? (up ? 1 : -1) : 0);
+  // no bin of the cell beyond is a node (the photon's own bin is tested in the
+  // diffusion cell's frame below)
   if (pmcb->ddmc_cell(n3,n2,n1) == 0) return false;
   if (!DDMCComptonOK(pphot->ep[ip], n3, n2, n1)) {
     pmcb->nddmc[DDMC_DECLINE]++;  // crosses as a transport photon
@@ -965,6 +1064,20 @@ bool PhotonPusher::DDMCFaceTest(Photon *pphot, MCRandom *pran, int ip, int face,
     pphot->i1p[ip] = i1;
     pphot->i2p[ip] = i2;
     pphot->i3p[ip] = i3;
+  }
+  if (pmy_mc->ddmc_line != DDMC_LINE_NONE
+      && !pmcb->DDMCLineNode(n3, n2, n1, pphot->ep[ip])) {
+    // the photon's bin is not a node of the cell beyond: it crosses as a transport photon
+    if (boosts) {
+      pphot->i1p[ip] = n1;
+      pphot->i2p[ip] = n2;
+      pphot->i3p[ip] = n3;
+      pmcb->TransformToCoordinate(pphot, ip, ip);
+      pphot->i1p[ip] = i1;
+      pphot->i2p[ip] = i2;
+      pphot->i3p[ip] = i3;
+    }
+    return false;
   }
   Real k[3] = {pphot->k1p[ip], pphot->k2p[ip], pphot->k3p[ip]};
   const Real knorm = std::sqrt(SQR(k[0]) + SQR(k[1]) + SQR(k[2]));

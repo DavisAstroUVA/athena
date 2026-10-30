@@ -6,6 +6,9 @@
 //!  \file scattering.cp
 //!  \brief implementation of scattering functions
 
+// C++ headers
+#include <cmath>
+
 // Athena++ headers
 #include "montecarlo.hpp"
 #include "photonpusher.hpp"
@@ -956,11 +959,26 @@ void SampleDipole(Real theta_in, Real phi_in, Real &theta_out, Real &phi_out,
 //----------------------------------------------------------------------------
 //! \fn Real SampleVelocityParallel(Real a, Real x_in, MCRandom *pran)
 //! \brief Return parallel velocity for scattering atom
+//
+// The rejection scheme of Zheng & Miralda-Escude (2002): the velocity distribution
+// exp(-u^2) / ((x - u)^2 + a^2) is sampled from a Lorentzian comparison function below
+// u0 and from the Lorentzian scaled by exp(-u0^2) above it, so that the acceptance
+// probability is at most 1 on each piece.  The sampler is exact for any u0; the choice
+// sets its efficiency.  u0 follows Laursen, Razoumov & Sommer-Larsen (2009), as Smith
+// et al. (2015) use it: in the wing, u0 = 4.5 keeps the acceptance near 1.5 / x, where
+// u0 = 0.96 x falls as 3 / x^2 and costs thousands of draws per scattering at |x| ~ 40.
 
 Real SampleVelocityParallel(Real a, Real x_in, MCRandom *pran) {
 
   Real x = fabs(x_in); // switch sign at end
-  Real u0 = 0.96 * x;
+  Real u0;
+  if (x < 0.2) {
+    u0 = 0.;
+  } else {
+    const Real loga = std::log10(a);
+    const Real xcw = 1.59 - 0.60*loga - 0.03*loga*loga;
+    u0 = (x < xcw) ? x - 0.01*std::pow(a, 1./6.)*std::exp(1.2*x) : 4.5;
+  }
   Real th0 = atan((u0-x) / a);
   Real p = (th0 + PI/2.) / (th0 + PI/2. + exp(-SQR(u0)) * (PI/2. - th0));
 

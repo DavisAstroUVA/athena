@@ -128,6 +128,8 @@ public:
   void DDMCArrive(Photon *pphot, int ip);
   void DDMCHop(Photon *pphot, MCRandom *pran, int ip, int face);
   void DDMCAdvect(Photon *pphot, MCRandom *pran, int ip, int face);
+  //! whether a photon of comoving energy e can be a walker in cell (i3,i2,i1)
+  bool DDMCIsNode(int i3, int i2, int i1, Real e);
   void DDMCPlaceAtCentre(Photon *pphot, int ip, int i3, int i2, int i1);
   void DDMCSetWalker(Photon *pphot, int ip, bool comoving = false);
   //! the walker's six face rates and their sum
@@ -138,6 +140,17 @@ public:
                        Real &lam);
   //! Compton: whether a photon of comoving energy e can walk in cell (i3,i2,i1)
   bool DDMCComptonOK(Real e, int i3, int i2, int i1);
+  //! the photon's energy in the frame of its cell's fluid, the photon untouched
+  Real DDMCComovingEnergy(Photon *pphot, int ip);
+  //! convert walker to a transport photon
+  void DDMCLeave(Photon *pphot, MCRandom *pran, int ip);
+  // the frequency lattice (ddmc_line.cpp)
+  //! the walker's two frequency-face rates and their sum
+  Real DDMCLineRates(Photon *pphot, int ip, Real rate[2]);
+  //! a hop through frequency face side (0 down, 1 up)
+  void DDMCLineHop(Photon *pphot, MCRandom *pran, int ip, int side);
+  //! emergence through a frequency face into bin b, the energy drawn in it or kept
+  void DDMCLineEmerge(Photon *pphot, MCRandom *pran, int ip, int b, bool draw);
   // Resonant-scattering acceleration (general pusher)
   virtual Real SampleEscapeTime(MCRandom *pran, Real decayRate, Real sphereRadius,
                                 Real diffusionTime);

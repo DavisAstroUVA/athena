@@ -361,8 +361,8 @@ def parse_args(argv=None):
                     help='general pusher step as a fraction of the cell crossing')
     ap.add_argument('--beta', type=float, default=0.,
                     help='fluid velocity in units of c, with boosts on: along z (uniform) '
-                         'or at the surface of a homologous expansion (hubble)')
-    ap.add_argument('--profile', default='uniform', choices=['uniform', 'hubble'],
+                         'or at the surface of a homologous expansion (homologous)')
+    ap.add_argument('--profile', default='uniform', choices=['uniform', 'homologous'],
                     help='velocity profile of the moving sphere')
     ap.add_argument('--compare-to', default=None,
                     help='another run directory: compare the escapers of the two runs '

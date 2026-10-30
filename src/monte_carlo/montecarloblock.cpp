@@ -494,11 +494,16 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   nddmc_scat = 0.;
   nddmc_cells = 0;
   nddmc_cells_jump = 0;
+  nddmc_nodes = 0;
   // the mask is built with the report alone too, so a run can count the lattice's reach
   if (pmy_mc->ddmc || pmy_mc->ddmc_report) {
     ddmc_cell.NewAthenaArray(ncells3,ncells2,ncells1);
     ddmc_rate.NewAthenaArray(DDMC_NRATE,ncells3,ncells2,ncells1);
     ddmc_jump.NewAthenaArray(ncells3,ncells2,ncells1);
+    if (pmy_mc->ddmc_line != DDMC_LINE_NONE) {
+      ddmc_line_k.NewAthenaArray(pmy_mc->ddmc_line_nbin+2,ncells3,ncells2,ncells1);
+      ddmc_line_edge.NewAthenaArray(ncells3,ncells2,ncells1);
+    }
   }
   // the generator's cell mask serves the DDMC lattice as it serves the random walk
   if (mrw || pmy_mc->ddmc) {
@@ -585,6 +590,8 @@ MonteCarloBlock::~MonteCarloBlock() {
   ddmc_cell.DeleteAthenaArray();
   ddmc_rate.DeleteAthenaArray();
   ddmc_jump.DeleteAthenaArray();
+  ddmc_line_k.DeleteAthenaArray();
+  ddmc_line_edge.DeleteAthenaArray();
   if (tab_mask.GetSize() > 0) tab_mask.DeleteAthenaArray();
   if (tab_emis_tot.GetSize() > 0) tab_emis_tot.DeleteAthenaArray();
   if (tab_abs.GetSize() > 0) tab_abs.DeleteAthenaArray();
@@ -982,11 +989,18 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
       }
       // Convert coherency tensor to Stokes parameters for scattering (if needed)
       if (IsPolarized(pmy_mc->polarized)) CoherencyToScatteringStokes(this, pphot, ip);
+      // the comoving energy before the scattering, for the frequency lattice's entry test
+      const Real e_com0 = pphot->ep[ip];
       // call scattering function and update counters
       Scatter(this,pphot,ip,ip);
       if (IsPolarized(pmy_mc->polarized)) ScatteringStokesToCoherency(this, pphot, ip);
       if (!comoving && IsPolarized(pmy_mc->polarized))
         FromScatteringBasis(this, pphot, ip);
+      // a scattering in a diffusion cell may have carried the photon into a node bin of
+      // the frequency lattice: admitted or reflected here, converted at its next flight
+      if (pmy_mc->ddmc && pmy_mc->ddmc_line != DDMC_LINE_NONE
+          && ddmc_cell(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]) != 0)
+        DDMCLineEntry(pphot, ip, e_com0);
       nscat++;
       pphot->nscp[ip]++;
       if (pmy_mc->mrw_report || pmy_mc->ddmc_report) BinScatteringDepth(pphot,ip);

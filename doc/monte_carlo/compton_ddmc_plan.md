@@ -1,6 +1,6 @@
 # Discrete diffusion Monte Carlo for Compton and resonance scattering: plan
 
-Status: **D0 and D1 done 2026-10-28, D2 and D3 done 2026-10-29, D4 done 2026-10-30, all on branch `ddmc`; the XRB count that decides the split-face rates and D5 was run on a 128-cubed snapshot (3 percent of the diffusion cells at level jumps, no split faces) and is to be repeated on the hires one.**  The 2026-10-06
+Status: **D0 and D1 done 2026-10-28, D2 and D3 done 2026-10-29, D4 done 2026-10-30, R0 approved and R1 done 2026-10-30 (the frequency lattice, `<ddmc> line = lya`, guide Section "What R1 built"), all on branch `ddmc`; the XRB count that decides the split-face rates and D5 is in: on the hires snapshot at threshold 3, 132 million diffusion cells, 13 percent of the mesh, 0.9 percent of them at level jumps (no split-face rates), and 67 percent of the scatterings in cells at least 3 deep, a ceiling near 2.8 on the whole run.**  The 2026-10-06
 outline is folded in below with the changes of Section 2.  Order decided: the Compton
 phases D0 to D3 first (they build the lattice, the interface and the block machinery that
 both scatterings share, where an exact reference exists), the XRB phases D4 and D5 as a
@@ -88,7 +88,7 @@ D4 (moving medium, 2026-10-30): the design note's hop transform (a W(mu) directi
 drawn at the hop, the energy taken to the lab and into the neighbour's frame) with the
 walker at rest in the lab failed the moving Compton sphere outright: at beta 0.1 the
 escape paths were 2.1 times the analog's in a uniform flow and 1.8 times in a homologous
-expansion (`--profile hubble`, added to `mc_sphere_isoth` and the sphere driver), since
+expansion (`--profile homologous`, added to `mc_sphere_isoth` and the sphere driver), since
 nothing carried the walkers with the fluid.  Built instead, each step forced by a
 measurement: the walker drifts with its cell's fluid during a dwell at the velocity
 interpolated linearly across the cell, and crosses a face the drift reaches
@@ -101,7 +101,7 @@ walker's comoving energy and its offset from the centre (the design's hop transf
 double counts the adiabatic loss by 1.42 / tau_cell and on its own gives only that
 fraction of it; a hop that recentred the walker set a drifting walker back a quarter
 cell per hop, 8 to 18 percent slow in the interface-free cube, which `ddmc_cube.py
---beta [--profile hubble]` now runs); and the conversion test at a face reads the
+--beta [--profile homologous]` now runs); and the conversion test at a face reads the
 photon's cosine and energy in the diffusion cell's frame and returns photons isotropic
 in that frame (the lab-frame test left the energies 3 to 8 percent low).  Result against
 analog at beta 0.1: paths within 1 percent in both flows, mean energy +1.7 percent
@@ -109,9 +109,15 @@ analog at beta 0.1: paths within 1 percent in both flows, mean energy +1.7 perce
 (the static lattice gives 0.6 to 1.2); at beta 0.3 paths within 1.2 percent, energy
 +2.8 and -10.7 percent.  The cube's exact check, the static sphere and the D3 block
 tests are unchanged.  The remaining error is first order in beta at the interface.
-Next step: the hires count (the 128-cubed run put 3 percent of the diffusion cells at
-level jumps and 80 percent of the scatterings in cells at least 3 deep), then D5 or
-the resonance phases.
+The hires count (2026-10-30, one Riker node, 749 GB resident, three decks at
+thresholds 2, 3 and 4): 157, 132 and 116 million diffusion cells of the 1015 million on
+the mesh (15, 13 and 11 percent), with 1.49, 1.22 and 1.06 million of them at level
+jumps, under 1 percent, so the split-face rates are not built; the histogram of the
+same run puts 61 percent of the scatterings in cells at least 4 deep and about 67
+percent at least 3 deep, so with a dwell costing about a twentieth of the scatterings
+it stands for the ceiling on the XRB run is a factor near 2.8.  (A first run on a
+128-cubed snapshot of the same name gave 7 percent of the mesh, 3 percent at jumps and
+80 percent of the scatterings.)  Next: the resonance phases, D5 deferred.
 
 ## 1. Why this and not the in-cell step
 
@@ -514,6 +520,19 @@ redistribution, recoil, detailed balance) and where that matters for the hot Jup
 The per-(cell, bin) rate table and its memory (nbin times the grey table).  Gate: user
 approval.
 
+Written 2026-10-30 as Section "R0: the resonance line, design note" of the guide, with
+six decisions put to the user: one comoving-frequency grid for the mesh set by
+`line_temp` (not Smith's per-cell Doppler grid); the hop keeps the comoving frequency
+and the velocity gradient acts over the dwell (D4's rule, not their equations 19 and
+20); entry into the lattice in frequency by scattering, no interface probability at
+frequency faces; Smith's core bin rather than a redistribution matrix; the hot Jupiter
+Lyman alpha runs stay on the legacy spherical-polar pusher (their decks already do);
+the line code in a new `ddmc_line.cpp`.  Keys proposed in `<ddmc>`: `line`,
+`line_temp`, `xmax`, `dx`, `core_width`.  Also found: the hot Jupiter's core-skipping
+hook runs on walkers through `UserWorkInMove` and must be off with the lattice, and
+the hot Jupiter snapshots on disk are ionization-only, so the lattice's reach there
+is measured in R3 on a wind snapshot.
+
 ### R1. Static line
 
 Build: the frequency lattice on the D1 and D3 machinery, the resonance opacity per bin.
@@ -522,6 +541,30 @@ sphere against Dijkstra et al. 2006 and against the analog kernel at matched a t
 the time-dependent pulse of Smith et al. section 5; resolution in x and z scanned
 together per their matching condition.  Gate: analog agreement converging with both
 resolutions.
+
+Built 2026-10-30 (guide Section "What R1 built"): `src/monte_carlo/ddmc_line.cpp` on
+a `ddmc.cpp` refactored to one membership test (`DDMCIsNode`), bitwise on the grey
+runs; keys `line`, `line_temp`, `xmax`, `dx`, `core_width` in `<ddmc>`; the report
+adds the nodes, the frequency hops, emergences and returns.  Departures from R0:
+the frequency interface has the conversion probability sqrt(2 pi) / (2 dx) with the
+rest reflected about the bin edge, and a frequency emergence lands at the crossed
+edge plus a step's overshoot (without them the spectra were 5 to 7 percent low where
+the node band ends on the peak; `freq_interface_toy.py` is the one-dimensional check
+that chose the pair); a virtual bin beyond each end of the grid; a frequency hop draws
+the energy in the new bin; `nscp` saturates; the analog sampler's `u_0` follows
+Laursen et al. 2009 (the old 0.96 x cost 94 percent of a run).  Tests
+(`tst/montecarlo/sphere_lya/sphere_lya.py`, 4000 photons, 32 cells, dx on the
+matching line): slab against Neufeld and sphere against Dijkstra at a tau_0 = 1e5 to
+1e7, medians within 0.1 bin and Kolmogorov distances 0.016 to 0.027 (scale 0.016);
+against the analog kernel on the slab at tau_0 = 1e6 and 10 K with the band edge at
+1.1, 0.7 and 0.5 of the peak, within 1.1 times the two-sample scale, 1000 to 5000
+times cheaper; the resolution scan converging, with the finding that the node band
+narrows as cells shrink (x_edge ~ tau_cell^1/2) and the cost returns once the band
+ends inside the peak (31000 analog scatterings per photon at 64 cells).  The pulse
+test of Smith et al. section 5 is not run (static runs only).  `mc_sphere_lya`'s
+medium is the cells whose centres lie inside the radius, the rest at 1e-20 of the
+density with the deck's floors below it (the default `dfloor`, 3.5e-18 cgs, made the
+empty cells diffusion cells).
 
 ### R2. Moving line, and retiring the stub
 
@@ -541,7 +584,7 @@ within the analog scatter and the speedup recorded; the wiki page updated.
 ## 6. Keys and the wiki
 
 A block of its own, `<ddmc>`: `enable`, `tau` (the cell threshold on the full width,
-default from D1), `report`, and in R1 `nbin`, `xmax`, `core_width`.  Nothing is read
+default from D1), `report`, and in R1 `line`, `line_temp`, `xmax`, `dx`, `core_width`.  Nothing is read
 from `<montecarlo>` or `<randomwalk>`.  The report lines follow the random walk's
 (`accel_report`): conversions each way, hops, scatterings replaced, budget stops,
 declines by reason, level-jump stops, the histogram of scatterings by cell thickness.

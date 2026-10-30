@@ -267,6 +267,8 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     general_pusher_flag = pin->GetOrAddBoolean("montecarlo","general_pusher",false);
   scattering_meth = GetScatteringFlag(pin->GetOrAddString("montecarlo","scattering",
                                                           "none"));
+  // the frequency lattice of a resonance line, read once the scattering is known
+  SetupDDMCLine(pin);
   // The random-walk step and the DDMC lattice's dwell with Compton scattering draw the
   // photon's energy change from the Kompaneets Green's function table, so the table
   // has to be there
@@ -303,11 +305,12 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
           << "adds the general pusher)" << std::endl;
       ATHENA_ERROR(msg);
     }
-    if (scattering_meth != SCATTHOM && scattering_meth != SCATISO
-        && scattering_meth != SCATCOMP) {
+    if (ddmc_line == DDMC_LINE_NONE && scattering_meth != SCATTHOM
+        && scattering_meth != SCATISO && scattering_meth != SCATCOMP) {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
           << "<ddmc> enable needs <montecarlo> scattering = thomson, isotropic or "
-          << "compton" << std::endl;
+          << "compton, or <ddmc> line = lya with scattering = resonance or user"
+          << std::endl;
       ATHENA_ERROR(msg);
     }
     if (!(ddmc_tau >= 2.)) {
@@ -1733,7 +1736,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     int64_t nesc = 0, nabs = 0, ndes = 0, nscat = 0, nrem = 0, nsplit = 0, nroul = 0;
     int64_t nmrw = 0, nmrw_decline = 0, nabs_first = 0;
     Real wesc_sum = 0., wesc_sq = 0., nmrw_scat = 0.;
-    int64_t nddmc[NDDMCCOUNT], nddmc_cells = 0, nddmc_cells_jump = 0;
+    int64_t nddmc[NDDMCCOUNT], nddmc_cells = 0, nddmc_cells_jump = 0, nddmc_nodes = 0;
     Real nddmc_scat = 0.;
     for (int b=0; b<NDDMCCOUNT; ++b) nddmc[b] = 0;
     int64_t scat_hist[MonteCarloBlock::NSCATBINS];
@@ -1755,6 +1758,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       nddmc_scat += pmcb->nddmc_scat;
       nddmc_cells += pmcb->nddmc_cells;
       nddmc_cells_jump += pmcb->nddmc_cells_jump;
+      nddmc_nodes += pmcb->nddmc_nodes;
       for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] += pmcb->scat_tau_hist[b];
       for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) declined[b] += pmcb->nmrw_declined[b];
       wesc_sum += pmcb->wesc_sum;
@@ -1785,6 +1789,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&nddmc_scat,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nddmc_cells,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nddmc_cells_jump,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nddmc_nodes,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,scat_hist,MonteCarloBlock::NSCATBINS,MPI_INT64_T,MPI_SUM,
                   MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,declined,MonteCarloBlock::NMRWDECLINE,MPI_INT64_T,MPI_SUM,
@@ -1823,17 +1828,27 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   << declined[MRW_DECLINE_OTHER] << ")" << std::endl;
       if (ddmc || ddmc_report) {
         std::cout << "discrete diffusion: " << nddmc_cells << " cells ("
-                  << nddmc_cells_jump << " at level jumps), "
-                  << nddmc[DDMC_DWELL] << " dwells standing for " << nddmc_scat
+                  << nddmc_cells_jump << " at level jumps";
+        if (ddmc_line != DDMC_LINE_NONE)
+          std::cout << ", " << nddmc_nodes << " nodes of " << ddmc_line_nbin << " bins";
+        std::cout << "), " << nddmc[DDMC_DWELL] << " dwells standing for " << nddmc_scat
                   << " scatterings, " << nddmc[DDMC_HOP] << " hops and "
                   << nddmc[DDMC_ADVECT] << " advective crossings ("
-                  << nddmc[DDMC_HOP_BLOCK] << " through block faces); converted "
-                  << nddmc[DDMC_CONVERT_FACE] << " at faces, "
+                  << nddmc[DDMC_HOP_BLOCK] << " through block faces";
+        if (ddmc_line != DDMC_LINE_NONE)
+          std::cout << ", " << nddmc[DDMC_HOP_FREQ] << " in frequency";
+        std::cout << "); converted " << nddmc[DDMC_CONVERT_FACE] << " at faces, "
                   << nddmc[DDMC_CONVERT_BIRTH]
-                  << " at flight start; returned " << nddmc[DDMC_RETURN] << ", emerged "
+                  << " at flight start; returned " << nddmc[DDMC_RETURN];
+        if (ddmc_line != DDMC_LINE_NONE)
+          std::cout << " (" << nddmc[DDMC_RETURN_FREQ] << " in frequency)";
+        std::cout << ", emerged "
                   << nddmc[DDMC_EMERGED] << " (" << nddmc[DDMC_EMERGED_JUMP]
                   << " through level jumps, " << nddmc[DDMC_EMERGED_ADVECT]
-                  << " by advection), released " << nddmc[DDMC_RELEASE]
+                  << " by advection";
+        if (ddmc_line != DDMC_LINE_NONE)
+          std::cout << ", " << nddmc[DDMC_EMERGED_FREQ] << " in frequency";
+        std::cout << "), released " << nddmc[DDMC_RELEASE]
                   << ", budget stops " << nddmc[DDMC_STOP] << ", P clamped "
                   << nddmc[DDMC_PCLAMP];
         if (scattering_meth == SCATCOMP)

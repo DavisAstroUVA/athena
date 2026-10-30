@@ -27,7 +27,7 @@ come out of one run:
 The cube's half-width optical depth is --tau; the cell depth is 2 tau / nx.
 
 With --beta the medium moves (boosts on): uniformly along z, or as a homologous
-expansion with beta at the mesh edge (--profile hubble).  There is no exact solution
+expansion with beta at the mesh edge (--profile homologous).  There is no exact solution
 then, and the check is the lattice against the analog run alone, in the mean escape
 path and the mean escaping energy (PASS within --gate-flow of 1); since no interface
 is crossed, this separates the lattice's interior (drift, adiabatic energy change,
@@ -35,7 +35,7 @@ hops) from its interface.
 
     python ddmc_cube.py --path /path/to/athena --workdir DIR [--nx 8 --tau 40 --nphot 20000]
                         [--ddmc-tau 3 --emergence asymptotic --mcranks 4 --mb 8]
-                        [--beta 0.1 --profile uniform|hubble]
+                        [--beta 0.1 --profile uniform|homologous]
 
 needs: python configure.py --prob=mc_sphere_isoth -mc -mpi && make
 """
@@ -68,11 +68,11 @@ def write_athinput(filename, name, nx, mb, tau, nphot, iseed, ddmc, ddmc_tau, em
     h = 2.5*R0/nx
     lo, hi = -1.25*R0 - 0.5*h, 1.25*R0 - 0.5*h
     radius = 100.*R0
-    # the hubble profile's velocity is its value at radius, so the mesh edge at 1.25 R0
+    # the homologous profile's velocity is its value at radius, so the mesh edge at 1.25 R0
     # gets beta
     flow = ""
     if beta:
-        flow = (f"velocity = {beta*(radius/(1.25*R0) if profile == 'hubble' else 1.):.6e}\n"
+        flow = (f"velocity = {beta*(radius/(1.25*R0) if profile == 'homologous' else 1.):.6e}\n"
                 f"velocity_profile = {profile}\n")
     mesh = "\n".join(f"nx{d} = {nx}\nx{d}min = {lo:.7e}\nx{d}max = {hi:.7e}\n"
                      f"ix{d}_mc_bc = escape\nox{d}_mc_bc = escape" for d in '123')
@@ -264,7 +264,7 @@ def parse_args(argv=None):
     ap.add_argument('--beta', type=float, default=0.,
                     help='fluid velocity in units of c (boosts on): along z, or at the '
                          'mesh edge of a homologous expansion')
-    ap.add_argument('--profile', default='uniform', choices=['uniform', 'hubble'])
+    ap.add_argument('--profile', default='uniform', choices=['uniform', 'homologous'])
     ap.add_argument('--gate-flow', type=float, default=0.02,
                     help='allowed deviation of the mean path and energy from the analog '
                          'run with --beta')

@@ -55,18 +55,23 @@ class MRWTables;
 enum MRWDomain {MRW_DOMAIN_CELL = 0, MRW_DOMAIN_SPHERE = 1};
 //! direction distribution at emergence on DDMC step
 enum DDMCEmergence {DDMC_EMERGE_ASYMPTOTIC = 0, DDMC_EMERGE_ISOTROPIC = 1};
+//! the resonance line whose frequency lattice the DDMC lattice carries 
+enum DDMCLine {DDMC_LINE_NONE = 0, DDMC_LINE_LYA = 1};
 //! DDMC counters, per transport: photons converted at a face and at the start of a
 //! flight, returned at a face, walkers emerged, released (cell no longer a diffusion
 //! cell), dwells, hops, hops through block faces, budget stops, conversion
 //! probabilities clamped at 1, conversions declined by the Kompaneets guards (Compton),
 //! walkers released because a dwell took their energy outside the table (Compton),
 //! emergences through a face to a block at another refinement level (a subset of the
-//! emergences)
+//! emergences), advective crossings and emergences, and on the frequency lattice the
+//! hops between bins and the emergences through a frequency face (subsets of the hops
+//! and of the emergences)
 enum DDMCCount {DDMC_CONVERT_FACE = 0, DDMC_CONVERT_BIRTH = 1, DDMC_RETURN = 2,
                 DDMC_EMERGED = 3, DDMC_RELEASE = 4, DDMC_DWELL = 5, DDMC_HOP = 6,
                 DDMC_HOP_BLOCK = 7, DDMC_STOP = 8, DDMC_PCLAMP = 9, DDMC_DECLINE = 10,
                 DDMC_RELEASE_ENERGY = 11, DDMC_EMERGED_JUMP = 12, DDMC_ADVECT = 13,
-                DDMC_EMERGED_ADVECT = 14, NDDMCCOUNT = 15};
+                DDMC_EMERGED_ADVECT = 14, DDMC_HOP_FREQ = 15, DDMC_EMERGED_FREQ = 16,
+                DDMC_RETURN_FREQ = 17, NDDMCCOUNT = 18};
 //! why a MRW step declined: no usable frame; the domain too thin once the
 //! comoving extinction and the advection room are known; outside the Kompaneets
 //! description (theta, x theta, absorption, the table's x range); no time budget left
@@ -382,6 +387,24 @@ public:
   Real ddmc_tau; // least Thomson depth across the smallest width of a diffusion cell
   DDMCEmergence ddmc_emergence;
   bool ddmc_report;
+  // The frequency lattice of a resonance line (ddmc_line.cpp): one grid of comoving
+  // frequencies for the whole mesh, its bin edges in the Doppler units of
+  // ddmc_line_temp: a core bin of half-width ddmc_line_core about the line centre and
+  // ddmc_line_nwing wing bins of width ddmc_line_dx on each side out to ddmc_line_xmax,
+  // 2 nwing + 1 bins in all, plus a virtual bin of the same width beyond each end that
+  // is never a node but gives the edge bins their outer leakage rate.  Bins are
+  // indexed 0 .. nbin + 1 over the extended grid, the core at nwing + 1.
+  DDMCLine ddmc_line;
+  Real ddmc_line_temp, ddmc_line_xmax, ddmc_line_dx, ddmc_line_core;
+  int ddmc_line_nwing, ddmc_line_nbin;
+  Real ddmc_line_dnu; // the Doppler width at ddmc_line_temp
+  std::vector<Real> ddmc_line_xedge; // the nbin + 3 bin edges in reference Doppler units
+  std::vector<Real> ddmc_line_eedge; // the same as energies
+  void SetupDDMCLine(ParameterInput *pin);
+  //! the bin holding comoving energy e, -1 outside the extended grid
+  int DDMCLineBin(Real e) const;
+  //! an energy uniform in bin b
+  Real DDMCLineDraw(int b, MCRandom *pran) const;
   bool raytrace_flag; // Will trace photons rather than scatter
   bool general_pusher_flag; // Use integration for photon movement
   bool verbose; // print out more information during run
@@ -699,6 +722,26 @@ public:
   // when only the report is on, so a run can count what the lattice would reach
   AthenaArray<int> ddmc_jump;
   int64_t nddmc_cells_jump;
+  // The frequency lattice (pmy_mc->ddmc_line; ddmc_line.cpp): ddmc_line_k holds the
+  // bin-averaged extinction of every bin of the extended grid in every cell, ghosts
+  // included, and ddmc_line_edge the outermost bin on each side of the core that is a
+  // diffusion node of the cell (-1: none, and the cell is not a diffusion cell);
+  // nddmc_nodes the nodes of the active cells at the last build
+  AthenaArray<Real> ddmc_line_k;
+  AthenaArray<int> ddmc_line_edge;
+  int64_t nddmc_nodes;
+  //! the bin extinctions of a cell and its outermost node bin, wmin its smallest width
+  //! in cm
+  int DDMCLineCell(int i3, int i2, int i1, Real wmin);
+  //! whether the bin holding comoving energy e, or bin b, is a node of cell (i3,i2,i1)
+  bool DDMCLineNode(int i3, int i2, int i1, Real e) const;
+  bool DDMCLineNodeBin(int i3, int i2, int i1, int b) const;
+  //! the bin-averaged extinction of the bin holding e in cell (i3,i2,i1), zero outside
+  //! the grid
+  Real DDMCLineK(int i3, int i2, int i1, Real e) const;
+  //! the frequency interface: a photon that has just scattered in a diffusion cell,
+  //! from comoving energy e0, admitted to a wing node or reflected about its edge
+  void DDMCLineEntry(Photon *pphot, int ip, Real e0);
   void BuildDDMCRates();
   //! widths of a cell along its coordinate directions at its centre, code length
   void DDMCCellWidths(int i3, int i2, int i1, Real W[3]) const;

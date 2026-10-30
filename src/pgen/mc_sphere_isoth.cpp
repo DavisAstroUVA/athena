@@ -67,16 +67,16 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real tau = pin->GetReal("problem","tau");
   Real rad0 = pin->GetReal("problem","radius");
   Real vel = pin->GetOrAddReal("problem","velocity",0.);
-  // uniform: the sphere moves along z at velocity; hubble: homologous expansion,
+  // uniform: the sphere moves along z at velocity; homologous: an expansion,
   // v = velocity c r / radius radially, velocity the value at the surface
   std::string profile = pin->GetOrAddString("problem","velocity_profile","uniform");
-  if (profile != "uniform" && profile != "hubble") {
+  if (profile != "uniform" && profile != "homologous") {
     std::stringstream msg;
     msg << "### FATAL ERROR in ProblemGenerator" << std::endl
-        << "velocity_profile = " << profile << " is not uniform or hubble" << std::endl;
+        << "velocity_profile = " << profile << " is not uniform or homologous" << std::endl;
     ATHENA_ERROR(msg);
   }
-  const bool hubble = (profile == "hubble");
+  const bool homologous = (profile == "homologous");
   Real gamma = peos->GetGamma();
   vel *= c;
 
@@ -98,7 +98,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         const bool inside = (r < rad0);
         Real rhoc = inside ? rho : rho*floor_frac;
         phydro->u(IDN,k,j,i) = rhoc;
-        if (hubble) {
+        if (homologous) {
           const Real f = inside ? rhoc*vel/rad0 : 0.0;
           phydro->u(IM1,k,j,i) = f*pcoord->x1v(i);
           phydro->u(IM2,k,j,i) = f*pcoord->x2v(j);

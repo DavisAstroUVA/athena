@@ -15,7 +15,7 @@
 the lattice, the interface, the energy update and the moments,\\
 as they are to be implemented (design note, phase D0)}
 \author{Athena++ Monte Carlo radiation transport}
-\date{Draft of 2026-10-28, for approval before phase D1}
+\date{Draft of 2026-10-28, for approval before phase D1; D1 to D4 sections added as built; R0 added 2026-10-30, for approval before R1}
 
 \begin{document}
 \sloppy
@@ -636,8 +636,10 @@ static level-1 block of side $0.5R$ inside the sphere, the lattice agrees with t
 run on the same mesh within 0.7 times the scale, with 318 of its 6511 diffusion cells
 touching the jump and 121 thousand of its 229 thousand emergences going through it.
 That last number is what Densmore's split-face rates would save on such a mesh, and the
-decision to build them waits on the same count from the X-ray binary's mesh, for which
-three report-only decks were written (threshold 2, 3 and 4).
+decision to build them waited on the same count from the X-ray binary's mesh: on the
+hires snapshot (2026-10-30) 132 million of the 1015 million cells are diffusion cells
+at threshold 3 and 0.9 percent of them touch a level jump, so they are not built; the
+same run's histogram puts 67 percent of the scatterings in cells at least 3 deep.
 
 The test found a bug in the generator, not in the exchange: \texttt{mc\_sphere\_isoth}
 kept the indices of the cell holding the origin in file-scope variables that every
@@ -654,7 +656,7 @@ Built 2026-10-30.  The test is the Compton sphere of D2 (tau 40 over 16 cells, c
 deep, $x_0 = 1$, $\theta = 2\times10^{-3}$, $10^5$ photons) with the fluid moving:
 uniformly along $z$ through the fixed escape surface (\texttt{--beta}), and in a
 homologous expansion with the given velocity at the surface
-(\texttt{--profile hubble}, added to \texttt{mc\_sphere\_isoth} and the driver), the
+(\texttt{--profile homologous}, added to \texttt{mc\_sphere\_isoth} and the driver), the
 lattice against the analog run of the same deck.  The interface-free cube of
 \texttt{ddmc\_cube.py} takes the same two flows (\texttt{--beta}, \texttt{--profile}),
 which is what told the lattice's interior from its interface.
@@ -721,6 +723,425 @@ advection room, which declines steps that would leave the cell, has no counterpa
 the walker crosses.
 
 
+\section{R0: the resonance line, design note}
+\label{sec:r0}
+
+Written 2026-10-30 for approval before R1, approved the same day.  The target is Lyman alpha in
+\texttt{mc\_hotjupiter}; the method is the frequency lattice of Smith et al.\ (2018),
+their Section 2, carried onto the lattice of Sections~\ref{sec:rates} to
+\ref{sec:moving} as built in D1 to D4, with the changes that D4 forces on their
+treatment of a moving medium.  Equation numbers below are theirs.
+
+\subsection{What exists, and the scope}
+
+The analog transport has the line already: \texttt{XsecVoigt} (the Voigt cross section
+at the photon's comoving frequency, Lyman alpha constants in \texttt{MCConstants}),
+\texttt{ResonanceLineOpacity} ($n_{\rm H}$ from \texttt{species(0)} times it),
+\texttt{ScatterResonanceLine} (the partially coherent kernel: parallel atom velocity by
+the rejection sampler of \texttt{SampleVelocityParallel}, perpendicular Maxwellian,
+dipole phase function; no recoil), the uniform sphere \texttt{mc\_sphere\_lya} with a
+point source at \key{x0}, \key{tau} and a uniform \key{velocity}, and in
+\texttt{mc\_hotjupiter} the same opacity and kernel enrolled as user functions
+(\texttt{scattering = user}, \texttt{absorption = user}, the line switched off beyond
+\key{linewidth\_cutoff}), the fluid-derived $n_{\rm H}$ from the neutral scalar and the
+temperature from the ionization state, and a core-skipping hook
+(\texttt{CoreSkipping}, \texttt{UserWorkInMove}) that moves a photon with
+$|x| < 3.3$ to $x = \pm3.3$ whenever its cell is thicker than 1000 at its frequency.
+The Lyman alpha decks (\texttt{~/mc\_test/hot\_jupiter/lya\_old}, \texttt{combo}) run
+the legacy spherical-polar pusher (\texttt{general\_pusher = false}) and are static
+(\texttt{dynamic = false}, a wind snapshot post-processed); the coupled ionization runs
+are dynamic and use the general pusher.  The legacy sphere step of
+\texttt{PhotonPusher::MRWResonanceAcceleration} (Dijkstra's frequency solution,
+spherical polar only, threshold 1000) is what R2 retires.
+
+Scope: Lyman alpha only (the constants are the module's), one line, no dust, the
+analog kernel unchanged for transport photons, the lattice in flat space on the two
+legacy pushers.  The frequency lattice is a second axis of the D1 lattice, not a new
+mechanism: a node is a (cell, bin), a dwell is drawn at the node's total leakage, and
+the face chosen is one of six spatial faces or two frequency faces.
+
+\subsection{The frequency grid}
+
+Frequencies are $x = (\nu - \nu_0)/\Delta\nu_D$ with $\Delta\nu_D = \nu_0 v_{\rm th}/c$,
+$v_{\rm th} = (2kT/m_{\rm H})^{1/2}$, and the damping parameter $a =
+\Delta\nu_L/2\Delta\nu_D = 4.70\times10^{-4}\,(T/10^4\,{\rm K})^{-1/2}$, as in the code.
+The cells of the hot Jupiter are at 3000 to 7000 K, so a grid in the $x$ of each cell
+would put the same bin on different frequencies in neighbouring cells, and a spatial
+hop would have to rescale.  The grid is therefore \textbf{one grid of comoving
+frequencies for the whole mesh}: bin edges $\nu_j$ set once from a reference
+temperature, \key{line\_temp}, in whose Doppler units the keys are read: \key{xmax}
+(the grid spans $|x| \le$ \key{xmax}), \key{dx} (the wing bin width, 1 by default: a
+wing scattering shifts $x$ by one on average, Osterbrock 1962, so narrower bins resolve
+nothing the Fokker-Planck form describes) and \key{core\_width} (the half-width of the
+central bin, default 3.3, Smith's $\Delta x_0 \gtrsim 2x_{\rm cw}$ and the hot
+Jupiter's core-skip boundary).  Each cell sees the grid through its own $T$: its bin
+$j$ spans $[x_j^-, x_j^+]$ in its own Doppler units, its bin-averaged extinction is
+\begin{equation}
+k_{i,j} = \frac{n_{\rm H}\,\sigma_0}{\sqrt{\pi}\,\Delta\nu_D}\;
+\frac{\mathcal{H}(a, x_j^+) - \mathcal{H}(a, x_j^-)}{x_j^+ - x_j^-},\qquad
+\mathcal{H}(a,x) = \int_0^x H(a,y)\,\dd y
+\approx \frac{\sqrt{\pi}}{2}\,{\rm erf}\,x - \frac{2a}{\sqrt\pi}F(x) + a^2 x\,e^{-x^2},
+\label{eq:kbin}
+\end{equation}
+their equations 13 and 14 with $\sigma_0 = \pi e^2 f/m_e c$ and $F$ the Dawson
+integral ($F(x) = -\tfrac12\,{\rm Re}\,Z(x)$ from the \texttt{ZetaVoigt} the code has;
+the expansion is second order in $a$, and $a \sim 6\times10^{-4}$ here).  This is the
+extinction the lattice uses for the node and for the spatial rates; the transport
+photon keeps the exact Voigt value at its own frequency.
+
+A node $(i,j)$ is a diffusion node when $k_{i,j}\,\Delta_{\rm min} \ge$ \key{tau}, the
+same key and the same smallest-width rule as the grey lattice, tested over the ghost
+cells as in Section~\ref{sec:faces}.  Since $k_{i,j}$ falls as $a/\sqrt\pi x^2$ in the
+wings, the lattice of a cell is a contiguous band $|x| \le x_{\rm edge}(i)$ around line
+centre, widest where $n_{\rm H}$ is highest; the base of the hot Jupiter atmosphere
+($\tau_0 \sim 10^5$ across a cell) has $x_{\rm edge} \approx 20$ at threshold 3, and
+the band closes as the wind ionizes.  \textbf{Storage}: $k_{i,j}$ for every (cell, bin)
+and the node flag, $9\,n_{\rm bin}$ bytes per cell ($n_{\rm bin} = 2\,$\key{xmax}$/$\key{dx}
+$+ 1$); 80 bins on the hot Jupiter's $128\times33\times33$ mesh is 100 MB over all
+ranks.  The rates are formed per dwell from $k_{i,j}$ and the neighbours' values, as
+\texttt{DDMCRates} already forms the grey ones per walker, so nothing else is stored.
+The divergence and widths of the grey table stay per cell.
+
+\subsection{Rates and the dwell}
+
+Per unit comoving path, for a walker at node $(i,j)$:
+\begin{align}
+k^{\delta i}_{\rm space} &= \frac{2}{3\Delta_i\,(k_{i,j}\Delta_i + k_{\delta i,j}\Delta_{\delta i})}
+\quad\text{into a diffusion neighbour in the same bin,}\qquad
+\frac{2}{3\Delta_i\,(k_{i,j}\Delta_i + 2\lambda)}\quad\text{otherwise;}
+\label{eq:kspace}\\
+k^{\delta j}_{\rm freq} &= \frac{1}{\Delta x_j}\;\frac{1}{k_{i,j}^{-1}\Delta x_j + k_{i,\delta j}^{-1}\Delta x_{\delta j}}
+\quad\text{into either neighbouring bin (their equation 11),}
+\label{eq:kfreq}
+\end{align}
+with $\Delta x$ in the cell's own Doppler units.  Equation~\ref{eq:kspace} is the D1
+rate (Section~\ref{sec:rates}) with $k_{i,j}$ in place of the Thomson extinction;
+equation~\ref{eq:kfreq} is the finite-volume form of the Fokker-Planck term
+$\partial_x(\tfrac{k}{2}\partial_x J)$, the harmonic mean of the two bins'
+extinctions.  A frequency face at the grid's edge ($|x| = $ \key{xmax}) and a
+frequency face into a bin that is not a diffusion node in this cell are boundary faces
+of the lattice in frequency: the walker emerges through them (below).  The total is
+the sum of the six spatial and two frequency rates, the dwell is exponential at the
+total, capped by the budget and by the drift of Section~\ref{sec:moving} exactly as
+now, and the face is drawn in proportion.  Absorption (the hot Jupiter's user
+function, zero for the line) acts over the dwell as in Section~\ref{sec:energy}; the
+scatterings the dwell stands for, $k_{i,j}\,ct$, go to \texttt{nscp} and the report.
+
+\subsection{The walker's frequency}
+
+The walker carries its comoving energy \texttt{ep} as now; its bin is read from
+\texttt{ep} and its cell's $T$ whenever it arrives in a cell.  Inside a node the
+frequency is not followed: the bin is the state.  Three rules, all settled by D4:
+\begin{itemize}
+\item \textbf{A spatial hop keeps \texttt{ep}.}  The comoving frequency, measured from
+  the local line centre, is continuous across a face (Section~\ref{sec:moving}); the
+  Doppler correction of their equations 19 and 20 (a relabelling by $-\Delta
+  \boldsymbol{\beta}\cdot\boldsymbol{n}$ with a mean cosine $f_\mu$, which they call
+  the weak point of their treatment) is not applied, for the reason given there and
+  measured in Section~\ref{sec:d4}.  The bin is recomputed on arrival from the
+  neighbour's $T$, which is the temperature rescaling they apply.
+\item \textbf{The velocity gradient acts over the dwell}, as the adiabatic term of
+  Section~\ref{sec:moving}: $\dd\ln\nu = -\tfrac13\nabla\!\cdot\!\boldsymbol{\beta}\,
+  \dd(ct)$, applied to \texttt{ep}, after which the bin is recomputed; a walker whose
+  bin changed by the drift is treated as having crossed that frequency face (a hop
+  into the neighbouring node if it is a diffusion node, an emergence otherwise), with
+  no deposit.  In the hot Jupiter wind, $\nabla\!\cdot\!\boldsymbol{v} \sim v/r \sim
+  2\times10^{-9}\,{\rm s^{-1}}$ over a trapping time of $10^5$ s moves a photon by
+  about two Doppler widths to the red: a real effect, and the only velocity effect the
+  lattice interior has.  The dwell need not be cut at the bin edge as the spatial
+  drift is: the drift per dwell is far below a bin.
+\item \textbf{Emergence draws the frequency uniformly in the bin it leaves into} (a
+  spatial emergence: the walker's own bin; a frequency emergence: the thin bin or the
+  bin beyond \key{xmax}), with the direction from $W(\mu)$ for a spatial face and
+  isotropic for a frequency face, at the walker's position; then
+  \texttt{TransformToCoordinate} as now.  For the core bin this is complete
+  redistribution over the core at emergence.
+\end{itemize}
+
+\subsection{The interface}
+
+Spatial faces are D1's: a transport photon reaching the face of a cell in which its
+bin is a diffusion node converts with $P(\mu)$ of Section~\ref{sec:interface},
+evaluated in the diffusion cell's frame with $k_{i,j}$, or returns; a walker leaking
+into a cell where its bin is not a node emerges.  Frequency interfaces need no
+probability: a transport photon enters the lattice in frequency \textbf{by
+scattering}: the analog kernel redistributes it, and if the new $x$ lies in a
+diffusion node of its cell it converts at the start of its next flight, the rule
+\texttt{DDMCBeforeFlight} already applies to a photon that scattered in a diffusion
+cell.  Since the kernel is exact, this entry is unbiased; the lattice's own
+approximation begins only inside.  (R1 found otherwise: the entry needs the
+probability of equation~\ref{eq:pfreq}, Section~\ref{sec:r1}.)  A walker leaves the lattice in frequency by the
+leakage of equation~\ref{eq:kfreq} into a thin bin (emergence, frequency drawn in
+that bin).  Smith et al.\ (their Section 5.1) leave the frequency hybrid open and
+note that a central bin that blocks leakage across line centre cannot reproduce the
+red/blue peak asymmetry of a flow; here the core bin spans line centre and a walker in
+it leaks to either side by equation~\ref{eq:kfreq} with the core's own $k_{i,0}$,
+which is their scheme and has the same limitation.  R2 measures it.
+
+The core-skipping hook of \texttt{mc\_hotjupiter} runs on every photon that
+\texttt{Move} returns, walkers included (the dwell calls \texttt{UserWorkInMove}); it
+must not touch a walker.  R3 runs the hot Jupiter with \key{core\_skip = false}, the
+lattice's core bin doing that job, and the hook is left for the analog comparison run.
+
+\subsection{What the Fokker-Planck form drops, and whether it matters here}
+
+\begin{itemize}
+\item \textbf{Core redistribution.}  Complete redistribution in the core is not
+  diffusion in $x$; the core bin of width $2\,$\key{core\_width} hides it, and a walker
+  emerging from the core is redistributed uniformly over it.  Their slab test (their
+  figure 2) shows the emergent line of a $10^9$-depth slab reproduced to the plotted
+  precision with this; R1 repeats that test.
+\item \textbf{Recoil}, $g = h\Delta\nu_D/2kT \approx 3\times10^{-4}$ at 7000 K, a
+  redward shift of $g$ per scattering against a random walk of unit steps: it competes
+  with the diffusion only after $g^{-2} \sim 10^7$ scatterings, $a\tau_0 \gtrsim
+  10^4$.  The analog kernel has no recoil either, so lattice and analog agree with
+  each other; neither is right there, and this is recorded, not fixed.
+\item \textbf{Detailed balance and stimulated emission}: dropped by both, negligible
+  for Lyman alpha at these temperatures.
+\item \textbf{Partial coherence in the wing}: the Fokker-Planck form keeps the drift
+  $-1/x$ and the unit variance per scattering of the wing kernel, which is all the
+  diffusion limit uses.
+\item \textbf{The velocity gradient within a cell}: as in Section~\ref{sec:moving},
+  the isotropic average only.  The hot Jupiter's wind is slow against the thermal
+  width within a cell ($\Delta v$ across a cell below $v_{\rm th}$ everywhere but the
+  outer wind, where the lattice has no nodes), so the lattice's velocity treatment is
+  the dwell term alone, and the comparison that decides is the expanding sphere of R2.
+\end{itemize}
+
+\subsection{Keys and report}
+
+All in \texttt{<ddmc>}: \key{line} (\texttt{none} or \texttt{lya}; the frequency
+lattice on, with the module's Lyman alpha constants and \texttt{species(0)} as the
+scatterer density, whichever scattering method the run names, so the hot Jupiter's
+\texttt{scattering = user} is served), \key{line\_temp} (the reference temperature of
+the grid, no default), \key{xmax} (default 40), \key{dx} (default 1),
+\key{core\_width} (default 3.3), beside \key{enable}, \key{tau}, \key{emergence},
+\key{report}.  The grey lattice is unchanged when \key{line = none}.  The report adds
+the frequency hops and the frequency emergences (at the grid's edge and into thin
+bins) to the counts it prints, and the number of diffusion nodes beside the number of
+cells with any node.  The scatterings-by-depth histogram of \key{report} bins the
+analog scatterings by $k(x)\Delta$ at the photon's frequency, as it does now.
+
+\subsection{Tests and gates for R1 to R3}
+
+\textbf{R1, static line.}  Driver \texttt{tst/montecarlo/sphere\_lya/sphere\_lya.py},
+built on \texttt{mc\_sphere\_lya} and on the cube construction of
+\texttt{ddmc\_cube.py} (the sphere pushed past the mesh, escape on the two $z$ faces,
+periodic in $x$ and $y$) for a slab.
+\begin{itemize}
+\item The slab against Harrington (1973) and Neufeld (1990), their equation 33,
+  $J(x) \propto x^2\,{\rm sech}(\sqrt{\pi^3/54}\,|x|^3/a\tau_0)$, and the sphere
+  against Dijkstra et al.\ (2006), $J(x) \propto x^2/[1 + \cosh(\sqrt{2\pi^3/27}\,
+  |x|^3/a\tau_0)]$, at $a\tau_0 = 10^5$ to $10^7$, where the lattice is the only
+  affordable method: the peak positions $x_p = \pm1.0664\,(a\tau_0)^{1/3}$ and
+  $\pm0.92\,(a\tau_0)^{1/3}$ and the Kolmogorov distance of the escaping spectrum.
+  Gate: peaks within the bin width, distance converging with the resolution.
+\item The analog kernel at $\tau_0 \le 10^6$ ($a\tau_0 \sim 600$, the diffusive
+  limit barely reached), the escaping spectrum and the time to escape, as the
+  Compton sphere was compared: this is the check of the interface and the core bin
+  against the exact kernel, where the analytic solutions are not yet valid.  Gate:
+  agreement within the two-sample scale to the extent the static grey sphere gave,
+  the deviation recorded against $a\tau_0$.
+\item Resolution: the cell size and the bin width scanned together along Smith's
+  matching line, $\Delta x^3/a\tau_0 \approx 2.5\,\Delta z^2/R^2$ (their equation 37),
+  with the runtime recorded, so the production deck is chosen on measured numbers.
+\end{itemize}
+\textbf{R2, moving line.}  \texttt{mc\_sphere\_lya} gets the \key{velocity\_profile =
+homologous} option of \texttt{mc\_sphere\_isoth}; the expanding sphere against the analog
+run at surface velocities of 1, 3 and 10 Doppler widths: the red/blue peak ratio and
+the spectrum.  Gate: the asymmetry error recorded and judged; then
+\texttt{MRWResonanceAcceleration} is removed.
+\textbf{R3, the hot Jupiter.}  Static, \texttt{general\_pusher = false}, \key{core\_skip
+= false} with the lattice; against the analog run with core skipping at equal photon
+count: the emergent line, the transmission, the ionization coupling untouched, the
+cost and the scattering histogram.  The lattice's reach is measured first with
+\key{report = true} alone on the production wind snapshot (the snapshots on disk are
+from ionization-only runs whose neutral fraction has collapsed, and say nothing about
+the Lyman alpha regime).  No dynamic-run work is needed for the transmission runs;
+the coupled dynamic runs are D6's.
+
+\subsection{Decisions for the user}
+\label{sec:r0decisions}
+
+All six approved as proposed on 2026-10-30; Section~\ref{sec:r1} is the build.
+\begin{enumerate}
+\item One comoving-frequency grid for the mesh, set by \key{line\_temp}, against
+  Smith's per-cell Doppler grid with rescaling at hops.  Proposed: the one grid.
+\item The hop keeps the comoving frequency and the velocity gradient acts over the
+  dwell (D4), against their equations 19 and 20.  Proposed: D4's rule; R2 is the
+  measurement.
+\item Entry into the lattice in frequency by scattering, with no interface
+  probability at frequency faces.  Proposed as written.  (Built with a probability,
+  Section~\ref{sec:r1}: without one the spectra were 5 to 7 percent low.)
+\item The core bin of Smith (complete redistribution at emergence, leakage by the
+  Fokker-Planck rate with the core's own extinction) rather than a redistribution
+  matrix (their Section 5.3, which they estimate at terabytes for a general table).
+  Proposed: the core bin, the asymmetry measured in R2.
+\item The hot Jupiter Lyman alpha runs stay on the legacy spherical-polar pusher.
+  If a production run must use the general pusher, the flat-space part of D5 comes
+  before R3.
+\item Where the code lives: the bin tables, the bin opacity and the frequency rates in
+  a new \texttt{ddmc\_line.cpp}; the walk, hop and emergence of \texttt{ddmc.cpp}
+  take a node (cell, bin) in place of a cell and two more faces.
+\end{enumerate}
+
+\section{What R1 built, where it departs from the R0 note}
+\label{sec:r1}
+
+Built 2026-10-30 after the six decisions of Section~\ref{sec:r0decisions} were
+approved as proposed.  The code is \texttt{ddmc\_line.cpp} (the grid, the bin-averaged
+extinction, the per-cell node band, the frequency rates, the frequency hop, emergence
+and entry) over \texttt{ddmc.cpp}, which now asks one membership test,
+\texttt{DDMCIsNode(cell, energy)}, wherever it read the cell mask, and takes the
+walker's extinction from the bin under the line; the pushers are unchanged.  The
+refactor of \texttt{ddmc.cpp} was held bitwise against the pre-R1 binary on the grey
+runs (the cube with a homologous flow, the refined multi-block sphere) before the line
+code went in, and the finished line code leaves those runs bitwise too.
+
+\textbf{Where it departs from Section~\ref{sec:r0}.}
+\begin{itemize}
+\item \textbf{The frequency interface has a conversion probability}, against decision
+  3.  A transport photon that scatters from a bin that is not a node of its cell into
+  a wing node converts with
+  \begin{equation}
+  P_x = \frac{\sqrt{2\pi}}{2\,\Delta x_j},
+  \label{eq:pfreq}
+  \end{equation}
+  $\Delta x_j$ the node bin's width in the cell's Doppler units, and is otherwise
+  reflected about the bin edge it crossed (\texttt{DDMCLineEntry}, called from the
+  scattering loop with the comoving energy before the scattering); an entry into the
+  core bin, whose kernel redistributes over the core at the next scattering, converts
+  with probability 1, as does a photon already at a node (one just emitted there).  The
+  value balances the lattice's leakage out of the edge bin for a uniform population
+  $J$ per unit $x$, $J k/(2\Delta x_j)$ by equation~\ref{eq:kfreq}, against the kernel's
+  crossings of the edge from the same population, $J k\,E[\max(\Delta x, 0)] =
+  Jk/\sqrt{2\pi}$ for its unit-variance steps (the wing kernel's step is a mixture of
+  Gaussians of variance $1 - \cos\theta$, whose one-sided mean is 0.376 against the
+  Gaussian's 0.399, a difference left out).  It is the frequency counterpart of
+  $P(\mu)$ at a spatial face, without the extrapolation-length term, which is of
+  relative order $1/\Delta x_j$ and small on the bins used (10 to 45); at $\Delta x_j
+  \le 1.25$ it is 1, the R0 rule.
+\item \textbf{A frequency emergence puts the photon at the edge it crossed}, plus the
+  outward overshoot of a scattering step (a uniform fraction of a Rayleigh step of
+  unit variance), not uniformly in the thin bin; that is where a kinetic crossing
+  from a uniform population lands, and the pair of rules keeps the thin side in
+  equilibrium with a uniform lattice population.  A spatial emergence still draws the
+  frequency uniformly in the walker's own bin, the bin being the state.
+\item \textbf{A virtual bin beyond each end of the grid.}  The stored grid has
+  $n_{\rm bin} + 2$ bins per cell: the $2\,n_{\rm wing} + 1$ bins of the note and one
+  bin of width \key{dx} beyond \key{xmax} on each side, never a node, whose
+  extinction gives the edge bin its outer frequency rate.  $n_{\rm wing} =
+  \lceil(\key{xmax} - \key{core\_width})/\key{dx}\rceil$, so the grid's edge is at or
+  beyond \key{xmax}.
+\item \textbf{The node band is stored as its edge}, the offset of the outermost node
+  bin from the core on either side (\texttt{ddmc\_line\_edge}, $-1$ when not even the
+  core is a node), since $k_{i,j}$ falls away from the core.  A cell is a diffusion
+  cell (\texttt{ddmc\_cell}) when its core is a node, and the grey code's test of the
+  cell comes first everywhere, the bin test after it.
+\item \textbf{A frequency hop draws the frequency uniformly in the new bin}, as the
+  walker's energy must lie in its bin for the bin to be read from it; the note kept
+  \texttt{ep} across a frequency hop.  A spatial hop keeps \texttt{ep}, as in the note.
+\item \textbf{The Dawson integral} comes from \texttt{ZetaVoigt} only for $|x| \le 6$;
+  beyond, from its asymptotic series ($\sum_n (2n-1)!!/2^{n+1}x^{2n+1}$, eight terms).
+  \texttt{ZetaVoigt} is accurate to $10^{-7}$ absolutely, which is the size of the
+  difference $\mathcal{H}(x^+) - \mathcal{H}(x^-)$ of a far-wing bin.  Checked against
+  quadrature: $F$ to $10^{-9}$, $\mathcal{H}$ to $10^{-10}$ at $a = 4.7\times10^{-4}$
+  and $8\times10^{-7}$ at $a = 0.015$, a wing bin at $x = 1000$ against $a/\sqrt\pi
+  x^2$ to $1.4\times10^{-6}$.
+\item \textbf{The walker's extinction is the bin's}: \texttt{scp} is $k_{i,j}$ of its
+  bin, reset at every frequency hop, and the rates are formed per dwell from it and
+  the neighbours' bin extinctions; the D1 rate table is not used under the line, and
+  its \texttt{chi} is the core bin's $k$ so that the report's depth histogram and the
+  level-jump counts read as before.
+\item \textbf{The scattering count saturates} at \texttt{INT\_MAX}: a dwell at
+  $a\tau_0 = 10^7$ stands for $10^8$ scatterings, and an overflowed \texttt{nscp} would
+  have stopped the conversion after a scattering (the test \texttt{nscp > 0}).
+\item \textbf{The analog kernel's parallel-velocity sampler}
+  (\texttt{SampleVelocityParallel}) took 94 percent of a lattice slab run: its
+  rejection scheme used Zheng and Miralda-Escud\'e's $u_0 = 0.96\,x$ at every $|x|$,
+  whose acceptance falls as $3/x^2$, 1900 uniform draws per scattering at $|x| = 40$,
+  where every emerged photon of a thick run scatters.  It now uses the $u_0(x, a)$ of
+  Laursen et al.\ (2009) as written by Smith et al.\ (2015): $u_0 = 0$ for $x < 0.2$,
+  $u_0 = x - 0.01\,a^{1/6}e^{1.2x}$ up to $x_{\rm cw} = 1.59 - 0.60\log_{10}a -
+  0.03\log_{10}^2 a$, and $u_0 = 4.5$ beyond, with the acceptance $\sim 1.5/x$.  The
+  scheme is exact for any $u_0$; the analog slab at $\tau_0 = 10^5$ with 1000 photons
+  is statistically unchanged (two-sample distances of $x$ and of the path at 0.7 and
+  0.65 of their scale).  This touches every resonance run, the hot Jupiter included.
+\end{itemize}
+
+\textbf{How the interface rule was found.}  With the R0 rule (every entry converts)
+the escaping spectra were 5 to 7 percent low in the median ($-0.28$ bins, Kolmogorov
+distance 0.09 to 0.10 against a sampling scale of 0.016) exactly where the node band
+ends on the peak of the spectrum (the slab at $a\tau_0 = 10^6$ over 32 cells, the
+sphere at $10^5$, the scan's 32-cell slab), and within 0.1 bin where the band ends
+well beyond the peak (the escape happens from inside the lattice) or well inside it
+(the peak is analog).  Equation~\ref{eq:pfreq} with the emergence still uniform in the
+thin bin overshot the other way ($+0.4$ to $+0.5$ bins, 0.12).  The toy
+\texttt{freq\_interface\_toy.py} separated the two rules: a diffusion in $x$ on
+$[0, L]$ with the lattice below $x_e$ and a Gaussian random walk above, born at 0 and
+absorbed at $L$, its mean absorption time against the exact $(L^2 - x_0^2)/2D$ at
+$L = 120$, $x_e = 60$ and $\Delta x = 10$, 5, 2.5: converting every crossing gives
+1.36, 1.31, 1.18 of the exact time; equation~\ref{eq:pfreq} with uniform placement
+0.86, 0.87, 0.91; equation~\ref{eq:pfreq} with the overshoot placement 1.045, 1.022,
+1.019.  Only the last converges.
+
+\textbf{The test medium.}  \texttt{mc\_sphere\_lya} first kept the lattice to the
+cells wholly inside the escape surface, as \texttt{mc\_sphere\_isoth} does; at a cell
+depth of $10^7$ at line centre a photon emerging into one of the cut cells scattered
+$10^6$ times there, and 99.9 percent of the sphere's scatterings were in those cells
+(2.9 s per photon at $a\tau_0 = 10^5$).  The medium is now the cells whose centres lie
+inside the radius, every one of them a lattice cell, and the cells beyond hold
+$10^{-20}$ of the density with the escape surface running through them; the driver
+takes the exact solution at the radius of a sphere of the medium's volume (0.998 of
+the nominal at 32 cells across).  The default density floor of the equation of state
+is $3.5\times10^{-18}$ in cgs, which made those empty cells diffusion cells at
+$10^{-8}$ K; the deck sets \key{dfloor} and \key{pfloor} to $10^{-40}$ and the
+generator refuses a floor above its rim.
+
+\textbf{Measured} (\texttt{sphere\_lya.py}, $10^4$ K, $a = 4.72\times10^{-4}$, 32
+cells across the slab's thickness and the sphere's cube, $\Delta x = 0.21\,(a\tau_0)^{1/3}$
+on Smith's matching line, the grid to $2.5\,(a\tau_0)^{1/3}$, threshold 3, 4000
+photons on 8 ranks).  The median of $|x|$ of the escapers against the exact value, in
+bin widths, and the Kolmogorov distance $K$ from the exact spectrum (sampling scale
+0.016); the band column is the node band's outer edge over the peak position:
+\begin{center}
+\begin{tabular}{lccccccc}
+$a\tau_0$ & $\tau_0$ & nodes per cell & band & dwells per photon & median & $K$ & cpu per photon \\
+\hline
+slab $10^5$ & $2.1\times10^8$ & 7 & 0.66 & 731 & $-0.05$ & 0.016 & 5.8 ms \\
+slab $10^6$ & $2.1\times10^9$ & 11 & 1.02 & 1634 & $+0.10$ & 0.027 & 10.8 ms \\
+slab $10^7$ & $2.1\times10^{10}$ & 17 & 1.59 & 3568 & $-0.05$ & 0.018 & 4.6 ms \\
+sphere $10^5$ & $2.1\times10^8$ & 9 & 0.99 & 512 & $-0.07$ & 0.023 & 1.0 ms \\
+sphere $10^6$ & $2.1\times10^9$ & 13 & 1.41 & 1041 & $-0.01$ & 0.021 & 2.5 ms \\
+sphere $10^7$ & $2.1\times10^{10}$ & 17 & 1.84 & 2110 & $+0.04$ & 0.024 & 2.1 ms \\
+\end{tabular}
+\end{center}
+The peaks sit at the exact $\pm1.07\,(a\tau_0)^{1/3}$ and $\pm0.92\,(a\tau_0)^{1/3}$
+within a bin.  The analog run at these depths would cost $\tau_0 \times 0.63\,\mu$s per
+photon, 200 s at $a\tau_0 = 10^5$ and 6 hours at $10^7$, against the milliseconds
+above.
+
+\textbf{Against the analog kernel.}  The slab at $\tau_0 = 10^6$ and 10 K ($a\tau_0 =
+1.5\times10^4$, $a = 0.0149$), 1000 photons each, the analog run ($1.7\times10^6$
+scatterings per photon, 3.3 s per photon) against the lattice with the slab over 8,
+16 and 32 cells, which puts the node band's edge at 1.11, 0.72 and 0.52 of the peak:
+the two-sample Kolmogorov distances of the escaping $x$ are 0.7, 1.1 and 1.1 times
+the scale and of the escape path 0.8, 1.2 and 1.1 times it; the mean path ratios 0.96,
+1.04 and 1.01; the lattice costs 0.65 to 3.2 ms per photon, a factor 1000 to 5000.
+
+\textbf{Resolution.}  The slab at $a\tau_0 = 10^6$ over 16, 32 and 64 cells with
+$\Delta x = (10\,a\tau_0/n_z^2)^{1/3}$ (34, 21 and 13), the band ending at 1.30, 1.03
+and 0.66 of the peak: $K$ = 0.034, 0.034 and 0.065, medians $+0.07$, $+0.12$ and
+$+0.22$ bins, at 2.7, 9.2 and 1118 ms per photon.  The node band narrows as the cells
+shrink ($x_{\rm edge} \propto (\tau_{\rm cell})^{1/2}$) while the peak does not move,
+so past $n_z \approx 0.4\,(a\tau_0)^{1/3}$ the escape is analog in thin bins at a cell
+depth below 3 and the cost returns: at 64 cells the run spends 31000 analog
+scatterings per photon against 3000 dwells.  The lattice pays where its band covers
+the peak, which is a condition on \key{tau} and the cell size, not on the bin width;
+the resolution to refine is the bin width, by \key{dx}, at a cell size that keeps the
+band wide.
+
+\section{Decisions taken before D1}
 \label{sec:decisions}
 
 Settled with the user on 2026-10-28.
@@ -758,6 +1179,7 @@ Dolence, J. C., Schnetter, E. 2012, ApJ 755, 111 (arXiv:1203.2915; the asymptoti
 boundary condition, equations 120 to 128, and the conversion rule).  Smith, A., Tsang,
 B. T.-H., Bromm, V., Milosavljevi\'c, M. 2018, MNRAS 479, 2065 (arXiv:1709.10187).
 Habetler, G. J., Matkowsky, B. J. 1975, J. Math. Phys. 16, 846.  Wollaeger, R. T.,
-van Rossum, D. R., et al. 2013, ApJS 209, 36.
+van Rossum, D. R., et al. 2013, ApJS 209, 36.  Dijkstra, M., Haiman, Z., Spaans, M. 2006, ApJ 649, 14.  Harrington, J. P. 1973, MNRAS
+162, 43.  Neufeld, D. A. 1990, ApJ 350, 216.  Osterbrock, D. E. 1962, ApJ 135, 195.
 
 \end{document}
