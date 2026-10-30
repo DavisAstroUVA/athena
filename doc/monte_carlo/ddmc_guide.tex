@@ -415,11 +415,12 @@ key (\texttt{<ddmc>}) & default & meaning \\
 \key{tau} & 5 (D1 sets it) & cell optical depth, extinction times the smallest width, above which a cell is a diffusion cell \\
 \key{emergence} & \texttt{asymptotic} & direction distribution at emergence: \texttt{asymptotic} ($W(\mu)$) or \texttt{isotropic} \\
 \key{report} & false & print the counters below per transport \\
+\key{kgreens\_file} & (none) & the Kompaneets table under Compton scattering, read from here or from \texttt{<randomwalk>} (D2) \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-Nothing is read from \texttt{<montecarlo>} or \texttt{<randomwalk>}; the random walk
+Nothing else is read from \texttt{<montecarlo>} or \texttt{<randomwalk>}; the random walk
 never fires in a run with the lattice on (its threshold lies above \key{tau} and a
 walker has no position), and the wiki says the two do not combine.  The report
 prints: photons converted, photons returned, walkers emerged, hops, hops through
@@ -520,6 +521,61 @@ after a scattering or two while a hop carries $\chi\Delta/2$ times a scattering'
 momentum, so the lattice's force estimator is the noisier there by orders of
 magnitude, a property to keep in mind for radiation forces in absorption-dominated
 thick cells.  It was this test that showed the rates needed the total extinction.
+
+\section{What D2 built, where it departs from Section~\ref{sec:energy}}
+\label{sec:d2}
+
+Built 2026-10-29 on branch \texttt{ddmc}, in \texttt{ddmc.cpp} with one check lifted in
+the constructor.  The dwell under \key{scattering = compton} draws the walker's energy
+from the Kompaneets table at $y = \theta\,N$, with $N$ the scatterings the dwell stands
+for (the walker's scattering opacity times $ct$), in chunks of the table's $y_{\max}$
+with a fresh draw per chunk (the process is Markov in $y$ at fixed $\theta$), and its
+free-free survival from the same table with \texttt{lam} rescaled to the walker's $y$;
+any other absorption multiplies by $\exp(-\kappa_a ct)$.  The opacities are refreshed at
+the new energy, the source terms take the energy change as they take the absorbed
+weight, and the moments use the mean of the energies before and after.  The table file
+is \key{kgreens\_file} in \texttt{<ddmc>} or \texttt{<randomwalk>}.  Two counters were
+added: conversions declined because the photon's energy fails the guards, and walkers
+released because a dwell took their energy outside the table; the report prints both
+under Compton.
+
+Two departures from Section~\ref{sec:energy}, both forced by the Compton sphere.
+First, there is no bound on $x\theta$.  With the random walk's $x\theta\le0.05$, at
+$\theta = 0.01$ the lattice came out 6 percent low in the mean escaping energy with the
+spectrum empty above $x = 5$: an energy at which walkers are released and transport
+photons are not converted is a boundary in energy between dwells that stand for about
+twenty scatterings and single scatterings, and a random walk with uneven steps across a
+line depletes the side with the longer steps.  With the bound at $x\theta\le0.1$ the
+mean energy agreed with the Kompaneets theory to 0.1 percent, so the lattice keeps only
+the table's $x$ range, which for the cells that $\theta\le0.03$ admits lies far out in
+the Wien tail, and the free-free sink guard.  Second, the leakage rates, the conversion
+probability and $y$ take the walker's scattering opacity, the thermally averaged
+Klein-Nishina value that the analog run uses, through the per-walker rates
+(\texttt{DDMCRates}, \texttt{DDMCNeighbourExtinction}): with the Thomson rates the
+lattice reproduced the Thomson diffusion theory's escape paths exactly while the analog
+run's were 7 to 12 percent shorter at $\theta$ of 0.01 to 0.02, and its spectrum lacked
+the hardening that the energy-dependent escape gives.  The cell guard $\theta\le0.03$ is
+applied in \texttt{BuildDDMCRates}, so such cells are transport cells.
+
+Measurements, the Compton sphere of \texttt{sphere\_compton.py} with $10^5$ photons, the
+lattice against the driver's Green's-function gate and against the analog run of the
+same deck ($x_0 = 1$, $\theta = 0.002$ unless said): the gate passes on the lattice as
+on the analog run at $\tau$ of 15 (8 cells across, 57 diffusion cells), 40 (8 and 16
+cells) and 100 (32 cells, 7249 diffusion cells), at $x_0$ of 0.1 and 3, and with
+free-free absorption at a radius where it takes 14 percent (escaping weight 0.8606
+against 0.8602 analog and 0.8579 theory at $x_0 = 0.3$, 0.9742 against 0.9741 at
+$x_0 = 1$); the lattice and the analog spectra agree within 0.5 to 1.8 times the
+two-sample Kolmogorov scale and the mean escaping energies to a percent, the escape
+paths within 2 times the scale at 16 and 32 cells and 6 times at 8 cells (the coarse
+lattice's short paths of Section~\ref{sec:d1}).  At $\theta$ of 0.01 and 0.02 with
+both departures built, the lattice agrees with the analog run to 0.5 percent in the
+mean energy and 1 to 1.4 times the scale in the spectrum, while both sit 2 to 3 percent
+above the Thomson Kompaneets theory, which is the exact kernel's hardening and not the
+lattice's.  At $\tau = 100$ on 32 cells the analog run's $4.8\times10^8$ scatterings
+become $4.8\times10^6$ scatterings and $1.6\times10^7$ dwells.  The driver's own
+free-free survival check fails identically on the analog and the lattice at the default
+radius of $10^{10}$ cm, where the sink is $10^{-4}$: a deck limitation, which the radius
+of $10^7$ cm used here avoids.
 
 \section{Decisions taken before D1}
 \label{sec:decisions}

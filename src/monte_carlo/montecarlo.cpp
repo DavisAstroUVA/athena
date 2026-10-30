@@ -231,7 +231,11 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
       ATHENA_ERROR(msg);
     }
   }
+  // the Kompaneets table serves the random walk and the DDMC lattice; either block
+  // names it
   kgreens_file = pin->GetOrAddString("randomwalk","kgreens_file","");
+  if (pin->DoesParameterExist("ddmc","kgreens_file"))
+    kgreens_file = pin->GetString("ddmc","kgreens_file");
   kgreens = nullptr;
   mrw_tables = nullptr;
   optab = nullptr;
@@ -263,14 +267,15 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     general_pusher_flag = pin->GetOrAddBoolean("montecarlo","general_pusher",false);
   scattering_meth = GetScatteringFlag(pin->GetOrAddString("montecarlo","scattering",
                                                           "none"));
-  // The random-walk step with Compton scattering draws the photon's energy change from
-  // the Kompaneets Green's function table, so the table has to be there
-  if (mrw && scattering_meth == SCATCOMP) {
+  // The random-walk step and the DDMC lattice's dwell with Compton scattering draw the
+  // photon's energy change from the Kompaneets Green's function table, so the table
+  // has to be there
+  if ((mrw || ddmc) && scattering_meth == SCATCOMP) {
     if (kgreens_file.empty()) {
       std::stringstream msg;
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "the random walk with Compton scattering needs <randomwalk> kgreens_file"
-          << std::endl;
+          << "Compton scattering under <randomwalk> or <ddmc> needs kgreens_file in "
+          << "either block" << std::endl;
       ATHENA_ERROR(msg);
     }
     kgreens = new KompaneetsTable;
@@ -283,8 +288,9 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
                 << kgreens->nq << " levels" << std::endl;
   }
   if (ddmc) {
-    // What this build of the lattice covers: grey elastic scattering in the legacy
-    // pushers; it does not combine with the random walk, whose domain it contains
+    // What this build of the DDMC lattice covers: grey leakage with Thomson, isotropic or
+    // Compton scattering in the legacy pushers; it does not combine with the random
+    // walk, whose domain it contains
     std::stringstream msg;
     if (mrw) {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
@@ -297,10 +303,11 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
           << "adds the general pusher)" << std::endl;
       ATHENA_ERROR(msg);
     }
-    if (scattering_meth != SCATTHOM && scattering_meth != SCATISO) {
+    if (scattering_meth != SCATTHOM && scattering_meth != SCATISO
+        && scattering_meth != SCATCOMP) {
       msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
-          << "<ddmc> enable needs <montecarlo> scattering = thomson or isotropic (phase "
-          << "D2 adds compton)" << std::endl;
+          << "<ddmc> enable needs <montecarlo> scattering = thomson, isotropic or "
+          << "compton" << std::endl;
       ATHENA_ERROR(msg);
     }
     if (!(ddmc_tau >= 2.)) {
@@ -1812,7 +1819,7 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   << ", outside Kompaneets " << declined[MRW_DECLINE_COMPTON]
                   << ", no budget " << declined[MRW_DECLINE_BUDGET] << ", other "
                   << declined[MRW_DECLINE_OTHER] << ")" << std::endl;
-      if (ddmc)
+      if (ddmc) {
         std::cout << "discrete diffusion: " << nddmc_cells << " cells, "
                   << nddmc[DDMC_DWELL] << " dwells standing for " << nddmc_scat
                   << " scatterings, " << nddmc[DDMC_HOP] << " hops ("
@@ -1822,7 +1829,13 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
                   << " at flight start; returned " << nddmc[DDMC_RETURN] << ", emerged "
                   << nddmc[DDMC_EMERGED] << ", released " << nddmc[DDMC_RELEASE]
                   << ", budget stops " << nddmc[DDMC_STOP] << ", P clamped "
-                  << nddmc[DDMC_PCLAMP] << std::endl;
+                  << nddmc[DDMC_PCLAMP];
+        if (scattering_meth == SCATCOMP)
+          std::cout << "; Kompaneets guards declined " << nddmc[DDMC_DECLINE]
+                    << " conversions and released " << nddmc[DDMC_RELEASE_ENERGY]
+                    << " walkers";
+        std::cout << std::endl;
+      }
       if (optab != nullptr) {
         // Which cells the table served and which fell off its grid: this decides whether
         // a run used the tabulated opacity or the analytic one

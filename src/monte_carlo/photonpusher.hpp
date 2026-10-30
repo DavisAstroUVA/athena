@@ -123,7 +123,7 @@ public:
                     const bool ascend[3]);
   void DDMCWalk(Photon *pphot, MCRandom *pran, int ip);
   void DDMCConvert(Photon *pphot, int ip);
-  void DDMCRelease(Photon *pphot, MCRandom *pran, int ip);
+  void DDMCRelease(Photon *pphot, MCRandom *pran, int ip, bool energy = false);
   void DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face);
   void DDMCArrive(Photon *pphot, int ip);
   void DDMCHop(Photon *pphot, MCRandom *pran, int ip, int face);
@@ -132,6 +132,11 @@ public:
   //! the walker's six face rates and their sum
   Real DDMCRates(Photon *pphot, int ip, Real rate[6]);
   Real DDMCNeighbourExtinction(Photon *pphot, int ip, int n3, int n2, int n1);
+  //! Compton: the cell's theta, kT, n_e sigma_T and free-free parameter
+  bool DDMCComptonCell(int i3, int i2, int i1, Real &theta, Real &kT, Real &nsig,
+                       Real &lam);
+  //! Compton: whether a photon of comoving energy e can walk in cell (i3,i2,i1)
+  bool DDMCComptonOK(Real e, int i3, int i2, int i1);
   // Resonant-scattering acceleration (general pusher)
   virtual Real SampleEscapeTime(MCRandom *pran, Real decayRate, Real sphereRadius,
                                 Real diffusionTime);

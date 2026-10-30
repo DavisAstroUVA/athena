@@ -1,6 +1,6 @@
 # Discrete diffusion Monte Carlo for Compton and resonance scattering: plan
 
-Status: **D0 and D1 done 2026-10-28 on branch `ddmc`; D2 next.**  The 2026-10-06
+Status: **D0 and D1 done 2026-10-28, D2 done 2026-10-29, all on branch `ddmc`; D3 next.**  The 2026-10-06
 outline is folded in below with the changes of Section 2.  Order decided: the Compton
 phases D0 to D3 first (they build the lattice, the interface and the block machinery that
 both scatterings share, where an exact reference exists), the XRB phases D4 and D5 as a
@@ -39,7 +39,32 @@ fluxes and forces being noise in both runs.  Two things that test taught, both b
 a walker with an absorption opacity forms its rates from the total extinction at its
 energy (the table holds the pure Thomson rates), and a photon emitted in a diffusion
 cell flies its first flight before it can be converted.  The wiki page Discrete
-Diffusion was written 2026-10-29.  Next step: D2.
+Diffusion was written 2026-10-29.
+
+D2 (Compton energy and free-free, 2026-10-29): the dwell draws the walker's energy from
+the Kompaneets table at y = theta times the scatterings the dwell stands for, in chunks
+of the table's y range, and its free-free survival from the same table; `kgreens_file`
+is read from `<ddmc>` or `<randomwalk>`; a cell with theta above 0.03 is not a diffusion
+cell; a photon whose x lies outside the table or whose free-free sink is too strong is
+not converted, and a walker whose dwell takes it there is released (both counted).  The
+Compton sphere (1e5 photons, x0 1, theta 2e-3 unless said) passes the Green's-function
+gate on the lattice as on the analog run at tau 15 (8 cells), 40 (8 and 16 cells) and
+100 (32 cells), at x0 0.1 and 3, with free-free at a radius where it absorbs 14 percent
+(escaping weight 0.8606 against 0.8602 analog and 0.8579 theory), and the two agree in
+the spectrum within 0.5 to 1.8 times the two-sample scale; at tau 100 the analog's 4.8e8
+scatterings become 4.8e6 plus 1.6e7 dwells.  Two things the test taught, both built: a
+bound on x theta at which walkers are released and photons are not converted (the
+random walk's 0.05) is a boundary in energy between 20-scattering dwells and single
+scatterings, and the uneven steps across it deplete the walkers' side (6 percent low in
+the mean energy at theta 0.01, the spectrum empty above x = 5), so the lattice has no
+such bound and relies on the table's x range and the cell's theta; and the leakage
+rates and y take the walker's scattering opacity, the thermally averaged Klein-Nishina
+value under Compton, which the analog run uses, without which the paths run 7 to 12
+percent long at theta 0.01 to 0.02.  With both, the lattice agrees with the analog run
+at theta 0.01 and 0.02 to 0.5 percent in the mean energy and 1 to 1.4 times the
+two-sample scale in the spectrum, while both sit 2 to 3 percent above the Thomson
+Kompaneets theory of the driver (the exact kernel's hardening, not the lattice's).
+Next step: D3.
 
 ## 1. Why this and not the in-cell step
 
@@ -372,11 +397,14 @@ the default threshold; a measured per-hop cost.
 ### D2. Compton energy and free-free
 
 Build: the Green's-function dwell update, the survival, the decline guards and their
-counts.  Tests: the Compton sphere of `sphere_compton.py` (tau 15, 40, 100; x0 0.1, 1,
-3; with and without free-free) against the Green's function and the analog run at the
-three resolutions: the per-y separation test, the escaping spectrum against the
-convolution, the survival; the `mc_isoth` Thomson regression unchanged.  Gate: the
-random-walk plan's Phase E standard, at every resolution, with the error converging.
+counts.  The table file is read as `kgreens_file` from either `<ddmc>` or `<randomwalk>`
+(decided 2026-10-29), so the lattice runs with the walk off; the constructor's refusal of
+`scattering = compton` under `<ddmc>` is lifted.  Tests: the Compton sphere of
+`sphere_compton.py` (tau 15, 40, 100; x0 0.1, 1, 3; with and without free-free) against
+the Green's function and the analog run at the three resolutions: the per-y separation
+test, the escaping spectrum against the convolution, the survival; the `mc_isoth`
+Thomson regression unchanged.  Gate: the random-walk plan's Phase E standard, at every
+resolution, with the error converging.
 
 ### D3. Blocks, ranks, refinement
 

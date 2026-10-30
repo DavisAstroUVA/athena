@@ -497,7 +497,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     ddmc_cell.NewAthenaArray(ncells3,ncells2,ncells1);
     ddmc_rate.NewAthenaArray(DDMC_NRATE,ncells3,ncells2,ncells1);
   }
-  // the generator's cell mask serves the lattice as it serves the random walk
+  // the generator's cell mask serves the DDMC lattice as it serves the random walk
   if (mrw || pmy_mc->ddmc) {
     accel_mask.NewAthenaArray(ncells3,ncells2,ncells1);
     for (int n=0; n<accel_mask.GetSize(); ++n) accel_mask(n) = 1;

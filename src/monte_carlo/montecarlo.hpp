@@ -58,10 +58,12 @@ enum DDMCEmergence {DDMC_EMERGE_ASYMPTOTIC = 0, DDMC_EMERGE_ISOTROPIC = 1};
 //! DDMC counters, per transport: photons converted at a face and at the start of a
 //! flight, returned at a face, walkers emerged, released (cell no longer a diffusion
 //! cell), dwells, hops, hops through block faces, budget stops, conversion
-//! probabilities clamped at 1
+//! probabilities clamped at 1, conversions declined by the Kompaneets guards (Compton),
+//! walkers released because a dwell took their energy outside the table (Compton)
 enum DDMCCount {DDMC_CONVERT_FACE = 0, DDMC_CONVERT_BIRTH = 1, DDMC_RETURN = 2,
                 DDMC_EMERGED = 3, DDMC_RELEASE = 4, DDMC_DWELL = 5, DDMC_HOP = 6,
-                DDMC_HOP_BLOCK = 7, DDMC_STOP = 8, DDMC_PCLAMP = 9, NDDMCCOUNT = 10};
+                DDMC_HOP_BLOCK = 7, DDMC_STOP = 8, DDMC_PCLAMP = 9, DDMC_DECLINE = 10,
+                DDMC_RELEASE_ENERGY = 11, NDDMCCOUNT = 12};
 //! why a MRW step declined: no usable frame; the domain too thin once the
 //! comoving extinction and the advection room are known; outside the Kompaneets
 //! description (theta, x theta, absorption, the table's x range); no time budget left

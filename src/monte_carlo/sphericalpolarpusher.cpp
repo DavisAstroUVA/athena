@@ -53,8 +53,9 @@ void SphericalPolarPusher::Move(Photon *pphot, int ips, int ipe) {
     Real tauremaining = 0.;
     bool first_pass = true;
     do {
-      // convert and walk a photon on the lattice.  A walker moves only by hops, so false
-      // (still a walker: absorbed, buffered elsewhere or out of time) means no flight
+      // convert and walk a photon on the DDMC lattice.  A walker moves only by hops, so
+      // false (still a walker: absorbed, buffered elsewhere or out of time) means no
+      // flight
       if (ddmc_ && !DDMCBeforeFlight(pphot, pran, ip, first_pass)) break;
       first_pass = false;
 

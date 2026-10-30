@@ -195,10 +195,10 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
   if (pmy_mc->emission_flag == EMISNONE)
     nphremain = has_origin ? pin->GetInteger64("montecarlo","nphot") : 0;
 
-  // The random-walk step and the diffusion lattice are for cells wholly inside the
+  // The random-walk step and the DDMC lattice are for cells wholly inside the
   // sphere: a cell the escape surface cuts is not the uniform medium either assumes.
-  // Over the ghost cells too, so that the lattice reads the same mask for a neighbour's
-  // cell as that neighbour does
+  // Over the ghost cells too, so that the DDMC lattice reads the same mask for a
+  // neighbour's cell as that neighbour does
   if (accel_mask.GetSize() > 0) {
     for (int k=0; k<accel_mask.GetDim3(); k++) {
       for (int j=0; j<accel_mask.GetDim2(); j++) {

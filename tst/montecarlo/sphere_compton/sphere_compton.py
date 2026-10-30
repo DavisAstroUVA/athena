@@ -312,8 +312,11 @@ def write_athinput(args, filename):
             line = "<randomwalk>\n" + rw_lines + "\n" + line
         if line.startswith('<problem>') and args.ddmc:
             # the discrete diffusion keys have their own block, written before <problem>
-            line = (f"<ddmc>\nenable = true\ntau = {args.ddmc_tau}\nemergence = {args.emergence}\n"
-                    f"report = true\n\n" + line)
+            ddmc_lines = (f"<ddmc>\nenable = true\ntau = {args.ddmc_tau}\n"
+                          f"emergence = {args.emergence}\nreport = true\n")
+            if args.kgreens:
+                ddmc_lines += f"kgreens_file = {args.kgreens}\n"
+            line = ddmc_lines + "\n" + line
         if block == 'problem' and line.startswith('heabund') and args.beta:
             line += f"velocity = {args.beta}    # fluid velocity along z, in units of c\n"
         out.append(line)
