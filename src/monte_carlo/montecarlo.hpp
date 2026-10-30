@@ -65,7 +65,8 @@ enum DDMCEmergence {DDMC_EMERGE_ASYMPTOTIC = 0, DDMC_EMERGE_ISOTROPIC = 1};
 enum DDMCCount {DDMC_CONVERT_FACE = 0, DDMC_CONVERT_BIRTH = 1, DDMC_RETURN = 2,
                 DDMC_EMERGED = 3, DDMC_RELEASE = 4, DDMC_DWELL = 5, DDMC_HOP = 6,
                 DDMC_HOP_BLOCK = 7, DDMC_STOP = 8, DDMC_PCLAMP = 9, DDMC_DECLINE = 10,
-                DDMC_RELEASE_ENERGY = 11, DDMC_EMERGED_JUMP = 12, NDDMCCOUNT = 13};
+                DDMC_RELEASE_ENERGY = 11, DDMC_EMERGED_JUMP = 12, DDMC_ADVECT = 13,
+                DDMC_EMERGED_ADVECT = 14, NDDMCCOUNT = 15};
 //! why a MRW step declined: no usable frame; the domain too thin once the
 //! comoving extinction and the advection room are known; outside the Kompaneets
 //! description (theta, x theta, absorption, the table's x range); no time budget left
@@ -688,7 +689,7 @@ public:
   // BuildDDMCRates from the fluid.
   AthenaArray<int> ddmc_cell;
   AthenaArray<Real> ddmc_rate;
-  enum {DDMC_RATE_TOT = 6, DDMC_RATE_W = 7, DDMC_NRATE = 10};
+  enum {DDMC_RATE_TOT = 6, DDMC_RATE_W = 7, DDMC_RATE_DIV = 10, DDMC_NRATE = 11};
   int64_t nddmc[NDDMCCOUNT];
   Real nddmc_scat; // scatterings the dwells stood for
   int64_t nddmc_cells; // diffusion cells on the block at the last build

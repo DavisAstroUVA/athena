@@ -147,8 +147,9 @@ public:
   //! table opacities with two_band: the group the absorption was last evaluated in, so
   //! that a change of group (Compton, Doppler or gravitational shift) redraws the band
   std::vector<int> &grpp;
-  //! DDMC: 0 a transport photon, 1 a walker at the centre of its cell, 2 + f a walker that
-  //! has just crossed a block face and enters its new cell through face f (0..5)
+  //! DDMC: 0 a transport photon, 1 a walker in its cell, 2 + f a walker that has just
+  //! crossed a block face by a hop and enters its new cell through face f (0..5), owed
+  //! the entering deposit there, 8 + f the same carried across by its fluid, owed nothing
   std::vector<int> &ddmcp;
   static std::vector<int> ddmc_scratch_;
   std::vector<int> &i1p, &i2p, &i3p;

@@ -1825,13 +1825,15 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
         std::cout << "discrete diffusion: " << nddmc_cells << " cells ("
                   << nddmc_cells_jump << " at level jumps), "
                   << nddmc[DDMC_DWELL] << " dwells standing for " << nddmc_scat
-                  << " scatterings, " << nddmc[DDMC_HOP] << " hops ("
+                  << " scatterings, " << nddmc[DDMC_HOP] << " hops and "
+                  << nddmc[DDMC_ADVECT] << " advective crossings ("
                   << nddmc[DDMC_HOP_BLOCK] << " through block faces); converted "
                   << nddmc[DDMC_CONVERT_FACE] << " at faces, "
                   << nddmc[DDMC_CONVERT_BIRTH]
                   << " at flight start; returned " << nddmc[DDMC_RETURN] << ", emerged "
                   << nddmc[DDMC_EMERGED] << " (" << nddmc[DDMC_EMERGED_JUMP]
-                  << " through level jumps), released " << nddmc[DDMC_RELEASE]
+                  << " through level jumps, " << nddmc[DDMC_EMERGED_ADVECT]
+                  << " by advection), released " << nddmc[DDMC_RELEASE]
                   << ", budget stops " << nddmc[DDMC_STOP] << ", P clamped "
                   << nddmc[DDMC_PCLAMP];
         if (scattering_meth == SCATCOMP)

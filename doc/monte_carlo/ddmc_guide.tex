@@ -185,8 +185,8 @@ The walk, in the pusher's per-photon loop while \texttt{ddmcp} is set:
 \item If a budget stop or absorption ended the dwell, return.  Otherwise choose the
   face with probability $k_f/k_{\rm tot}$ and hop:
   \begin{itemize}
-  \item interior face: move the walker to the neighbour's centre, transform its
-    energy into the neighbour's frame (Section~\ref{sec:moving}), deposit the face
+  \item interior face: translate the walker by one cell (its comoving energy
+    unchanged, Section~\ref{sec:moving}), deposit the face
     counters (Section~\ref{sec:moments}); if the neighbour is a ghost cell, the walker
     is now outside the block and \texttt{UpdateZone} buffers it to the neighbour
     block, where it lands in the face cell with its flag and continues;
@@ -336,8 +336,9 @@ photon not converted is returned into the cell it came from with an isotropic in
 direction, at the face, keeping its flight state.
 
 \textbf{Emergence}, when a walker hops through a boundary face.  The photon is placed
-at a uniform point on the face, on the transport side, with the flag cleared, an energy
-drawn in the new frame (Section~\ref{sec:moving}), weight carried, Stokes parameters
+at a uniform point on the face, on the transport side, with the flag cleared, its
+energy taken to the lab with the drawn direction (Section~\ref{sec:moving}), weight
+carried, Stokes parameters
 zero, \texttt{taup} $=-1$ and \texttt{strp} $=0$ so the pusher draws a fresh flight.
 Its outward direction is drawn from one of two distributions, \key{<ddmc> emergence}:
 \key{asymptotic}, $W(\mu) = \mu + \tfrac32\mu^2$ on the outward hemisphere, the
@@ -353,21 +354,56 @@ $\mu^2/2 + \mu^3/2 = \xi$ for $\mu$, a few Newton steps from $\mu=\xi^{1/2}$.
 \label{sec:moving}
 
 The lattice is in the comoving frame of each cell: rates, dwell, energy and moments.
-At a hop the energy changes frame.  Rather than a first-order Doppler formula with a
-mean cosine (Smith et al., their equations 19 and 20), the hop samples a direction from
-the emergence distribution about the face normal, builds the comoving wavevector of
-energy $E$ in the leaving cell, transforms it to the lab with that cell's velocity
-(\texttt{TransformToCoordinate} at the cell centre), moves to the entering cell's
-centre, transforms it into that cell's frame (\texttt{TransformToComoving}), keeps the
-energy and discards the direction.  This is exact in distribution for the diffusion
-limit, uses the transforms that exist, and costs a few operations per hop.  The dwell's
-lab time is $\gamma$ times the comoving time (Section~\ref{sec:gr}).
+A walker's energy is the comoving energy in the frame of the fluid where it is, and
+three things happen to it that do not happen in a medium at rest.
 
-What is not represented: the advection of the fluid past the lattice within a cell, and
-velocity gradients within a cell.  The lattice is the grid and the cell's velocity is
-one number; this is the approximation Smith et al.\ make and the moving sphere of D4
-measures (beta 0.01, 0.1, 0.3 against analog).  The random walk's advection room has no
-analogue.
+\textbf{The walker is carried by its fluid.}  Over a dwell of comoving path $ct$ the
+walker's lab position moves by $\gamma\beta\,ct$, with $\gamma\beta$ the fluid's value
+interpolated linearly across the cell along each axis between the two neighbours (so
+that at a face it is the mean of the two cells' values, which is what the one-way
+fluxes of the analog transport across that face add up to).  The dwell is cut at the
+comoving path at which the drift reaches a face of the cell, and the walker then
+crosses that face (\texttt{DDMCAdvect}): into a diffusion cell as a walker, placed a
+hair inside the neighbour (at the neighbour's centre along the axis when that cell's
+flow opposes the crossing, so a converging flow does not shuttle it across the face);
+through any other face as a transport photon, isotropic outward in the comoving frame
+from where it is on the face.  An advective crossing deposits no flux and no force: the
+lab moments of the dwell already carry the advective flux $\tfrac{4}{3}\gamma^2 v E_c$
+through the boost of the isotropic comoving field.  A diffusive hop keeps the walker's
+offset from the centre along the face's axis (a translation by one cell), so that hops
+neither advance nor set back the drift; the walker is at the centre only where it
+entered the lattice as a photon.  This is the advection $\nabla\cdot(n\boldsymbol{v})$
+of the walker number, exact in expectation, with no numerical diffusion.
+
+\textbf{Energy over a dwell.}  Isotropic radiation in a fluid with velocity divergence
+loses $\tfrac{1}{3}\nabla\cdot\boldsymbol{v}$ of its energy per unit time to the work
+on the fluid, so over a dwell $E \to E\exp(-ct\,\nabla\cdot\boldsymbol{\beta}/3)$ with
+the cell's divergence from centred differences of the neighbours' velocities (stored
+with the rates, \texttt{DDMC\_RATE\_DIV}); the change goes to the energy source term
+like the Compton one.  This is the whole first-order energy effect of the flow on a
+diffusing walker: the redshift a photon accrues is the time integral of
+$\boldsymbol{n}\boldsymbol{n}\!:\!\nabla\boldsymbol{\beta}$ along its path, which for the
+isotropic wandering of a dwell is the divergence term and nothing else.
+
+\textbf{No frame change at a hop.}  A walker that hops or is carried into a cell of
+another velocity keeps its energy.  The crossing photons of the analog transport are
+relabelled into the new cell's frame by $-\Delta\boldsymbol{\beta}\cdot\boldsymbol{n}$,
+but relative to the fluid at the face, which moves at the mean of the two cells, that
+relabelling is a bookkeeping offset of $\pm\tfrac{1}{2}\Delta\boldsymbol{\beta}\cdot
+\boldsymbol{n}$ that the wandering to the next centre undoes; the physical loss is the
+time integral above.  A hop transform through a direction drawn from $W(\mu)$ (the
+first D4 build, and the mean-cosine formula of Smith et al.\ 2018, their equations 19
+and 20) adds a spurious redshift of $1.42/\tau_{\rm cell}$ times the adiabatic one, and
+on its own, without the divergence term, gives only that fraction of the cooling.
+Conversion (a photon with a direction) and emergence (a direction drawn) do change
+frame, through \texttt{TransformToComoving} and \texttt{TransformToCoordinate} as
+before.
+
+The dwell's lab time is $\gamma$ times the comoving time (Section~\ref{sec:gr}).  What
+is still not represented: the Lorentz contraction of the cell along the flow in the
+comoving rates (second order), and the velocity gradient within a cell beyond the
+linear interpolation of the drift.  What the moving sphere measured, and the two
+earlier attempts the measurements rejected, are in Section~\ref{sec:d4}.
 
 \section{Curved spacetime}
 \label{sec:gr}
@@ -379,9 +415,9 @@ and the dwell is a comoving proper time $t$.  Coordinate time advances by
 $\Delta x^0 = \gamma\,ct/(c\,\alpha)$ in code units with $\gamma = u^{\hat t}$ the
 fluid's Lorentz factor on the tetrad and $\alpha$ the lapse, exactly as
 \texttt{MRWStep} does (\texttt{dl = gam*ct/l\_cgs/fr.lapse}); \texttt{dtp} decreases by
-the same.  The hop transform of Section~\ref{sec:moving} goes through the two cells'
-tetrads at their centres, which covers the gravitational shift as well as the Doppler
-one.  The walker's coordinate position is the cell centre.  Inside the horizon of
+the same.  The drift, the divergence term and the frame of the interface test of
+Section~\ref{sec:moving} are written for flat space and are D5's to carry onto the
+tetrads, where the gravitational shift joins the Doppler one.  Inside the horizon of
 \texttt{mc\_readhdf\_gr} the species are zero and no cell is a diffusion cell.
 
 \section{Time and dynamic runs}
@@ -611,7 +647,80 @@ point source was born with wrong indices, sent to the wrong neighbour and destro
 arrival, 20 to 50 percent of the photons under either pusher.  The origin cell is now
 found on the emitting block in \texttt{InitializePhoton}.
 
-\section{Decisions taken before D1}
+\section{What D4 built, and the two attempts the moving sphere rejected}
+\label{sec:d4}
+
+Built 2026-10-30.  The test is the Compton sphere of D2 (tau 40 over 16 cells, cells 5
+deep, $x_0 = 1$, $\theta = 2\times10^{-3}$, $10^5$ photons) with the fluid moving:
+uniformly along $z$ through the fixed escape surface (\texttt{--beta}), and in a
+homologous expansion with the given velocity at the surface
+(\texttt{--profile hubble}, added to \texttt{mc\_sphere\_isoth} and the driver), the
+lattice against the analog run of the same deck.  The interface-free cube of
+\texttt{ddmc\_cube.py} takes the same two flows (\texttt{--beta}, \texttt{--profile}),
+which is what told the lattice's interior from its interface.
+
+\textbf{What the design note had, measured.}  The hop transform through a $W(\mu)$
+direction and a walker at rest in the lab: in the uniform flow at $\beta = 0.1$ the
+escape paths were 2.1 times the analog's and the mean escaping energy 12 percent high,
+at $\beta = 0.3$ 5.4 times and 82 percent; in the expansion 1.8 and 3.1 times.  The
+lattice kept the static residence time whatever the flow, since nothing carried the
+walkers.  A scratch build with the hop transform switched off moved the expansion's
+energy by 9 percent ($\beta = 0.1$) and 36 percent ($\beta = 0.3$), the size of that
+transform, in the wrong direction and far short of the analog's cooling.
+
+\textbf{First attempt: drift at the cell-centre velocity, the divergence term, no hop
+transform.}  Uniform flow right to 5 percent in the paths (1 percent at $\beta = 0.3$)
+and 2 percent in the energy; the expansion still 21 percent slow to escape and 6
+percent cold at $\beta = 0.1$.  Interpolating the drift velocity across the cell
+(so that the face velocity is the mean of the two cells', as the analog's one-way
+fluxes make it) took the expansion to 16 percent.  The cube with the same flows, no
+interface, was then 8 percent (uniform) and 18 percent (expansion) slow: the error was
+in the interior.  The cause was the hop placing the walker at the neighbour's centre:
+a drifting walker sits on average in the downstream half of its cell, so every hop set
+it back by a quarter of a cell.  A hop that keeps the walker's offset (a translation by
+one cell) made the cube agree in the mean path to 0.5 percent in both flows and in
+the mean energy to 0.3 percent (uniform) and 1.5 percent (expansion).
+
+\textbf{Second: the interface in the lab frame.}  With the interior right, the sphere's
+paths agreed to 1 percent at every velocity, but the energies were 3 percent low in the
+uniform flow and 8 percent (14 percent at $\beta = 0.3$) in the expansion: the
+conversion test read the photon's cosine and energy in the lab and returned a photon
+isotropic in the lab.  Taking the test into the diffusion cell's frame (transform in,
+decide, convert with the energy already comoving or transform the inward direction
+out) moved the energies by 5 percent at $\beta = 0.1$.
+
+\textbf{Result.}  Against the analog run, median escape path and mean escaping energy,
+lattice over analog, and the spectrum's Kolmogorov distance in units of the two-sample
+scale (0.6 to 1.2 for the static lattice at this resolution):
+\begin{center}
+\begin{tabular}{llccc}
+flow & $\beta$ & path & energy & spectrum \\
+\hline
+uniform & 0.01 & 0.991 & 1.000 & 0.9 \\
+uniform & 0.1 & 1.002 & 1.017 & 2.6 \\
+uniform & 0.3 & 1.008 & 1.028 & 4.5 \\
+expansion & 0.1 & 1.007 & 0.966 & 4.3 \\
+expansion & 0.3 & 1.012 & 0.893 & 11.8 \\
+\end{tabular}
+\end{center}
+The residence time is right everywhere.  The energy is right to 2 to 3 percent at
+$\beta = 0.1$, with opposite signs in the two flows, and the expansion at $\beta = 0.3$
+is 11 percent cold: what is left is first order in $\beta$ at the interface (the
+emergence placed a hair inside the cell and flown out, the returned photon's
+distribution, the advective emergence's hemisphere) and the within-cell velocity
+gradient the drift's interpolation only partly represents.  The static sphere, the
+cube's exact check and the D3 block, repack and refinement tests are unchanged.
+
+\textbf{What this means for the design.}  Three statements of Section~\ref{sec:moving}
+as first written were wrong and are replaced there: the hop transform is not a
+physical shift for a diffusing walker (it double counts the adiabatic loss by
+$1.42/\tau_{\rm cell}$ and misses the rest); the advection cannot be left out at
+$\beta\tau_{\rm cell}$ of order one, where it sets the residence time; and the walker is
+not at the cell's centre, only where it entered as a photon.  The random walk's
+advection room, which declines steps that would leave the cell, has no counterpart:
+the walker crosses.
+
+
 \label{sec:decisions}
 
 Settled with the user on 2026-10-28.

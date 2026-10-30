@@ -26,8 +26,16 @@ come out of one run:
 
 The cube's half-width optical depth is --tau; the cell depth is 2 tau / nx.
 
+With --beta the medium moves (boosts on): uniformly along z, or as a homologous
+expansion with beta at the mesh edge (--profile hubble).  There is no exact solution
+then, and the check is the lattice against the analog run alone, in the mean escape
+path and the mean escaping energy (PASS within --gate-flow of 1); since no interface
+is crossed, this separates the lattice's interior (drift, adiabatic energy change,
+hops) from its interface.
+
     python ddmc_cube.py --path /path/to/athena --workdir DIR [--nx 8 --tau 40 --nphot 20000]
                         [--ddmc-tau 3 --emergence asymptotic --mcranks 4 --mb 8]
+                        [--beta 0.1 --profile uniform|hubble]
 
 needs: python configure.py --prob=mc_sphere_isoth -mc -mpi && make
 """
@@ -35,6 +43,7 @@ needs: python configure.py --prob=mc_sphere_isoth -mc -mpi && make
 import argparse
 import glob
 import os
+import re
 import subprocess
 import sys
 
@@ -50,7 +59,8 @@ LAMBDA = 0.7104   # extrapolation distance of the asymptotic boundary condition
 R0 = 1.e10        # the cube's half-width is 1.25 R0, as the gridded sphere decks
 
 
-def write_athinput(filename, name, nx, mb, tau, nphot, iseed, ddmc, ddmc_tau, emergence):
+def write_athinput(filename, name, nx, mb, tau, nphot, iseed, ddmc, ddmc_tau, emergence,
+                   beta=0., profile='uniform'):
     """the gridded-sphere deck with the sphere pushed out to a hundred times the mesh, so
     the medium fills the mesh and the escape surface is never met; escape at the mesh
     boundaries.  mc_sphere_isoth takes the density from tau over radius, so the deck's
@@ -58,6 +68,12 @@ def write_athinput(filename, name, nx, mb, tau, nphot, iseed, ddmc, ddmc_tau, em
     h = 2.5*R0/nx
     lo, hi = -1.25*R0 - 0.5*h, 1.25*R0 - 0.5*h
     radius = 100.*R0
+    # the hubble profile's velocity is its value at radius, so the mesh edge at 1.25 R0
+    # gets beta
+    flow = ""
+    if beta:
+        flow = (f"velocity = {beta*(radius/(1.25*R0) if profile == 'hubble' else 1.):.6e}\n"
+                f"velocity_profile = {profile}\n")
     mesh = "\n".join(f"nx{d} = {nx}\nx{d}min = {lo:.7e}\nx{d}max = {hi:.7e}\n"
                      f"ix{d}_mc_bc = escape\nox{d}_mc_bc = escape" for d in '123')
     s = f"""<job>
@@ -86,6 +102,7 @@ absorption = none
 abs_method = weight
 polarized  = none
 verbose    = true
+{'boosts     = true' if beta else ''}
 
 <ddmc>
 enable  = {'true' if ddmc else 'false'}
@@ -100,7 +117,7 @@ x0       = 1.
 radius   = {radius:.6e}
 srcdist  = false
 heabund  = 0.09
-"""
+{flow}"""
     open(filename, 'w').write(s)
 
 
@@ -139,8 +156,8 @@ def exact_lattice(nx, chid):
     return t[c0]*chid, ndwell[c0]
 
 
-def load_paths(files):
-    """escapers' path lengths from the lists"""
+def load_paths(files, energy=False):
+    """escapers' path lengths from the lists (their energies with energy)"""
     path = []
     for f in files:
         gen = athena_mc.read_list_generator(f)
@@ -149,7 +166,7 @@ def load_paths(files):
             if c['chunk'] is None:
                 continue
             p = athena_mc.Photons.from_chunk(header, c)
-            path.append(p.x0)
+            path.append(p.energy if energy else p.x0)
             if c['done']:
                 break
     return np.concatenate(path)
@@ -158,7 +175,7 @@ def load_paths(files):
 def run(args, name, ddmc):
     deck = os.path.join(args.workdir, f'athinput.{name}')
     write_athinput(deck, name, args.nx, args.mb or args.nx, args.tau, args.nphot,
-                   args.iseed, ddmc, args.ddmc_tau, args.emergence)
+                   args.iseed, ddmc, args.ddmc_tau, args.emergence, args.beta, args.profile)
     exe = os.path.join(args.path, 'bin', 'athena')
     cmd = [exe, '-i', deck, '-d', args.workdir]
     if args.mcranks > 1:
@@ -171,17 +188,19 @@ def run(args, name, ddmc):
     report = {}
     for line in open(log):
         if line.startswith('discrete diffusion:'):
-            w = line.split()
-            report['cells'] = int(w[2])
-            report['dwells'] = int(w[4])
-            report['scat'] = float(w[8])
+            m = re.search(r'(\d+) cells .*?(\d+) dwells standing for ([0-9.eE+-]+) scatterings',
+                          line)
+            report['cells'] = int(m.group(1))
+            report['dwells'] = int(m.group(2))
+            report['scat'] = float(m.group(3))
         if line.startswith('ntot:'):
             w = line.split()
             report['ntot'] = int(w[1])
         if 'cpu time used' in line:
             report['cpu'] = float(line.split('=')[1].split()[0])
-    return load_paths(sorted(glob.glob(os.path.join(args.workdir, f'{name}.out1.*.list')))), \
-        report
+    files = sorted(glob.glob(os.path.join(args.workdir, f'{name}.out1.*.list')))
+    report['energy'] = load_paths(files, energy=True)
+    return load_paths(files), report
 
 
 def main(args):
@@ -202,7 +221,9 @@ def main(args):
     print(f"  lattice run:   {rd['cells']} cells; mean escape path {tp.mean():.1f} +- {err:.1f} "
           f"(pull {pull:+.1f}), scatterings stood for per photon {rd['scat']/rd['ntot']:.1f}, "
           f"{dw:.2f} dwells per photon ({dw/n_exact-1.:+.2%}); cpu {rd.get('cpu', 0):.2f} s")
-    if abs(pull) > 4. or abs(dw/n_exact - 1.) > 0.03:
+    if args.beta:
+        print("  (a moving medium: the exact solution does not apply; the analog run decides)")
+    elif abs(pull) > 4. or abs(dw/n_exact - 1.) > 0.03:
         ok = False
     if not args.no_analog:
         pa, ra = run(args, 'analog', False)
@@ -211,6 +232,13 @@ def main(args):
         print(f"  analog run:    mean escape path {ta.mean():.1f} +- {erra:.1f}; cpu "
               f"{ra.get('cpu', 0):.2f} s; lattice/analog {tp.mean()/ta.mean():.4f}, "
               f"exact lattice/analog {t_exact/ta.mean():.4f}")
+        if args.beta:
+            re_ = rd['energy'].mean()/ra['energy'].mean()
+            rp = tp.mean()/ta.mean()
+            print(f"  flow {args.profile} beta {args.beta:g}: lattice/analog mean path {rp:.4f}, "
+                  f"mean escaping energy {re_:.4f} (gate {args.gate_flow:g})")
+            if abs(rp - 1.) > args.gate_flow or abs(re_ - 1.) > args.gate_flow:
+                ok = False
         if rd.get('cpu', 0) > 0:
             print(f"  cost: {1e6*rd['cpu']/rd['dwells']:.2f} us per dwell, "
                   f"{1e6*ra['cpu']/(ta.mean()*len(ta)):.2f} us per scattering, "
@@ -233,6 +261,13 @@ def parse_args(argv=None):
     ap.add_argument('--emergence', default='asymptotic', choices=['asymptotic', 'isotropic'])
     ap.add_argument('--mcranks', type=int, default=1)
     ap.add_argument('--no-analog', action='store_true', help='skip the analog run')
+    ap.add_argument('--beta', type=float, default=0.,
+                    help='fluid velocity in units of c (boosts on): along z, or at the '
+                         'mesh edge of a homologous expansion')
+    ap.add_argument('--profile', default='uniform', choices=['uniform', 'hubble'])
+    ap.add_argument('--gate-flow', type=float, default=0.02,
+                    help='allowed deviation of the mean path and energy from the analog '
+                         'run with --beta')
     return ap.parse_args(argv)
 
 

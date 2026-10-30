@@ -318,7 +318,8 @@ def write_athinput(args, filename):
                 ddmc_lines += f"kgreens_file = {args.kgreens}\n"
             line = ddmc_lines + "\n" + line
         if block == 'problem' and line.startswith('heabund') and args.beta:
-            line += f"velocity = {args.beta}    # fluid velocity along z, in units of c\n"
+            line += f"velocity = {args.beta}    # fluid velocity in units of c\n"
+            line += f"velocity_profile = {args.profile}\n"
         out.append(line)
     with open(filename, 'w') as f:
         f.writelines(out)
@@ -359,7 +360,10 @@ def parse_args(argv=None):
     ap.add_argument('--stepsize', type=float, default=0.02,
                     help='general pusher step as a fraction of the cell crossing')
     ap.add_argument('--beta', type=float, default=0.,
-                    help='uniform fluid velocity along z in units of c, with boosts on')
+                    help='fluid velocity in units of c, with boosts on: along z (uniform) '
+                         'or at the surface of a homologous expansion (hubble)')
+    ap.add_argument('--profile', default='uniform', choices=['uniform', 'hubble'],
+                    help='velocity profile of the moving sphere')
     ap.add_argument('--compare-to', default=None,
                     help='another run directory: compare the escapers of the two runs '
                          'directly (spectrum, escape path, weight), for a moving medium '

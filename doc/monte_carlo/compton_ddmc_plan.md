@@ -1,6 +1,6 @@
 # Discrete diffusion Monte Carlo for Compton and resonance scattering: plan
 
-Status: **D0 and D1 done 2026-10-28, D2 and D3 done 2026-10-29, all on branch `ddmc`; the XRB count that decides D4 and D5 is with the user.**  The 2026-10-06
+Status: **D0 and D1 done 2026-10-28, D2 and D3 done 2026-10-29, D4 done 2026-10-30, all on branch `ddmc`; the XRB count that decides the split-face rates and D5 was run on a 128-cubed snapshot (3 percent of the diffusion cells at level jumps, no split faces) and is to be repeated on the hires one.**  The 2026-10-06
 outline is folded in below with the changes of Section 2.  Order decided: the Compton
 phases D0 to D3 first (they build the lattice, the interface and the block machinery that
 both scatterings share, where an exact reference exists), the XRB phases D4 and D5 as a
@@ -84,7 +84,34 @@ fixed in `InitializePhoton`.  The decision run is three decks in the user's hand
 hires snapshot is 114 GB): the `d01_emis2` deck with `<ddmc> report = true`, 1000 photons
 and `tau` of 2, 3 and 4, whose report line gives the diffusion cells and the share at
 level jumps; the split-face rates are built if that share is above about a fifth.
-Next step: the user's count, then D4 or the resonance phases.
+D4 (moving medium, 2026-10-30): the design note's hop transform (a W(mu) direction
+drawn at the hop, the energy taken to the lab and into the neighbour's frame) with the
+walker at rest in the lab failed the moving Compton sphere outright: at beta 0.1 the
+escape paths were 2.1 times the analog's in a uniform flow and 1.8 times in a homologous
+expansion (`--profile hubble`, added to `mc_sphere_isoth` and the sphere driver), since
+nothing carried the walkers with the fluid.  Built instead, each step forced by a
+measurement: the walker drifts with its cell's fluid during a dwell at the velocity
+interpolated linearly across the cell, and crosses a face the drift reaches
+(`DDMCAdvect`; into a diffusion cell as a walker owed nothing, `ddmcp = 8 + f` across a
+block face; otherwise an emergence isotropic outward in the comoving frame), depositing
+no flux because the dwell's boosted isotropic field already carries the advective flux;
+over a dwell the energy loses exp(-c t div(beta) / 3), the work done on an expanding
+fluid, with the divergence stored in the rate table (`DDMC_RATE_DIV`); a hop keeps the
+walker's comoving energy and its offset from the centre (the design's hop transform
+double counts the adiabatic loss by 1.42 / tau_cell and on its own gives only that
+fraction of it; a hop that recentred the walker set a drifting walker back a quarter
+cell per hop, 8 to 18 percent slow in the interface-free cube, which `ddmc_cube.py
+--beta [--profile hubble]` now runs); and the conversion test at a face reads the
+photon's cosine and energy in the diffusion cell's frame and returns photons isotropic
+in that frame (the lab-frame test left the energies 3 to 8 percent low).  Result against
+analog at beta 0.1: paths within 1 percent in both flows, mean energy +1.7 percent
+(uniform) and -3.4 percent (expansion), spectra 2.6 and 4.3 times the two-sample scale
+(the static lattice gives 0.6 to 1.2); at beta 0.3 paths within 1.2 percent, energy
++2.8 and -10.7 percent.  The cube's exact check, the static sphere and the D3 block
+tests are unchanged.  The remaining error is first order in beta at the interface.
+Next step: the hires count (the 128-cubed run put 3 percent of the diffusion cells at
+level jumps and 80 percent of the scatterings in cells at least 3 deep), then D5 or
+the resonance phases.
 
 ## 1. Why this and not the in-cell step
 
@@ -328,15 +355,17 @@ cell's edges, which `CellGeometry` and `MRWFrame` already supply.
 - **Interface.**  Section 2.2.  Thresholds: a cell is a diffusion cell when tau_cell
   exceeds `<ddmc> tau`; one key, the asymmetry between entering and leaving carried by
   the probabilities, a second key only if the tests ask for it.
-- **Moving medium.**  Rates in the comoving frame of each cell.  At a hop the energy
-  changes frame: draw a direction from W(mu) at the face, transform the energy to the
-  lab with the leaving cell's velocity and to the comoving frame of the entering cell
-  with its velocity (the existing `LorentzTransformFrequencyShift` and the tetrad
-  transforms), then discard the direction.  Exact in distribution, no first-order
-  shift formula; a few operations per hop.  The dwell's lab time is gamma times the
-  comoving time; the advection of the cell's fluid past the lattice is not represented
-  within a cell (the lattice is the grid), which is the approximation Smith et al. make
-  and the moving sphere measures.
+- **Moving medium** (as built in D4; the 2026-10-06 version had a frame change at
+  each hop and no advection, which the moving sphere rejected).  Rates in the comoving
+  frame of each cell.  The walker is carried by its fluid during a dwell, at the
+  velocity interpolated linearly across the cell, and crosses a face the drift reaches
+  (into a diffusion cell as a walker, otherwise emerging isotropic outward in the
+  comoving frame), depositing no flux, since the boosted isotropic field of the dwell
+  carries the advective flux; a hop is a translation by one cell that keeps the
+  walker's offset.  Over a dwell the energy loses exp(-c t div(beta) / 3), the work on
+  an expanding fluid, and keeps its value at a hop; the conversion test at a face is
+  made in the diffusion cell's frame.  The dwell's lab time is gamma times the comoving
+  time.  Design note Section "A moving medium" and its D4 section.
 - **Curved spacetime.**  Proper widths and theta in the tetrad frame per cell; the dwell's
   proper time to coordinate time by u^t as `MRWStep` does (`gam * ct / lapse`); the hop
   transform through the two cells' tetrads with the sampled face direction.  The
@@ -447,6 +476,11 @@ transform of Section 3.  Tests: the moving sphere of the random-walk plan (beta 
 0.1, 0.3): lab-frame spectrum and escaping fraction against analog; the Doppler hop
 against a run with the hop shift switched off, to see its size.  Gate: analog agreement
 within errors at beta 0.1, the beta 0.3 deviation recorded.
+
+Done 2026-10-30, not as written.  The hop transform as designed was measured and
+rejected (see the status block and the design note's D4 section): the build is the
+drift of the walker with its fluid, the adiabatic energy change over a dwell, no frame
+change at a hop, and the interface test in the diffusion cell's frame.
 
 ### D5. Kerr-Schild and the general pusher; the XRB
 

@@ -8,16 +8,22 @@
 //!        walk, and the interface with transport photons
 //
 // A cell whose Thomson optical depth across its smallest width is above <ddmc> tau is a
-// diffusion cell.  A photon in one is a walker (Photon::ddmcp set): it sits
-// at the cell's centre, carries no direction, and instead of flying it dwells for an
-// exponential time at the cell's total leakage rate and hops through a face chosen in
-// proportion to the face rates.  A hop into another diffusion cell is a move to that
-// cell's centre; a hop through any other face (a transport cell, a mesh boundary, a
-// block at another refinement level) is its emergence as a transport photon on that face.
-// A transport photon that reaches the face of a diffusion cell is converted with the
-// probability of the asymptotic diffusion-limit boundary condition, and otherwise sent
-// back the way it came.  Absorption acts over the dwell; in this build the scattering is
-// grey and elastic (Thomson), so the energy is unchanged by a dwell.
+// diffusion cell. A photon in one is a walker (Photon::ddmcp set): it carries no
+// direction, and instead of flying it dwells for an exponential time at the cell's total
+// leakage rate and hops through a face chosen in proportion to the face rates.  A hop
+// into another diffusion cell is a move to that cell's centre; a hop through any other
+// face (a transport cell, a mesh boundary, a block at another refinement level) is its
+// emergence as a transport photon on that face.  A transport photon that reaches the
+// face of a diffusion cell is converted with the probability of the asymptotic
+// diffusion-limit boundary condition, and otherwise sent back the way it came.
+// Absorption acts over the dwell; under Compton scattering the energy over a dwell is
+// drawn from the Kompaneets Green's function, under Thomson it is unchanged.
+//
+// In a moving medium the walker's energy is evaluated in the comoving one and it
+// retains that energy at a hop. During a dwell the walker is carried at its cell's
+// fluid velocity through the corresponding cell face, which is t the fluid. The walker
+// loses energy due tothe work done on the expanding fluid, the factor
+// exp(-c t div(beta) / 3) of isotropic radiation.
 //
 // Everything the DDMC lattice needs is rebuilt from the fluid in BuildDDMCRates, so
 // restarts and redistributions carry nothing but the walkers.  The table holds the rates
@@ -83,6 +89,24 @@ Real SampleAsymptoticMu(Real xi) {
   return mu;
 }
 
+//! The drift of a walker along one axis: the fluid's gamma beta varies linearly across
+//! the cell, gb + grad u with u the offset from the centre, so that at the faces it is
+//! the mean of the cell's value and the neighbour's.  DriftTime is the comoving path
+//! at which a walker at u0 reaches uf, HUGE_NUMBER when the flow turns before it does;
+//! DriftMove the offset after a comoving path ct.
+Real DriftTime(Real gb, Real grad, Real u0, Real uf) {
+  const Real w0 = gb + grad*u0, wf = gb + grad*uf;
+  if (w0 == 0. || wf*w0 <= 0.) return HUGE_NUMBER;
+  if (std::abs(grad*(uf - u0)) < 1.e-8*std::abs(w0)) return (uf - u0)/w0;
+  return std::log(wf/w0)/grad;
+}
+
+Real DriftMove(Real gb, Real grad, Real u0, Real ct) {
+  const Real w0 = gb + grad*u0;
+  if (std::abs(grad*ct) < 1.e-8) return u0 + w0*ct;
+  return u0 + w0*std::expm1(grad*ct)/grad;
+}
+
 } // namespace
 
 //----------------------------------------------------------------------------------------
@@ -122,7 +146,9 @@ void MonteCarloBlock::DDMCCellWidths(int i3, int i2, int i1, Real W[3]) const {
 //   boundary face   2 / (3 Delta_c (chi_c Delta_c + 2 lambda))
 // with chi the Thomson extinction and Delta the width along the face's axis, in cm; a
 // direction the mesh does not resolve (one cell) has no rate.  Slots 0..5 are the
-// faces (-x1, +x1, -x2, +x2, -x3, +x3), 6 the sum, 7..9 the widths in cm.
+// faces (-x1, +x1, -x2, +x2, -x3, +x3), 6 the sum, 7..9 the widths in cm, 10 the
+// divergence of the fluid velocity in units of c per cm (centred on the neighbours),
+// which a dwell's adiabatic energy change needs; zero when the medium is at rest.
 
 void MonteCarloBlock::BuildDDMCRates() {
   if (ddmc_cell.GetSize() == 0) return;
@@ -226,6 +252,18 @@ void MonteCarloBlock::BuildDDMCRates() {
           }
         }
         ddmc_rate(DDMC_RATE_TOT, k, j, i) = total;
+        if (boosts && vel.GetSize() > 0) {
+          Real div = 0.;
+          for (int axis=0; axis<3; ++axis) {
+            if ((axis == 1 && !active2) || (axis == 2 && !active3)) continue;
+            const int di = (axis == 0) ? 1 : 0, dj = (axis == 1) ? 1 : 0;
+            const int dk = (axis == 2) ? 1 : 0;
+            const Real bp = vel(k+dk,j+dj,i+di,axis+1)/vel(k+dk,j+dj,i+di,0);
+            const Real bm = vel(k-dk,j-dj,i-di,axis+1)/vel(k-dk,j-dj,i-di,0);
+            div += (bp - bm)/(2.*W[axis]*l_cgs);
+          }
+          ddmc_rate(DDMC_RATE_DIV, k, j, i) = div;
+        }
         if (ddmc_jump(k,j,i) != 0) ++ncell_jump;
       }
     }
@@ -301,14 +339,15 @@ void PhotonPusher::DDMCPlaceAtCentre(Photon *pphot, int ip, int i3, int i2, int 
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void PhotonPusher::DDMCSetWalker(Photon *pphot, int ip)
+//! \fn void PhotonPusher::DDMCSetWalker(Photon *pphot, int ip, bool comoving)
 //! \brief the columns of a walker resident in an active cell: the energy comoving (the
-//!        caller has put the lab energy and direction in place), no direction, no
-//!        polarization, no flight, the opacities those of the cell at that energy
+//!        caller has put the lab energy and direction in place, unless it says the
+//!        energy is comoving already), no direction, no polarization, no flight, the
+//!        opacities those of the cell at that energy
 
-void PhotonPusher::DDMCSetWalker(Photon *pphot, int ip) {
+void PhotonPusher::DDMCSetWalker(Photon *pphot, int ip, bool comoving) {
   MonteCarloBlock *pmcb = pmy_mcb;
-  if (boosts) pmcb->TransformToComoving(pphot, ip, ip);
+  if (boosts && !comoving) pmcb->TransformToComoving(pphot, ip, ip);
   pphot->k1p[ip] = pphot->k2p[ip] = pphot->k3p[ip] = 0.;
   if (IsPolarized(pmy_mc->polarized)) {
     pphot->sqp[ip] = 0.;
@@ -360,30 +399,36 @@ void PhotonPusher::DDMCRelease(Photon *pphot, MCRandom *pran, int ip, bool energ
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void PhotonPusher::DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face)
+//! \fn void PhotonPusher::DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face,
+//!                                   bool advective)
 //! \brief the walker leaves the DDMC lattice through face (0..5) of its cell: a transport
 //!        photon at a uniform point of that face, a hair inside the cell, moving outward
 //!        with mu from W(mu) (emergence = asymptotic) or uniform (isotropic),
 //!        unpolarized, with a fresh flight ahead of it.  The crossing is the pusher's
 //!        first step, so a mesh boundary is met by its boundary function as usual.
+//!        Carried through the face by its fluid (advective), the walker leaves from
+//!        where it is on the face, isotropic outward in the comoving frame, and
+//!        deposits no flux: the lab moments of the dwell carry the advective flux.
 
-void PhotonPusher::DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face) {
+void PhotonPusher::DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face,
+                              bool advective) {
   MonteCarloBlock *pmcb = pmy_mcb;
   const int axis = face/2;
   const bool up = (face & 1) != 0;
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
   // the crossing deposits the flux and force of the leaving side
-  pmcb->DDMCHopDeposit(pphot->type[ip], i3, i2, i1, axis, up ? 1. : -1.,
-                       pphot->wp[ip]*pphot->ep[ip], pphot->scp[ip] + pphot->acp[ip]);
+  if (!advective)
+    pmcb->DDMCHopDeposit(pphot->type[ip], i3, i2, i1, axis, up ? 1. : -1.,
+                         pphot->wp[ip]*pphot->ep[ip], pphot->scp[ip] + pphot->acp[ip]);
   // position
   Real lo[3] = {pcoord->x1f(i1), pcoord->x2f(i2), pcoord->x3f(i3)};
   Real hi[3] = {pcoord->x1f(i1+1), pcoord->x2f(i2+1), pcoord->x3f(i3+1)};
-  Real x[3];
+  Real x[3] = {pphot->x1p[ip], pphot->x2p[ip], pphot->x3p[ip]};
   for (int a=0; a<3; ++a) {
     if (a == axis) {
       x[a] = up ? hi[a] - kFaceNudge*(hi[a] - lo[a])
                 : lo[a] + kFaceNudge*(hi[a] - lo[a]);
-    } else {
+    } else if (!advective) {
       x[a] = lo[a] + pran->uniform()*(hi[a] - lo[a]);
     }
   }
@@ -392,7 +437,7 @@ void PhotonPusher::DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face) {
   pphot->x3p[ip] = x[2];
   // direction, in the local orthonormal basis of the legacy pushers
   const Real xi = pran->uniform();
-  const Real mu = (pmy_mc->ddmc_emergence == DDMC_EMERGE_ASYMPTOTIC)
+  const Real mu = (pmy_mc->ddmc_emergence == DDMC_EMERGE_ASYMPTOTIC && !advective)
                   ? SampleAsymptoticMu(xi) : std::max(xi, 1.e-12);
   Real k[3];
   FaceDirection(axis, up ? 1. : -1., mu, 2.*PI*pran->uniform(), k);
@@ -408,22 +453,25 @@ void PhotonPusher::DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face) {
   pphot->scp[ip] = pmcb->ScatteringOpacity(pmcb, pphot, ip);
   if (boosts) pmcb->TransformToCoordinate(pphot, ip, ip);
   pmcb->nddmc[DDMC_EMERGED]++;
+  if (advective) pmcb->nddmc[DDMC_EMERGED_ADVECT]++;
   if (pmcb->ddmc_jump(i3,i2,i1) & (1 << face)) pmcb->nddmc[DDMC_EMERGED_JUMP]++;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void PhotonPusher::DDMCArrive(Photon *pphot, int ip)
-//! \brief a walker that has just come through a block face (ddmcp = 2 + face of its
-//!        new cell): its energy into this cell's frame, the entering side's deposit
+//! \brief a walker that has just come through a block face with its comoving energy
+//!        (ddmcp = 2 + face of its new cell after a hop, 8 + face carried by the fluid):
+//!        its columns in this cell, and the entering side's deposit after a hop
 
 void PhotonPusher::DDMCArrive(Photon *pphot, int ip) {
   MonteCarloBlock *pmcb = pmy_mcb;
-  const int face = pphot->ddmcp[ip] - 2;
+  const bool hop = (pphot->ddmcp[ip] < 8);
+  const int face = (pphot->ddmcp[ip] - 2) % 6;
   const int axis = face/2;
   // in through the lower face means moving along +axis
   const Real sign = (face & 1) ? -1. : 1.;
-  DDMCSetWalker(pphot, ip);
-  if (pmcb->ddmc_cell(pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip]) != 0)
+  DDMCSetWalker(pphot, ip, true);
+  if (hop && pmcb->ddmc_cell(pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip]) != 0)
     pmcb->DDMCHopDeposit(pphot->type[ip], pphot->i3p[ip], pphot->i2p[ip],
                          pphot->i1p[ip], axis, sign, pphot->wp[ip]*pphot->ep[ip],
                          pphot->scp[ip] + pphot->acp[ip]);
@@ -431,9 +479,12 @@ void PhotonPusher::DDMCArrive(Photon *pphot, int ip) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void PhotonPusher::DDMCHop(Photon *pphot, MCRandom *pran, int ip, int face)
-//! \brief an interior hop through face (0..5): the walker to the neighbour's centre
-//!        with its energy in the neighbour's frame; a neighbour in the ghost zone means
-//!        the walker leaves the block, carrying the face it enters through
+//! \brief an interior hop through face (0..5): the walker translated by one cell along
+//!        the face's axis, keeping its offset from the centre (at the centre of a cell
+//!        it entered as a photon, elsewhere where the drift has carried it, so that a
+//!        hop neither advances nor sets back the drift), with its comoving energy
+//!        unchanged; a neighbour in the ghost zone means the walker leaves the block,
+//!        carrying the face it enters through
 
 void PhotonPusher::DDMCHop(Photon *pphot, MCRandom *pran, int ip, int face) {
   MonteCarloBlock *pmcb = pmy_mcb;
@@ -447,36 +498,34 @@ void PhotonPusher::DDMCHop(Photon *pphot, MCRandom *pran, int ip, int face) {
   const int n3 = i3 + ((axis == 2) ? (up ? 1 : -1) : 0);
   pmcb->DDMCHopDeposit(type, i3, i2, i1, axis, sign, pphot->wp[ip]*pphot->ep[ip],
                        pphot->scp[ip] + pphot->acp[ip]);
-  // The energy changes frame through a direction drawn on the face: comoving in this
-  // cell to the lab here, and in the new cell back to comoving; the direction is then
-  // dropped.  Nothing to do when the medium is at rest.
-  if (boosts) {
-    Real k[3];
-    FaceDirection(axis, sign, SampleAsymptoticMu(pran->uniform()),
-                  2.*PI*pran->uniform(), k);
-    pphot->k1p[ip] = k[0];
-    pphot->k2p[ip] = k[1];
-    pphot->k3p[ip] = k[2];
-    pmcb->TransformToCoordinate(pphot, ip, ip);
-  }
   const bool ghost = (n1 < pmcb->is || n1 > pmcb->ie || n2 < pmcb->js || n2 > pmcb->je
                       || n3 < pmcb->ks || n3 > pmcb->ke);
-  DDMCPlaceAtCentre(pphot, ip, n3, n2, n1);
+  // the same fraction of the width from the lower face in the neighbour
+  if (axis == 0) {
+    const Real f = (pphot->x1p[ip] - pcoord->x1f(i1))
+                   /(pcoord->x1f(i1+1) - pcoord->x1f(i1));
+    pphot->x1p[ip] = pcoord->x1f(n1) + f*(pcoord->x1f(n1+1) - pcoord->x1f(n1));
+  } else if (axis == 1) {
+    const Real f = (pphot->x2p[ip] - pcoord->x2f(i2))
+                   /(pcoord->x2f(i2+1) - pcoord->x2f(i2));
+    pphot->x2p[ip] = pcoord->x2f(n2) + f*(pcoord->x2f(n2+1) - pcoord->x2f(n2));
+  } else {
+    const Real f = (pphot->x3p[ip] - pcoord->x3f(i3))
+                   /(pcoord->x3f(i3+1) - pcoord->x3f(i3));
+    pphot->x3p[ip] = pcoord->x3f(n3) + f*(pcoord->x3f(n3+1) - pcoord->x3f(n3));
+  }
   pmcb->nddmc[DDMC_HOP]++;
   pmcb->lb_nstep++;
   if (!ghost) {
     pphot->i1p[ip] = n1;
     pphot->i2p[ip] = n2;
     pphot->i3p[ip] = n3;
-    DDMCSetWalker(pphot, ip);
+    DDMCSetWalker(pphot, ip, true);
     pmcb->DDMCHopDeposit(type, n3, n2, n1, axis, sign, pphot->wp[ip]*pphot->ep[ip],
                          pphot->scp[ip] + pphot->acp[ip]);
     return;
   }
-  // out of the block: the lab energy and direction ride along, the face of the new cell
-  // the walker enters through is encoded in the flag, and the cell update hands the
-  // walker to the neighbour block (the indices still name this cell, so the update
-  // sees the crossing)
+  // photon sample leaves the block through this face
   pphot->ddmcp[ip] = 2 + 2*axis + (up ? 0 : 1);
   pmcb->nddmc[DDMC_HOP_BLOCK]++;
   UpdateZone(pphot, ip);
@@ -485,6 +534,60 @@ void PhotonPusher::DDMCHop(Photon *pphot, MCRandom *pran, int ip, int face) {
     // boundary face
     pphot->PrintPhoton("Warning: walker hopped out of its block through a "
                        "face that is not a block face, destroyed", ip);
+    pphot->statp[ip] = DESTROYED;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void PhotonPusher::DDMCAdvect(Photon *pphot, MCRandom *pran, int ip, int face)
+//! \brief The advected walker has reached a face of its cell: into a diffusion
+//!        neighbour it crosses with its energy unchanged and nothing deposited.
+//!        It is placed  inside the neighbour (at the neighbour's centre along
+//!        the axis when that cell's flow opposes the crossing, so that a converging flow
+//!        does not shuttle it across the face). Through any other face it emerges.
+
+void PhotonPusher::DDMCAdvect(Photon *pphot, MCRandom *pran, int ip, int face) {
+  MonteCarloBlock *pmcb = pmy_mcb;
+  const int axis = face/2;
+  const bool up = (face & 1) != 0;
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  const int n1 = i1 + ((axis == 0) ? (up ? 1 : -1) : 0);
+  const int n2 = i2 + ((axis == 1) ? (up ? 1 : -1) : 0);
+  const int n3 = i3 + ((axis == 2) ? (up ? 1 : -1) : 0);
+  if (pmcb->ddmc_cell(n3,n2,n1) == 0) {
+    DDMCEmerge(pphot, pran, ip, face, true);
+    return;
+  }
+  const Real lo = (axis == 0) ? pcoord->x1f(n1)
+                  : (axis == 1) ? pcoord->x2f(n2) : pcoord->x3f(n3);
+  const Real hi = (axis == 0) ? pcoord->x1f(n1+1) : (axis == 1) ? pcoord->x2f(n2+1)
+                                                  : pcoord->x3f(n3+1);
+  const Real gb_n = pmcb->vel(n3,n2,n1,axis+1);
+  const bool opposes = up ? (gb_n < 0.) : (gb_n > 0.);
+  Real x;
+  if (opposes) x = 0.5*(lo + hi);
+  else x = up ? lo + kFaceNudge*(hi - lo) : hi - kFaceNudge*(hi - lo);
+  if (axis == 0) pphot->x1p[ip] = x;
+  else if (axis == 1) pphot->x2p[ip] = x;
+  else pphot->x3p[ip] = x;
+  const bool ghost = (n1 < pmcb->is || n1 > pmcb->ie || n2 < pmcb->js || n2 > pmcb->je
+                      || n3 < pmcb->ks || n3 > pmcb->ke);
+  pmcb->nddmc[DDMC_ADVECT]++;
+  pmcb->lb_nstep++;
+  if (!ghost) {
+    pphot->i1p[ip] = n1;
+    pphot->i2p[ip] = n2;
+    pphot->i3p[ip] = n3;
+    DDMCSetWalker(pphot, ip, true);
+    return;
+  }
+  // out of the block, owed no deposit on arrival
+  pphot->ddmcp[ip] = 8 + 2*axis + (up ? 0 : 1);
+  pmcb->nddmc[DDMC_HOP_BLOCK]++;
+  UpdateZone(pphot, ip);
+  if (pphot->statp[ip] == EVOLVING) {
+    pphot->PrintPhoton("Warning: walker carried out of its block through a face that "
+                       "is not a block face, destroyed", ip);
     pphot->statp[ip] = DESTROYED;
   }
 }
@@ -634,18 +737,53 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
     // the fluid's velocity on the lab legs, for the moments and the time
     Real beta[3] = {0., 0., 0.};
     Real gam = 1.;
-    if (boosts && pmcb->vel.GetSize() > 0) {
+    const bool moving = (boosts && pmcb->vel.GetSize() > 0);
+    if (moving) {
       gam = pmcb->vel(i3,i2,i1,0);
       for (int m=0; m<3; ++m) beta[m] = pmcb->vel(i3,i2,i1,m+1)/gam;
     }
-    // the dwell: comoving path c t, capped by the cycle's remaining lab time
+    // the walker is carried with its fluid, whose gamma beta along each axis varies
+    // linearly across the cell between the neighbours' values (a lab displacement
+    // gamma beta c t per comoving path c t): the comoving path at which the drift
+    // reaches a face of the cell, and that face
+    Real ct_drift = HUGE_NUMBER;
+    int face_drift = -1;
+    Real u[3] = {0., 0., 0.}, grad[3] = {0., 0., 0.}, half[3] = {0., 0., 0.};
+    if (moving) {
+      const Real x[3] = {pphot->x1p[ip], pphot->x2p[ip], pphot->x3p[ip]};
+      const Real lo[3] = {pcoord->x1f(i1), pcoord->x2f(i2), pcoord->x3f(i3)};
+      const Real hi[3] = {pcoord->x1f(i1+1), pcoord->x2f(i2+1), pcoord->x3f(i3+1)};
+      for (int a=0; a<3; ++a) {
+        if ((a == 1 && pmcb->nx2 == 1) || (a == 2 && pmcb->nx3 == 1)) continue;
+        half[a] = 0.5*(hi[a] - lo[a])*l_cgs;
+        u[a] = (x[a] - 0.5*(lo[a] + hi[a]))*l_cgs;
+        const int di = (a == 0) ? 1 : 0, dj = (a == 1) ? 1 : 0, dk = (a == 2) ? 1 : 0;
+        grad[a] = (pmcb->vel(i3+dk,i2+dj,i1+di,a+1) - pmcb->vel(i3-dk,i2-dj,i1-di,a+1))
+                  /(4.*half[a]);
+        const Real gb = gam*beta[a];
+        const Real w0 = gb + grad[a]*u[a];
+        if (w0 == 0.) continue;
+        const Real d = DriftTime(gb, grad[a], u[a], (w0 > 0.) ? half[a] : -half[a]);
+        if (d < ct_drift) {
+          ct_drift = std::max(d, 0.);
+          face_drift = 2*a + ((w0 > 0.) ? 1 : 0);
+        }
+      }
+    }
+    // the dwell: comoving path c t, capped by the cycle's remaining lab time and by
+    // the drift reaching a face
     Real ct_b = HUGE_NUMBER;
     if (pphot->dtp[ip] < 0.5*HUGE_NUMBER) ct_b = pphot->dtp[ip]*c_code*l_cgs/gam;
     Real ct = -std::log(std::max(1. - pran->uniform(), 1.e-300))/ktot;
-    bool stop = false;
+    bool stop = false, advect = false;
     if (ct >= ct_b) {
       ct = std::max(ct_b, 0.);
       stop = true;
+    }
+    if (ct >= ct_drift) {
+      ct = ct_drift;
+      stop = false;
+      advect = true;
     }
     // energy and survival over the dwell.  Compton: the energy from the Kompaneets
     // Green's function at y = theta times the scatterings the dwell stands for (the
@@ -676,6 +814,12 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
     } else if (pphot->acp[ip] > 0.) {
       surv = std::exp(-pphot->acp[ip]*ct);
     }
+    // the work done on the fluid by isotropic radiation over the dwell, through the
+    // divergence of the velocity (an expanding fluid cools the radiation)
+    if (moving) {
+      const Real div = pmcb->ddmc_rate(MonteCarloBlock::DDMC_RATE_DIV, i3, i2, i1);
+      if (div != 0.) pphot->ep[ip] *= std::exp(-ct*div/3.);
+    }
     // the fraction of the dwell the walker is present in expectation: the mean weight
     // along it for the time-spent estimator, and the scatterings it stood for
     const Real tau_abs = (surv < 1.) ? -std::log(std::max(surv, 1.e-300)) : 0.;
@@ -696,10 +840,22 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
     }
     if (pmcb->call_srcterms && pphot->wp[ip]*pphot->ep[ip] != w0*e0)
       pmcb->UpdateSourceTerms(pphot, e0, w0, 0., 0., 0., ip);
-    // time (lab), the scatterings the dwell stands for, and what a user hook reads
+    // time (lab) and position (carried by the fluid), the scatterings the dwell stands
+    // for, and what a user hook reads
     const Real dlab = gam*ct/l_cgs;
     pphot->x0p[ip] += dlab;
     pphot->dtp[ip] -= dlab/c_code;
+    if (moving) {
+      Real du[3];
+      for (int a=0; a<3; ++a) {
+        du[a] = (half[a] > 0.) ? DriftMove(gam*beta[a], grad[a], u[a], ct) - u[a] : 0.;
+        // the drift is confined to the cell; an advective crossing sets the coordinate
+        du[a] = std::max(std::min(du[a], half[a] - u[a]), -half[a] - u[a]);
+      }
+      pphot->x1p[ip] += du[0]/l_cgs;
+      pphot->x2p[ip] += du[1]/l_cgs;
+      pphot->x3p[ip] += du[2]/l_cgs;
+    }
     pphot->nscp[ip] += static_cast<int>(std::lround(nscat*fsurv));
     pmcb->nddmc_scat += nscat*fsurv;
     pmcb->nddmc[DDMC_DWELL]++;
@@ -720,6 +876,10 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
     if (stop) {
       pmcb->nddmc[DDMC_STOP]++;
       break;
+    }
+    if (advect) {
+      DDMCAdvect(pphot, pran, ip, face_drift);
+      continue;
     }
     // the face, in proportion to the rates
     Real v = pran->uniform()*ktot;
@@ -794,11 +954,22 @@ bool PhotonPusher::DDMCFaceTest(Photon *pphot, MCRandom *pran, int ip, int face,
     return false;
   }
 
+  // the boundary condition is in the frame of the diffusion cell: the photon's
+  // direction and energy are taken there (the indices lent for the transform), and
+  // stay there until it is converted or sent back
+  if (boosts) {
+    pphot->i1p[ip] = n1;
+    pphot->i2p[ip] = n2;
+    pphot->i3p[ip] = n3;
+    pmcb->TransformToComoving(pphot, ip, ip);
+    pphot->i1p[ip] = i1;
+    pphot->i2p[ip] = i2;
+    pphot->i3p[ip] = i3;
+  }
   Real k[3] = {pphot->k1p[ip], pphot->k2p[ip], pphot->k3p[ip]};
   const Real knorm = std::sqrt(SQR(k[0]) + SQR(k[1]) + SQR(k[2]));
   const Real mu = (knorm > 0.) ? std::abs(k[axis])/knorm : 1.;
-  // the cell beyond, with its absorption at the photon's energy (lab energy here, the
-  // comoving one to first order)
+  // the cell beyond, with its absorption at the photon's (comoving) energy
   const Real chi_n = DDMCNeighbourExtinction(pphot, ip, n3, n2, n1);
   Real Wn[3];
   pmcb->DDMCCellWidths(n3, n2, n1, Wn);
@@ -824,17 +995,22 @@ bool PhotonPusher::DDMCFaceTest(Photon *pphot, MCRandom *pran, int ip, int face,
       pphot->i1p[ip] = n1;
       pphot->i2p[ip] = n2;
       pphot->i3p[ip] = n3;
-      DDMCSetWalker(pphot, ip);
+      DDMCSetWalker(pphot, ip, true);
       pmcb->DDMCHopDeposit(pphot->type[ip], n3, n2, n1, axis, sign,
                            pphot->wp[ip]*pphot->ep[ip], pphot->scp[ip] + pphot->acp[ip]);
       return true;
     }
-    // into the neighbour block as a walker owed its entering deposit there; the lab
-    // energy and direction ride along for the frame change on arrival
+    // into the neighbour block as a walker owed its entering deposit there, with its
+    // energy in that cell's frame already, as every walker that crosses a block face
+    // carries the comoving energy
+    pphot->i1p[ip] = n1;
+    pphot->i2p[ip] = n2;
+    pphot->i3p[ip] = n3;
+    DDMCSetWalker(pphot, ip, true);
+    pphot->i1p[ip] = i1;
+    pphot->i2p[ip] = i2;
+    pphot->i3p[ip] = i3;
     pphot->ddmcp[ip] = 2 + 2*axis + (up ? 0 : 1);
-    pphot->taup[ip] = -1.;
-    pphot->strp[ip] = 0.;
-    pphot->nmvp[ip] = 0;
     pmcb->nddmc[DDMC_HOP_BLOCK]++;
     UpdateZone(pphot, ip);
     if (pphot->statp[ip] == EVOLVING) {
@@ -844,13 +1020,23 @@ bool PhotonPusher::DDMCFaceTest(Photon *pphot, MCRandom *pran, int ip, int face,
     }
     return true;
   }
-  // back into the cell it came from: an isotropic inward direction, a hair inside
+  // back into the cell it came from: an isotropic inward direction in the diffusion
+  // cell's frame, a hair inside
   pmcb->nddmc[DDMC_RETURN]++;
   FaceDirection(axis, -sign, std::max(pran->uniform(), 1.e-12),
                 2.*PI*pran->uniform(), k);
   pphot->k1p[ip] = k[0];
   pphot->k2p[ip] = k[1];
   pphot->k3p[ip] = k[2];
+  if (boosts) {
+    pphot->i1p[ip] = n1;
+    pphot->i2p[ip] = n2;
+    pphot->i3p[ip] = n3;
+    pmcb->TransformToCoordinate(pphot, ip, ip);
+    pphot->i1p[ip] = i1;
+    pphot->i2p[ip] = i2;
+    pphot->i3p[ip] = i3;
+  }
   const Real lo = (axis == 0) ? pcoord->x1f(i1)
                   : (axis == 1) ? pcoord->x2f(i2) : pcoord->x3f(i3);
   const Real hi = (axis == 0) ? pcoord->x1f(i1+1) : (axis == 1) ? pcoord->x2f(i2+1)

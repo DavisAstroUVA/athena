@@ -124,11 +124,12 @@ public:
   void DDMCWalk(Photon *pphot, MCRandom *pran, int ip);
   void DDMCConvert(Photon *pphot, int ip);
   void DDMCRelease(Photon *pphot, MCRandom *pran, int ip, bool energy = false);
-  void DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face);
+  void DDMCEmerge(Photon *pphot, MCRandom *pran, int ip, int face, bool advective = false);
   void DDMCArrive(Photon *pphot, int ip);
   void DDMCHop(Photon *pphot, MCRandom *pran, int ip, int face);
+  void DDMCAdvect(Photon *pphot, MCRandom *pran, int ip, int face);
   void DDMCPlaceAtCentre(Photon *pphot, int ip, int i3, int i2, int i1);
-  void DDMCSetWalker(Photon *pphot, int ip);
+  void DDMCSetWalker(Photon *pphot, int ip, bool comoving = false);
   //! the walker's six face rates and their sum
   Real DDMCRates(Photon *pphot, int ip, Real rate[6]);
   Real DDMCNeighbourExtinction(Photon *pphot, int ip, int n3, int n2, int n1);
