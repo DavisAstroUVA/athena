@@ -70,8 +70,6 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
     Real tauremaining = (pphot->taup[ip] >= 0.) ? pphot->taup[ip] : GetOpticalDepth(pran);
     Real step = StepSize(pphot,ip);
     //printf("step %g\n",step);
-    Real path_length;
-    Real k1, k2, k3;
     // Steps already taken in this free flight, plus the ones taken here.  Counted in a
     // local so it stays in a register across a body that calls out to AdvanceStep,
     // UpdateMoments and UserWorkInMove.
@@ -117,35 +115,10 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
         chi = abs_tau ? pphot->scp[ip] : (pphot->scp[ip] + pphot->acp[ip]);
         oi1 = pphot->i1p[ip]; oi2 = pphot->i2p[ip]; oi3 = pphot->i3p[ip];
       }
-      bool mrw_success = false;
       // multiplier of the step that ends the flight, applied once the step is known not
       // to have left the domain
       Real interact_alpha = 1.;
 
-      Real dl_face = 0.;
-      if ((mrw_) && (resonance)) {
-        // Get distance from photon to closest cell face
-        Real dw3, dw2, dw1;
-        Real dx3f = fabs(pcoord->x3f(pphot->i3p[ip]) - pcoord->x3f(pphot->i3p[ip] + 1));
-        Real dx2f = fabs(pcoord->x2f(pphot->i2p[ip]) - pcoord->x2f(pphot->i2p[ip] + 1));
-        Real dx1f = fabs(pcoord->x1f(pphot->i1p[ip]) - pcoord->x1f(pphot->i1p[ip] + 1));
-        Real x1v = (pcoord->x1f(pphot->i1p[ip]) + pcoord->x1f(pphot->i1p[ip] + 1))/2.;
-        Real x2v = (pcoord->x2f(pphot->i2p[ip]) + pcoord->x2f(pphot->i2p[ip] + 1))/2.;
-        dw3 = dx3f * x1v * sin(x2v);
-        dw2 = dx2f * x1v;
-        Real dmin0 = std::min(dx1f, dw2);
-        dl_face = std::min(dmin0, dw3); // Distance to nearest face
-
-        Real tauacc = 1000.; //BCM: make this an input parameter
-        // Try to perform MRW acceleration if optical depth is large enough
-        if (dl_face*l_cgs*chi > tauacc) {
-          MRWResonanceAcceleration(pphot,pran,dl_face,tauacc,path_length,k1,k2,k3,ip);
-          mrw_success = true;
-          // the photon has been relocated, so the cached connection no longer applies
-          acon_valid = false;
-          metric_valid = false;
-        }
-      }
       // MRW acceleration for electron scattering
       if (mrw_ && !resonance && MRWTrigger(pphot,ip,chi)
           && MRWStep(pphot,pran,ip)) {
@@ -162,7 +135,7 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
         if (ptraj != NULL) ptraj->AddToTrajectory(pphot,ip);
         continue;
       }
-      if (!mrw_success) {// Acceleration not triggered - take standard step
+      {
         // Stop at the nearest cell face
         step = std::min(step, FaceStep(pphot,ip));
         Real tau_step = chi * l_cgs * step * pphot->ep[ip];
@@ -191,15 +164,6 @@ void GeneralPusher::Move(Photon *pphot, int ips, int ipe) {
           }
         }
         ApplyStretch(pphot,ip,alpha,tau_step);
-      } else {
-        // Photon has been given a new position on sphere of radius dl_face
-        // Set exit parameters and continue the loop over photons
-        step = dl_face;
-        tauremaining = 0.;
-        if (pmcb->call_moments) {
-          // SWD needs to use correct dl here
-          pmcb->UpdateMomentsAcceleration(pphot,step,path_length,k1,k2,k3,1.,ip);
-        }
       }
 
       // Check if photon changed cells and set flags for caching connection, metric

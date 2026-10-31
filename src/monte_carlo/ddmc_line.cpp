@@ -346,9 +346,9 @@ Real PhotonPusher::DDMCLineRates(Photon *pphot, int ip, Real rate[2]) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void PhotonPusher::DDMCLineHop(Photon *pphot, MCRandom *pran, int ip, int side)
-//! \brief a hop through the frequency face below (side 0) or above (1) the walker's bin:
+//! \brief A hop through the frequency face below (side 0) or above (1) the walker's bin:
 //!        into a node of its cell, with the energy drawn uniformly in that bin and the
-//!        extinction of that bin; into any other bin, its emergence in frequency
+//         extinction of that bin
 
 void PhotonPusher::DDMCLineHop(Photon *pphot, MCRandom *pran, int ip, int side) {
   MonteCarloBlock *pmcb = pmy_mcb;

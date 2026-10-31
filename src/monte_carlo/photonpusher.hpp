@@ -151,12 +151,6 @@ public:
   void DDMCLineHop(Photon *pphot, MCRandom *pran, int ip, int side);
   //! emergence through a frequency face into bin b, the energy drawn in it or kept
   void DDMCLineEmerge(Photon *pphot, MCRandom *pran, int ip, int b, bool draw);
-  // Resonant-scattering acceleration (general pusher)
-  virtual Real SampleEscapeTime(MCRandom *pran, Real decayRate, Real sphereRadius,
-                                Real diffusionTime);
-  virtual void MRWResonanceAcceleration(Photon *pphot, MCRandom *pran, Real dist,
-                               Real tauacc, Real &path_length, Real &k1, Real &k2,
-                               Real &k3, int ip);
 
 };
 

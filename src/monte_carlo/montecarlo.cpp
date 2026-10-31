@@ -267,6 +267,13 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     general_pusher_flag = pin->GetOrAddBoolean("montecarlo","general_pusher",false);
   scattering_meth = GetScatteringFlag(pin->GetOrAddString("montecarlo","scattering",
                                                           "none"));
+  if (mrw && scattering_meth == SCATRES) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+        << "the random walk (<randomwalk> enable) has no step for resonance scattering; "
+        << "use the frequency lattice, <ddmc> enable with line = lya" << std::endl;
+    ATHENA_ERROR(msg);
+  }
   // the frequency lattice of a resonance line, read once the scattering is known
   SetupDDMCLine(pin);
   // The random-walk step and the DDMC lattice's dwell with Compton scattering draw the

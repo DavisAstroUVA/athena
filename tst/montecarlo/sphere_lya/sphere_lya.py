@@ -18,6 +18,12 @@ a point source at the centre at line centre.  Four checks:
             (default 1e6) and --temp-analog (default 10 K, a tau0 = 1.5e4, where the kernel is
             affordable and the medium diffusive): the two-sample Kolmogorov distance of
             the escaping x and of the escape path within --gate-analog times the scale
+  moving    the sphere in a homologous expansion (or a uniform flow, --profile-moving)
+            at --tau-moving (1e6) and --temp-moving (10 K) with the surface velocity at
+            each --vel-moving (1 3 10 Doppler widths), the lattice at each --nx-moving
+            (16 32) against one analog run per velocity: the two-sample distance of the
+            escaping x within --gate-analog scales and the red fraction within that many
+            sigma; the escape paths and the peaks are reported
   scan      the slab at --atau-scan (default 1e6) over --nz-scan with the bin width on
             Smith et al. (2018)'s matching line dx = (10 a tau0 / nz^2)^(1/3), the
             Kolmogorov distance from Neufeld and the cpu time per photon at each
@@ -79,11 +85,13 @@ CDF = {'slab': cdf_neufeld, 'sphere': cdf_dijkstra}
 
 
 def write_deck(filename, name, geometry, temp, tau0, nphot, iseed, ddmc, dx, xmax, core,
-               nz=32, nx=32, mcranks=1, ddmc_tau=3.):
+               nz=32, nx=32, mcranks=1, ddmc_tau=3., vel=0., profile='homologous'):
     """the slab: nz cells along x1 over +-R0, one periodic cell of 100 R0 in x2 and x3,
     escape at the x1 faces, the escape sphere at 100 R0; the sphere: nx^3 cells over
     +-1.25 R0 offset half a cell so the origin is a cell centre, escape at R0.  The
-    deck's tau is the line-centre depth over the escape radius, so the slab scales it"""
+    deck's tau is the line-centre depth over the escape radius, so the slab scales it.
+    vel > 0 (units of c) is a homologous expansion with that velocity at the radius,
+    with boosts on"""
     if geometry == 'slab':
         radius = 100.*R0
         tau = tau0*radius/R0
@@ -128,6 +136,7 @@ absorption = none
 abs_method = weight
 polarized  = none
 verbose    = true
+{'boosts     = true' if vel > 0. else ''}
 
 <ddmc>
 enable     = {'true' if ddmc else 'false'}
@@ -145,6 +154,8 @@ tau      = {tau:.8e}
 radius   = {radius:.6e}
 x0       = 0.
 heabund  = 0.09
+{f'velocity = {vel:.8e}' if vel > 0. else ''}
+{f'velocity_profile = {profile}' if vel > 0. else ''}
 """
     open(filename, 'w').write(s)
 
@@ -154,12 +165,17 @@ def run(args, workdir, deck, name, mcranks):
     cmd = [exe, '-i', deck, '-d', workdir]
     if mcranks > 1:
         cmd = ['mpirun', '-n', str(mcranks)] + cmd
-    for f in glob.glob(os.path.join(workdir, f'{name}.*')):
-        os.remove(f)
     log = os.path.join(workdir, f'{name}.log')
-    with open(log, 'w') as f:
-        ret = subprocess.call(cmd, stdout=f, stderr=subprocess.STDOUT)
     files = sorted(glob.glob(os.path.join(workdir, f'{name}.out1.*.list')))
+    reuse = args.reuse and files and os.path.exists(log) and 'ntot' in open(log).read()
+    if not reuse:
+        for f in glob.glob(os.path.join(workdir, f'{name}.*')):
+            os.remove(f)
+        with open(log, 'w') as f:
+            ret = subprocess.call(cmd, stdout=f, stderr=subprocess.STDOUT)
+        files = sorted(glob.glob(os.path.join(workdir, f'{name}.out1.*.list')))
+    else:
+        ret = 0
     if ret != 0 or not files:
         sys.exit(f"athena exited with {ret} and wrote {len(files)} list files; see {log}")
     report = {}
@@ -322,8 +338,11 @@ def parse_args(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--path', default=os.path.join(HERE, '..', '..', '..'))
     ap.add_argument('--workdir', required=True)
-    ap.add_argument('--checks', nargs='+', default=['slab', 'sphere', 'analog', 'scan'],
-                    choices=['slab', 'sphere', 'analog', 'scan'])
+    ap.add_argument('--reuse', action='store_true',
+                    help='keep a run already in the workdir (its lists and a complete log)')
+    ap.add_argument('--checks', nargs='+',
+                    default=['slab', 'sphere', 'analog', 'scan', 'moving'],
+                    choices=['slab', 'sphere', 'analog', 'scan', 'moving'])
     ap.add_argument('--atau', type=float, nargs='+', default=[1.e5, 1.e6, 1.e7])
     ap.add_argument('--temp', type=float, default=1.e4, help='gas temperature, K')
     ap.add_argument('--nz', type=int, default=32, help='cells across the slab')
@@ -340,6 +359,16 @@ def parse_args(argv=None):
     ap.add_argument('--tau-analog', type=float, default=1.e6)
     ap.add_argument('--temp-analog', type=float, default=10.)
     ap.add_argument('--nphot-analog', type=int, default=1000)
+    ap.add_argument('--tau-moving', type=float, default=1.e6)
+    ap.add_argument('--temp-moving', type=float, default=10.)
+    ap.add_argument('--vel-moving', type=float, nargs='+', default=[1., 3., 10.],
+                    help='surface velocities of the expanding sphere in Doppler widths')
+    ap.add_argument('--profile-moving', default='homologous', choices=['homologous', 'uniform'],
+                    help='the flow of the moving check: a homologous expansion with the '
+                         'velocity at the radius, or a uniform flow along z (no drift in '
+                         'frequency, only the frame bookkeeping)')
+    ap.add_argument('--nx-moving', type=int, nargs='+', default=[16, 32],
+                    help='cells per side of the lattice runs against the analog run')
     ap.add_argument('--nz-analog', type=int, nargs='+', default=[8, 16, 32],
                     help='cells across the slab of the lattice runs against the analog run')
     ap.add_argument('--atau-scan', type=float, default=1.e6)
@@ -415,6 +444,62 @@ def main(args):
                 plot_spectrum(x, atau, 'slab', dx, os.path.join(args.workdir, name,
                               f'{name}.png'), name)
         results['analog'] = ok
+
+    if 'moving' in args.checks:
+        temp = args.temp_moving
+        atau = voigt_a(temp)*args.tau_moving
+        dx = args.dxf*atau**(1./3.)
+        xmax = args.xmaxf*atau**(1./3.)
+        vth = np.sqrt(2.*K_BOLTZ*temp/M_H)
+        print(f"moving: the sphere at tau0 {args.tau_moving:g}, {temp:g} K (a tau0 {atau:.3g}) "
+              f"in {args.profile_moving} flow, lattice against the analog kernel, "
+              f"{args.nphot_analog} photons each")
+        ok = True
+        for iv, vdop in enumerate(args.vel_moving):
+            vel = vdop*vth/C_LIGHT
+            runs = []
+            for nx, ddmc in [(args.nx, False)] + [(nx, True) for nx in args.nx_moving]:
+                name = f'moving{vdop:g}_lattice{nx}' if ddmc else f'moving{vdop:g}_analog'
+                wd = os.path.join(args.workdir, name)
+                os.makedirs(wd, exist_ok=True)
+                deck = os.path.join(wd, f'athinput.{name}')
+                write_deck(deck, name, 'sphere', temp, args.tau_moving, args.nphot_analog,
+                           args.iseed + 20 + iv, ddmc, dx, xmax, args.core, nx=nx,
+                           mcranks=args.mcranks, ddmc_tau=args.ddmc_tau, vel=vel,
+                           profile=args.profile_moving)
+                files, rep = run(args, wd, deck, name, args.mcranks)
+                runs.append((name, nx, load(files, temp), rep))
+                print(f"  v = {vdop:g} Doppler widths, {name:20s}: {rep.get('nscat', 0):.3g} "
+                      f"scatterings/photon, cpu {rep.get('cpu', 0):.3g} s/photon, wall "
+                      f"{rep.get('wall', 0):.0f} s"
+                      + (f"; node band to |x| = {band_edge(rep, dx, args.core):.1f} "
+                         f"({band_edge(rep, dx, args.core)/(0.92*atau**(1./3.)):.2f} of the "
+                         f"static peak)" if ddmc else ''))
+            _, _, (xa, pa, _), _ = runs[0]
+            fa = np.mean(xa < 0.)
+            pka = peak(xa, dx)
+            print(f"    analog: red fraction {fa:.3f}, mean x {xa.mean():+.2f}, peaks "
+                  f"{pka[0]:.1f} {pka[1]:.1f}, mean path {pa.mean():.4g} cm")
+            for name, nx, (xl, pl, _), _ in runs[1:]:
+                dkx, sc = ks_two(xl, xa)
+                dkp, _ = ks_two(pl, pa)
+                fl = np.mean(xl < 0.)
+                sf = max(np.sqrt(fa*(1. - fa)/xa.size + fl*(1. - fl)/xl.size), 1e-12)
+                pkl = peak(xl, dx)
+                # the gate is on the spectrum (its distance and its red fraction); the
+                # path is reported, 13 percent long at 16 cells in the strongest flow
+                ok_v = (dkx <= args.gate_analog*sc) and abs(fl - fa) <= args.gate_analog*sf
+                ok &= ok_v
+                print(f"    nx {nx:3d}: x dCDF {dkx:.4f} ({dkx/sc:.1f} x scale), path dCDF "
+                      f"{dkp:.4f} ({dkp/sc:.1f} x); red fraction {fl:.3f} vs {fa:.3f} "
+                      f"({(fl - fa)/sf:+.1f} sigma), mean x {xl.mean():+.2f} vs {xa.mean():+.2f}, "
+                      f"peaks {pkl[0]:.1f} {pkl[1]:.1f}, mean path ratio {pl.mean()/pa.mean():.4f}"
+                      f"  {'ok' if ok_v else 'OFF'}")
+            if args.plot:
+                for name, nx, (x, _, _), _ in runs:
+                    plot_spectrum(x, atau, 'sphere', dx, os.path.join(args.workdir, name,
+                                  f'{name}.png'), name)
+        results['moving'] = ok
 
     if 'scan' in args.checks:
         print(f"scan: the slab at a tau0 {args.atau_scan:g} along the matching line "

@@ -161,7 +161,9 @@ Items that make the Compton branch unreachable or wrong, with locations:
 
 The resonant-scattering acceleration (`MRWResonanceAcceleration`, general pusher only,
 `scattering = resonance`) shares nothing with this but the `acceleration` key and is left
-alone.
+alone.  (Removed 2026-10-30 in phase R2 of `compton_ddmc_plan.md`: the frequency lattice
+of `<ddmc> line = lya` replaces it, and `<randomwalk> enable` with `scattering =
+resonance` is now refused.)
 
 Items in the sphere problem generator and its tools:
 
@@ -489,7 +491,8 @@ dead-cell neighbour against the Python `Sampler`, to float32 round-off, in
 `ReadTimeDistribution`, `InterpComptonEnergy`, `InterpPathTime`, the `mrw*` table arrays,
 the legacy `compton_table_*`/`time_table_*`/`radius_table_*` files and their generator,
 and the body of `MRWAcceleration`.  `accel_tau` replaces the hard-coded 10.  The
-resonance branch in the general pusher is untouched.
+resonance branch in the general pusher is untouched (removed later, in R2 of the DDMC
+plan).
 
 ### 6.7 Cells, not spheres: the dead zone and two ways out
 

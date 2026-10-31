@@ -889,7 +889,11 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
     // divergence of the velocity (an expanding fluid cools the radiation)
     if (moving) {
       const Real div = pmcb->ddmc_rate(MonteCarloBlock::DDMC_RATE_DIV, i3, i2, i1);
-      if (div != 0.) pphot->ep[ip] *= std::exp(-ct*div/3.);
+      // not in the core bin of a frequency lattice: a core scattering draws the
+      // frequency afresh, so no shift accumulates between the scatterings of a dwell
+      const bool core = line
+                        && pmy_mc->DDMCLineBin(e0) == pmy_mc->ddmc_line_nwing + 1;
+      if (div != 0. && !core) pphot->ep[ip] *= std::exp(-ct*div/3.);
     }
     // On a frequency lattice this shift can carry the walker over a bin edge
     int bin_new = -1;
@@ -935,8 +939,8 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
       pphot->x3p[ip] += du[2]/l_cgs;
     }
     // A dwell deep in a resonance line can stands for more scatterings than column holds
-    pphot->nscp[ip] = static_cast<int>(std::min(static_cast<Real>(INT_MAX),
-                                                pphot->nscp[ip] + std::round(nscat*fsurv)));
+    const Real nsc_new = pphot->nscp[ip] + std::round(nscat*fsurv);
+    pphot->nscp[ip] = static_cast<int>(std::min(static_cast<Real>(INT_MAX), nsc_new));
     pmcb->nddmc_scat += nscat*fsurv;
     pmcb->nddmc[DDMC_DWELL]++;
     pmcb->lb_nstep++;

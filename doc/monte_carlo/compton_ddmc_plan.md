@@ -1,6 +1,6 @@
 # Discrete diffusion Monte Carlo for Compton and resonance scattering: plan
 
-Status: **D0 and D1 done 2026-10-28, D2 and D3 done 2026-10-29, D4 done 2026-10-30, R0 approved and R1 done 2026-10-30 (the frequency lattice, `<ddmc> line = lya`, guide Section "What R1 built"), all on branch `ddmc`; the XRB count that decides the split-face rates and D5 is in: on the hires snapshot at threshold 3, 132 million diffusion cells, 13 percent of the mesh, 0.9 percent of them at level jumps (no split-face rates), and 67 percent of the scatterings in cells at least 3 deep, a ceiling near 2.8 on the whole run.**  The 2026-10-06
+Status: **D0 and D1 done 2026-10-28, D2 and D3 done 2026-10-29, D4 done 2026-10-30, R0 approved, R1 done and R2 done 2026-10-30 (the frequency lattice, `<ddmc> line = lya`, guide Sections "What R1 built" and "What R2 built"; `MRWResonanceAcceleration` removed), all on branch `ddmc`; the XRB count that decides the split-face rates and D5 is in: on the hires snapshot at threshold 3, 132 million diffusion cells, 13 percent of the mesh, 0.9 percent of them at level jumps (no split-face rates), and 67 percent of the scatterings in cells at least 3 deep, a ceiling near 2.8 on the whole run.**  The 2026-10-06
 outline is folded in below with the changes of Section 2.  Order decided: the Compton
 phases D0 to D3 first (they build the lattice, the interface and the block machinery that
 both scatterings share, where an exact reference exists), the XRB phases D4 and D5 as a
@@ -573,6 +573,28 @@ peak asymmetry, which Smith et al. could not reproduce with a core bin that bloc
 leakage across the line centre, measured against analog so the limitation is known
 here.  Then `MRWResonanceAcceleration` is removed.  Gate: the asymmetry error recorded
 and judged.
+
+Built 2026-10-30 (guide Section "What R2 built"): no hop rescaling (D4's drift and
+adiabatic shift already act on the walker's comoving energy and R1 made a shift across
+a bin edge a frequency crossing); the one rule added is that the core bin takes no
+adiabatic shift, since a core scattering redraws the frequency and erases it (with the
+shift the lattice was 8 percent redder than analog at one Doppler width; without, 4).
+`MRWResonanceAcceleration`, its escape-time sampler and `UpdateMomentsAcceleration`
+removed; `<randomwalk> enable` with `scattering = resonance` refused.  Tests
+(`sphere_lya.py --checks moving`, the sphere at tau_0 = 1e6 and 10 K, 4000 photons,
+lattice at 16 and 32 cells against analog): a uniform flow (frame bookkeeping, no
+drift) agrees to 1.2 scales; the homologous expansion at 3 and 10 Doppler widths to
+0.9 to 1.5 scales in the spectrum, at 1 Doppler width to 2.0 to 2.6 with the red
+fraction 0.01 to 0.02 high and the mean x one Doppler width redder out of 13; paths
+within 5 percent except 13 percent long at 16 cells in the strongest flow.  The
+one-dimensional toy `freq_drift_toy.py` (the lattice's rules against the kinetic walk
+with the real wing kernel x' = x - 1/x + N(0,1), no spatial transport) reproduces the
+code's departure at a moderate drift and finds no rule variant that removes it
+(keeping the walker's offset at a frequency hop, D4's spatial rule, is redder, so the
+uniform redraw stays); the departure is the lattice's discretization, judged
+acceptable for the hot Jupiter's lattice region, where the flow is below the thermal
+width.  Asymmetry: the drift in the wing bins and its erasure in the core carry the
+red/blue asymmetry, and the core bin does not block it.
 
 ### R3. The hot Jupiter
 
