@@ -495,6 +495,8 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
   nddmc_cells = 0;
   nddmc_cells_jump = 0;
   nddmc_nodes = 0;
+  nddmc_core_partial = 0;
+  ddmc_core_edge_sum = 0.;
   // the mask is built with the report alone too, so a run can count the lattice's reach
   if (pmy_mc->ddmc || pmy_mc->ddmc_report) {
     ddmc_cell.NewAthenaArray(ncells3,ncells2,ncells1);
@@ -503,6 +505,7 @@ MonteCarloBlock::MonteCarloBlock(MeshBlock *pmb,  MCBlockSize *pblsize, MonteCar
     if (pmy_mc->ddmc_line != DDMC_LINE_NONE) {
       ddmc_line_k.NewAthenaArray(pmy_mc->ddmc_line_nbin+2,ncells3,ncells2,ncells1);
       ddmc_line_edge.NewAthenaArray(ncells3,ncells2,ncells1);
+      ddmc_line_xc.NewAthenaArray(ncells3,ncells2,ncells1);
     }
   }
   // the generator's cell mask serves the DDMC lattice as it serves the random walk
@@ -592,6 +595,7 @@ MonteCarloBlock::~MonteCarloBlock() {
   ddmc_jump.DeleteAthenaArray();
   ddmc_line_k.DeleteAthenaArray();
   ddmc_line_edge.DeleteAthenaArray();
+  ddmc_line_xc.DeleteAthenaArray();
   if (tab_mask.GetSize() > 0) tab_mask.DeleteAthenaArray();
   if (tab_emis_tot.GetSize() > 0) tab_emis_tot.DeleteAthenaArray();
   if (tab_abs.GetSize() > 0) tab_abs.DeleteAthenaArray();

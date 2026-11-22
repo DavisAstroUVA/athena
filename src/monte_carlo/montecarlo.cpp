@@ -1758,7 +1758,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     int64_t nmrw = 0, nmrw_decline = 0, nabs_first = 0;
     Real wesc_sum = 0., wesc_sq = 0., nmrw_scat = 0.;
     int64_t nddmc[NDDMCCOUNT], nddmc_cells = 0, nddmc_cells_jump = 0, nddmc_nodes = 0;
-    Real nddmc_scat = 0.;
+    int64_t nddmc_core_partial = 0;
+    Real nddmc_scat = 0., ddmc_core_edge_sum = 0.;
     for (int b=0; b<NDDMCCOUNT; ++b) nddmc[b] = 0;
     int64_t scat_hist[MonteCarloBlock::NSCATBINS];
     for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] = 0;
@@ -1780,6 +1781,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       nddmc_cells += pmcb->nddmc_cells;
       nddmc_cells_jump += pmcb->nddmc_cells_jump;
       nddmc_nodes += pmcb->nddmc_nodes;
+      nddmc_core_partial += pmcb->nddmc_core_partial;
+      ddmc_core_edge_sum += pmcb->ddmc_core_edge_sum;
       for (int b=0; b<MonteCarloBlock::NSCATBINS; ++b) scat_hist[b] += pmcb->scat_tau_hist[b];
       for (int b=0; b<MonteCarloBlock::NMRWDECLINE; ++b) declined[b] += pmcb->nmrw_declined[b];
       wesc_sum += pmcb->wesc_sum;
@@ -1811,6 +1814,8 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
     MPI_Allreduce(MPI_IN_PLACE,&nddmc_cells,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nddmc_cells_jump,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,&nddmc_nodes,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&nddmc_core_partial,1,MPI_INT64_T,MPI_SUM,MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE,&ddmc_core_edge_sum,1,MPI_ATHENA_REAL,MPI_SUM,MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,scat_hist,MonteCarloBlock::NSCATBINS,MPI_INT64_T,MPI_SUM,
                   MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE,declined,MonteCarloBlock::NMRWDECLINE,MPI_INT64_T,MPI_SUM,
@@ -1850,8 +1855,13 @@ void MonteCarlo::RunMonteCarlo(Outputs *pouts, Mesh *pmesh,
       if (ddmc || ddmc_report) {
         std::cout << "discrete diffusion: " << nddmc_cells << " cells ("
                   << nddmc_cells_jump << " at level jumps";
-        if (ddmc_line != DDMC_LINE_NONE)
-          std::cout << ", " << nddmc_nodes << " nodes of " << ddmc_line_nbin << " bins";
+        if (ddmc_line != DDMC_LINE_NONE) {
+          std::cout << ", " << nddmc_nodes << " nodes of " << ddmc_line_nbin << " bins, "
+                    << nddmc_core_partial << " with the core edge inside the core bin";
+          if (nddmc_core_partial > 0)
+            std::cout << " (mean edge " << ddmc_core_edge_sum/nddmc_core_partial
+                      << " reference Doppler widths)";
+        }
         std::cout << "), " << nddmc[DDMC_DWELL] << " dwells standing for " << nddmc_scat
                   << " scatterings, " << nddmc[DDMC_HOP] << " hops and "
                   << nddmc[DDMC_ADVECT] << " advective crossings ("

@@ -46,6 +46,10 @@ class Coordinate;
 //---------------------- prototypes for photon moving ------------------------------------
 Real GetOpticalDepth(MCRandom *pran);
 
+//! the extrapolation distance of the asymptotic diffusion-limit boundary condition of
+//! discrete diffusion, in mean free paths (Habetler & Matkowsky 1975)
+constexpr Real kDDMCLambda = 0.7104;
+
 //----------------------------------------------------------------------------------------
 //! \class PhotonPusher
 //! \brief abstract base class for all derived classes
@@ -134,7 +138,12 @@ public:
   void DDMCSetWalker(Photon *pphot, int ip, bool comoving = false);
   //! the walker's six face rates and their sum
   Real DDMCRates(Photon *pphot, int ip, Real rate[6]);
-  Real DDMCNeighbourExtinction(Photon *pphot, int ip, int n3, int n2, int n1);
+  //! the total extinction of cell (n3,n2,n1) at the photon's energy: the walker's bin
+  //! value, or with photon = true the value at its own frequency
+  Real DDMCNeighbourExtinction(Photon *pphot, int ip, int n3, int n2, int n1,
+                               bool photon = false);
+  //! the extinction that weights a face crossing's force deposit in cell (i3,i2,i1)
+  Real DDMCDepositExtinction(Photon *pphot, int ip, int i3, int i2, int i1);
   //! Compton: the cell's theta, kT, n_e sigma_T and free-free parameter
   bool DDMCComptonCell(int i3, int i2, int i1, Real &theta, Real &kT, Real &nsig,
                        Real &lam);
@@ -151,6 +160,14 @@ public:
   void DDMCLineHop(Photon *pphot, MCRandom *pran, int ip, int side);
   //! emergence through a frequency face into bin b, the energy drawn in it or kept
   void DDMCLineEmerge(Photon *pphot, MCRandom *pran, int ip, int b, bool draw);
+  //! the six face rates of a core walker, averaged over its cell's core node
+  Real DDMCLineCoreRates(Photon *pphot, int ip, Real rate[6]);
+  //! the frequency at which a core walker crosses face f, in proportion to the
+  //! per-frequency rate of that face (face < 0: uniform over the node)
+  Real DDMCLineCoreDraw(Photon *pphot, MCRandom *pran, int ip, int face);
+  //! the per-frequency rate of face f of cell (i3,i2,i1) at reference offset x
+  Real DDMCLineFaceRate(int i3, int i2, int i1, int face, Real x, Real kcx,
+                        Real kabsn);
 
 };
 

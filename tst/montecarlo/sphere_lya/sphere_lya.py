@@ -30,6 +30,11 @@ a point source at the centre at line centre.  Four checks:
             (16 32) against one analog run per velocity: the two-sample distance of the
             escaping x within --gate-analog scales and the red fraction within that many
             sigma; the escape paths and the peaks are reported
+  coreedge  the slab at --tau-core (default 1e4 1e5) and --temp-core (1e4 K), where no
+            cell is thick at the core bin's edge and every diffusion cell's core node
+            ends inside the Doppler core (R4 of the plan): the lattice at each --nz-core
+            (default 8 32) against one analog run, the same two-sample distances as the
+            analog check, and the mean core edge reported
   scan      the slab at --atau-scan (default 1e6) over --nz-scan with the bin width on
             Smith et al. (2018)'s matching line dx = (10 a tau0 / nz^2)^(1/3), the
             Kolmogorov distance from Neufeld and the cpu time per photon at each
@@ -104,6 +109,10 @@ def write_deck(filename, name, geometry, temp, tau0, nphot, iseed, ddmc, dx, xma
     resolved).  The deck's tau is the line-centre depth over the escape radius, so the
     slab scales it.  vel > 0 (units of c) is a homologous expansion with that velocity
     at the radius, with boosts on"""
+    # the kinetic visit table of the core node, built once per temperature and core width
+    # and shared by every run of the work directory
+    visit_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(filename))),
+                              f'visit_{temp:.6e}_{core}.txt')
     if geometry == 'rsphere':
         radius = R0
         tau = tau0
@@ -171,6 +180,7 @@ line_temp  = {temp:.6e}
 dx         = {dx:.6g}
 xmax       = {xmax:.6g}
 core_width = {core}
+visit_file = {visit_file}
 report     = true
 
 <problem>
@@ -210,12 +220,17 @@ def run(args, workdir, deck, name, mcranks, spherical=False):
     for line in open(log):
         if line.startswith('discrete diffusion:'):
             report['ddmc'] = line.strip()
-            m = re.search(r'(\d+) cells \((\d+) at level jumps(?:, (\d+) nodes of (\d+) bins)?\)',
+            m = re.search(r'(\d+) cells \((\d+) at level jumps(?:, (\d+) nodes of (\d+) bins)?',
                           line)
             report['cells'] = int(m.group(1))
             report['nodes'] = int(m.group(3)) if m.group(3) else 0
             m = re.search(r'(\d+) dwells', line)
             report['dwells'] = int(m.group(1))
+            m = re.search(r'(\d+) with the core edge inside the core bin(?: \(mean edge '
+                          r'([0-9.eE+-]+))?', line)
+            if m:
+                report['partial'] = int(m.group(1))
+                report['edge'] = float(m.group(2)) if m.group(2) else 0.
         if line.startswith('ntot:'):
             for key, val in re.findall(r'(?<![\w/])(ntot|nesc|nabs|ndes|nrem): (\d+)', line):
                 report[key] = int(val)
@@ -373,7 +388,8 @@ def parse_args(argv=None):
                     help='keep a run already in the workdir (its lists and a complete log)')
     ap.add_argument('--checks', nargs='+',
                     default=['slab', 'sphere', 'analog', 'scan', 'moving'],
-                    choices=['slab', 'sphere', 'rsphere', 'analog', 'scan', 'moving'])
+                    choices=['slab', 'sphere', 'rsphere', 'analog', 'scan', 'moving',
+                             'coreedge'])
     ap.add_argument('--ntheta', type=int, default=8,
                     help='theta and phi cells of the spherical-polar sphere')
     ap.add_argument('--geometry-moving', default='sphere', choices=['sphere', 'rsphere'],
@@ -395,6 +411,12 @@ def parse_args(argv=None):
     ap.add_argument('--tau-analog', type=float, default=1.e6)
     ap.add_argument('--temp-analog', type=float, default=10.)
     ap.add_argument('--nphot-analog', type=int, default=1000)
+    ap.add_argument('--tau-core', type=float, nargs='+', default=[1.e4, 1.e5],
+                    help='line-centre depths of the coreedge slabs')
+    ap.add_argument('--temp-core', type=float, default=1.e4)
+    ap.add_argument('--nz-core', type=int, nargs='+', default=[8, 32],
+                    help='cells across the slab of the coreedge lattice runs')
+    ap.add_argument('--nphot-core', type=int, default=1000)
     ap.add_argument('--tau-moving', type=float, default=1.e6)
     ap.add_argument('--temp-moving', type=float, default=10.)
     ap.add_argument('--vel-moving', type=float, nargs='+', default=[1., 3., 10.],
@@ -481,6 +503,43 @@ def main(args):
                 plot_spectrum(x, atau, 'slab', dx, os.path.join(args.workdir, name,
                               f'{name}.png'), name)
         results['analog'] = ok
+
+    if 'coreedge' in args.checks:
+        temp = args.temp_core
+        ok = True
+        for it, tau0 in enumerate(args.tau_core):
+            atau = voigt_a(temp)*tau0
+            dx = args.dxf*max(atau, 1.)**(1./3.)
+            xmax = max(args.xmaxf*atau**(1./3.), args.core + 4.*dx)
+            print(f"coreedge: the slab at tau0 {tau0:g}, {temp:g} K (a tau0 {atau:.3g}), "
+                  f"lattice against the analog kernel, {args.nphot_core} photons each")
+            runs = []
+            for nz, ddmc in [(args.nz, False)] + [(nz, True) for nz in args.nz_core]:
+                name = f'core{tau0:.0e}_lattice{nz}' if ddmc else f'core{tau0:.0e}_analog'
+                wd = os.path.join(args.workdir, name)
+                os.makedirs(wd, exist_ok=True)
+                deck = os.path.join(wd, f'athinput.{name}')
+                write_deck(deck, name, 'slab', temp, tau0, args.nphot_core,
+                           args.iseed + 30 + it, ddmc, dx, xmax, args.core, nz=nz,
+                           mcranks=args.mcranks, ddmc_tau=args.ddmc_tau)
+                files, rep = run(args, wd, deck, name, args.mcranks)
+                runs.append((name, nz, load(files, temp), rep))
+                print(f"  {name:18s}: {rep.get('nscat', 0):.3g} scatterings/photon, cpu "
+                      f"{rep.get('cpu', 0):.3g} s/photon, wall {rep.get('wall', 0):.0f} s"
+                      + (f"; {rep.get('cells', 0)} diffusion cells, {rep.get('partial', 0)} "
+                         f"with the edge inside the core (mean edge {rep.get('edge', 0.):.2f}), "
+                         f"{rep.get('dwells', 0)} dwells" if ddmc else ''))
+            _, _, (xa, pa, _), _ = runs[0]
+            for name, nz, (xl, pl, _), _ in runs[1:]:
+                dkx, sc = ks_two(xl, xa)
+                dkp, _ = ks_two(pl, pa)
+                ok_nz = (dkx <= args.gate_analog*sc) and (dkp <= args.gate_analog*sc)
+                ok &= ok_nz
+                print(f"  nz {nz:3d}: escapers {xl.size} vs {xa.size}: x dCDF {dkx:.4f} "
+                      f"({dkx/sc:.1f} x scale), path dCDF {dkp:.4f} ({dkp/sc:.1f} x); "
+                      f"median |x| {np.median(np.abs(xl)):.2f} vs {np.median(np.abs(xa)):.2f}; "
+                      f"mean path ratio {pl.mean()/pa.mean():.4f}  {'ok' if ok_nz else 'OFF'}")
+        results['coreedge'] = ok
 
     if 'moving' in args.checks:
         temp = args.temp_moving

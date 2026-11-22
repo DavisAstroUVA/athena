@@ -406,11 +406,31 @@ public:
   int ddmc_line_nwing, ddmc_line_nbin;
   Real ddmc_line_dnu; // the Doppler width at ddmc_line_temp
   std::vector<Real> ddmc_line_xedge; // the nbin + 3 bin edges in reference Doppler units
-  // the scatterings of a kinetic visit to the core, tabulated over log10 of the cell's
-  // Doppler scale s = sqrt(line_temp / T), which sets a s and core_width s in the
-  // cell's Doppler units
-  std::vector<Real> ddmc_line_vlogs, ddmc_line_visit;
-  Real DDMCLineCoreVisit(Real s) const;
+  // The core node of a cell is the band |x| < x_c of the core bin, x_c the cell's own
+  // edge (ddmc_line_core at most, where the cell is thick at the core's edge, and
+  // inside the Doppler core where it is not).  The kinetic visit to that band is
+  // tabulated over its half-width in the cell's own Doppler units, x_loc = x_c s with
+  // s = sqrt(line_temp / T) the Doppler scale (which sets a s too), and over log10 s:
+  // the scatterings of a visit (ddmc_line_visit, interpolated bilinearly in its log)
+  // and the quantiles of the exit overshoot, the frequency beyond the edge of the
+  // scattering that leaves (ddmc_line_over, NVQ levels denser toward the tail), both
+  // over the grid
+  // ddmc_line_vx of x_loc from ddmc_line_core_min to ddmc_line_core times the largest
+  // s of ddmc_line_vlogs; a point above the edge reachable at its s is left unfilled
+  // (visit 0) and the lookup clamps to the filled range.  The table is built at setup
+  // with the same seed on every rank, or read from ddmc_line_visit_file when that
+  // file's header matches
+  static const int NVQ = 65;
+  Real ddmc_line_core_min;
+  std::string ddmc_line_visit_file;
+  std::vector<Real> ddmc_line_vlogs, ddmc_line_vx, ddmc_line_visit, ddmc_line_over;
+  //! the scatterings of a kinetic visit to the core band of local half-width xloc
+  Real DDMCLineCoreVisit(Real xloc, Real s) const;
+  //! the exit overshoot of such a visit, local Doppler units
+  Real DDMCLineCoreExit(Real xloc, Real s, MCRandom *pran) const;
+  void BuildDDMCLineVisitTable();
+  bool ReadDDMCLineVisitTable();
+  void WriteDDMCLineVisitTable() const;
   std::vector<Real> ddmc_line_eedge; // the same as energies
   void SetupDDMCLine(ParameterInput *pin);
   //! the bin holding comoving energy e, -1 outside the extended grid
@@ -739,18 +759,33 @@ public:
   // included, and ddmc_line_edge the outermost bin on each side of the core that is a
   // diffusion node of the cell (-1: none, and the cell is not a diffusion cell);
   // nddmc_nodes the nodes of the active cells at the last build
+  // ddmc_line_xc is the half-width of the cell's core node in reference Doppler units
+  // (0 where the core is not a node, ddmc_line_core where the whole core bin is one),
+  // and the core entry of ddmc_line_k is the mean extinction over that band;
+  // nddmc_core_partial counts the active cells whose edge lies inside the core bin and
+  // ddmc_core_edge_sum adds their edges, for the report
   AthenaArray<Real> ddmc_line_k;
   AthenaArray<int> ddmc_line_edge;
-  int64_t nddmc_nodes;
+  AthenaArray<Real> ddmc_line_xc;
+  int64_t nddmc_nodes, nddmc_core_partial;
+  Real ddmc_core_edge_sum;
   //! the bin extinctions of a cell and its outermost node bin, wmin its smallest width
   //! in cm
   int DDMCLineCell(int i3, int i2, int i1, Real wmin);
-  //! whether the bin holding comoving energy e, or bin b, is a node of cell (i3,i2,i1)
+  //! whether the bin holding comoving energy e is a node of cell (i3,i2,i1), the core
+  //! bin by the cell's own edge; whether bin b holds nodes of the cell at all
   bool DDMCLineNode(int i3, int i2, int i1, Real e) const;
   bool DDMCLineNodeBin(int i3, int i2, int i1, int b) const;
-  //! the bin-averaged extinction of the bin holding e in cell (i3,i2,i1), zero outside
-  //! the grid
+  //! the walker's extinction in the bin holding e in cell (i3,i2,i1): the bin's mean,
+  //! for the core bin the mean over the cell's core node; zero outside the grid
   Real DDMCLineK(int i3, int i2, int i1, Real e) const;
+  //! the extinction at the frequency of e itself (the Voigt value in the core bin, the
+  //! bin's mean in a wing bin), scattering only
+  Real DDMCLineKPhoton(int i3, int i2, int i1, Real e) const;
+  //! the Voigt extinction of the cell at reference Doppler offset x, and the cell's
+  //! Doppler scale s = line_temp Doppler width over the cell's
+  Real DDMCLineKx(int i3, int i2, int i1, Real x) const;
+  Real DDMCLineScale(int i3, int i2, int i1) const;
   //! the frequency interface: a photon that has just scattered in a diffusion cell,
   //! from comoving energy e0, admitted to a wing node or reflected about its edge
   void DDMCLineEntry(Photon *pphot, int ip, Real e0);

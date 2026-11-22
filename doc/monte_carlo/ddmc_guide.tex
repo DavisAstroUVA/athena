@@ -1456,6 +1456,120 @@ no path while its lattice core bin does, so its path comparison overstates the
 lattice's path by the core's share, an accounting artefact and not a residence
 defect.
 
+\section{What R4 built: the core edge inside the Doppler core}
+\label{sec:r4}
+
+\textbf{Why.}  On the production hot Jupiter deck (stellar Lyman alpha and
+photoionization, equal weights, the analytic 7000\,K atmosphere of
+\texttt{\~{}/mc\_test/hot\_jupiter/combo}; 128 radial cells with \key{x1rat} 1.02 over
+1 to 8 planet radii, 33 cells in each angle) the lattice of R3 holds no cell: the base is
+$7\times10^4$ deep at line centre across a cell and 1.3 at $|x| = 3.3$.  Yet with 1000
+stellar photons per cycle 84 percent of the scatterings fall in cells more than 4000 mean
+free paths across at the photon's frequency, 96 percent of the photons never scatter,
+and one photon of the thousand made 330\,000 scatterings and lived 157 of the cycle's
+157 wall seconds (on one rank the same deck takes 708 s for a different photon of
+$10^5$).  The deep photon sits in the Doppler core of a cell that is thick at $|x|
+\lesssim 2.7$ and thin outside, and the single global core bin cannot hold it.
+
+\textbf{The per-cell core edge.}  Each cell gets its own core edge $x_c$
+(\texttt{ddmc\_line\_xc}, reference Doppler units), the largest $|x|$ at which
+$k(x)\,W \ge$ \key{tau} by bisection on the Voigt extinction, capped at \key{core\_width};
+a cell whose edge in its own Doppler units is below \key{core\_min} (default 2, where a
+kinetic visit is 260 scatterings) is not a diffusion cell.  The wing bins are unchanged
+and are nodes only where the full core is (the extinction falls outward, so a partial
+core has no wing nodes).  \texttt{DDMCLineNode(cell, e)} tests the energy against the
+cell's band in the core bin; \texttt{DDMCLineNodeBin} keeps the bin-level meaning.  An
+entry into the node from a scattering is admitted with probability 1: by Kac's lemma
+the mean sojourn from the stationary entrance distribution is $1/p_{\rm out}$, so the
+stationary exit rate balances the kinetic entries exactly.
+
+\textbf{The visit table.}  The core walker's extinction for the scatterings a dwell
+stands for is the mean of $k$ over the node (flat $J$ within a thick core); its exit
+through either frequency face is the kinetic rate $k/(2N)$ with $N(x_{\rm loc}, s)$ from
+a two-dimensional table over the node's local half-width $x_{\rm loc} = x_c s$ (steps of
+0.25 from \key{core\_min} to \key{core\_width} times the largest $s$) and the Doppler
+scale $s$ (twelve points in $\log_{10} s$ from $-0.7$ to 0.4), bilinear in $\log N$; the
+R3 table was the row $x_{\rm loc} = 3.3\,s$.  A point is one chain of
+\texttt{LineCoreVisit}: a photon scattering forever in frequency, a visit opening at a
+scattering into $|x| < x_c$ and closing at the first scattering out, so that the entrance
+distribution is the stationary one; the chain runs to 200 visits and $10^6$ scatterings,
+or 20\,000 visits, and the first (truncated) visit is discarded.  The emergence frequency
+is the cell's edge plus an overshoot drawn from the quantiles of the chain's exit
+overshoots (65 levels $u = 1 - (1 - t)^2$, denser toward the tail, interpolated
+bilinearly in $(x_{\rm loc}, \log s)$).  The toys (\texttt{core\_edge\_toy.py},
+\texttt{chain\_toy.py} in \texttt{tst/montecarlo/sphere\_lya}) measured the exit law:
+the mean overshoot is 0.19 to 0.23 Doppler widths for $x_c$ of 1.5 to 2.5, close to
+exponential ($d_{99} \approx 0.9$), and 0.31 to 0.46 with a heavier tail at 3.0 to 3.3
+where the Lorentzian exits join.  The R3 rule, a uniform fraction of a Rayleigh step
+(mean 0.63), put the photon three times too far out, into a cell $e^{-2 x_c d}$ thinner.
+With the exits sampled, the frequency-only hybrid walk reaches $|x| \ge x_c + 1$ and
+$x_c + 2$ in 0.86 to 1.19 times the kinetic walk's visits for $x_c$ of 1.5 to 2.5, with
+no trend (the scatter is the tail-dominated statistics of 1000 walkers, and the entry
+and the exit of a short visit are correlated, which an independent exit cannot carry);
+an exponential of the measured mean ranges from 0.56 to 1.21, and the Rayleigh rule
+gives 0.05.  The reach counts are set by the tail of the exit law, so the table samples
+a short visit many times.  Two definitions of the visit, the chain and R3's entry from a wing photon
+uniform within one Doppler width above the edge, agree in $N$ and in the exit law to a
+percent with 20\,000 visits each (a 15 percent disagreement at 2000 visits was the
+toy's chain starting inside the core).
+
+The table costs minutes (330 to 390 s at 7000 and 10\,000\,K, every rank building the
+same table) against 40 s for the R3 row, so it is written to \key{visit\_file} after
+its build and read back when the header (line temperature, core width and minimum,
+visit cap, quantile count, grid step and grids) matches; the test driver shares one
+file per temperature across the runs of a work directory.
+
+\textbf{The core node's spatial leakage.}  The R3 code diffused the core walker with
+the bin-mean $k$, which is $e^{x_c^2}/(2 x_c^2)$ too large at the edge frequencies that
+carry the flux (a factor 20 at $x_c = 2.6$, 700 at 3.3); the slab and sphere tests
+cannot see it, their core mean free path being $10^{-6}$ of the medium.  With $J$ flat
+across the node each face's rate is now the average over the node of the per-frequency
+rate $2/(3W(k(x)W + k_n(x)W_n))$, the neighbour's node or the boundary form by frequency
+(\texttt{DDMCLineCoreRates}, Simpson on 64 intervals in $x = x_c\cos\theta$, which
+resolves the $e^{x^2}$ rise at the edge; the per-dwell rates replace the table's for a
+core walker in \texttt{DDMCRates}); the frequency at which the walker crosses a face is
+drawn in proportion to that face's per-frequency rate and then tested against the
+neighbour's node, hop or emerge at that frequency (\texttt{DDMCLineCoreDraw}; an
+advective crossing draws uniformly over the node); the force deposit of a crossing uses
+$k$ at that frequency (\texttt{DDMCDepositExtinction}, \texttt{DDMCLineKPhoton}), and so
+does the conversion probability of a transport photon at a face.
+
+\textbf{Tests.}  The slab and sphere checks against Neufeld and Dijkstra are unchanged
+(medians within 0.13 bin, $K$ 0.014 to 0.035 at $a\tau_0$ of $10^5$ to $10^7$).  A new
+check, \texttt{coreedge}: the slab at $\tau_0 = 10^4$ and $10^5$ at $10^4$\,K ($a\tau_0$
+4.7 and 47), where no cell is thick at the core bin's edge and every diffusion cell's
+core node ends inside the Doppler core (mean edges 2.3 to 3.1), the lattice at 8 and 32
+cells against one analog run of 1000 photons: the escaping $x$ within 0.7 to 1.3 of the
+two-sample scale, the paths within 1.0 to 1.4 (mean path ratios 0.93 to 1.11), at 14 to
+50 analog scatterings per photon against $4.9\times10^4$ and $2.5\times10^5$, 20 to 400
+times cheaper per photon.
+
+\textbf{The hot Jupiter.}  The production deck's Lyman alpha type (1000 and 20\,000
+stellar photons, equal weights, the ionizing type off so that the generator's
+post-transfer hook is untouched) against its analog run with the same seed: 33\,627
+diffusion cells, a quarter of the mesh, every one with its core edge inside the core
+bin (mean edge 2.18 reference widths); the escaping velocity distribution identical
+($K$ 0.001 against a two-sample scale of 0.010 at 20\,000 photons; the bands 0 to 10, 10
+to 30, 30 to 60, 60 to 120 km/s hold 2349/2356, 4514/4510, 5642/5625, 5953/5960
+photons), the escaped weight equal to $3\times10^{-4}$, the absorbed count 89 against 96.
+The lattice's 2874 dwells stand for $1.4\times10^7$ scatterings against the analog run's
+$9.4\times10^6$ (the count is dominated by a handful of photons and differs by the
+one-photon noise); the longest-lived photon takes 6 s instead of 345, and the cycle's
+transport wall time is 6.4 s against 377 (the analog run's 1000-photon cycle, 157 s,
+becomes 4.3 s).  The ionizing type, which never scatters, is 0.2 s either way.  The
+analog deck's cost is itself remarkable: 1.2 ms per scattering on one rank against
+2.6\,$\mu$s on the slab test; a profile is in hand to find out why.
+
+\textbf{What is still approximate.}  The exit law is drawn independently of the entry,
+so a short visit's correlation between the two (5 to 10 percent in the visits to reach a
+frequency one Doppler width out at $x_c = 1.5$) is lost; \key{core\_min} 2 keeps the
+lattice away from the worst of it.  The node's flat-$J$ assumption is marginal in a cell
+that is only \key{tau} deep at the edge frequencies, where $J$ is depressed by the escape
+at those frequencies, which is the same marginality the spatial lattice carries at
+\key{tau} 3.  A cell whose core node would reach beyond the global core bin (a cold cell,
+$s > 1$) still ends at \key{core\_width}; the rows of the table above $x_{\rm loc}$ of 5
+exist for those cells and cost most of its build.
+
 \section{Decisions taken before D1}
 \label{sec:decisions}
 

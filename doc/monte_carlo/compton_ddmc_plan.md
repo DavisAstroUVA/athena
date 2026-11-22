@@ -627,6 +627,104 @@ of its entry side, the emergence and reconversion at periodic mesh faces, and an
 angular decomposition of the spherical test mesh (its radial shells serialize the
 ranks).
 
+### R4. The core edge inside the Doppler core
+
+Why: on the production hot Jupiter deck (stellar Lyman alpha and photoionization,
+equal weights, the analytic 7000 K atmosphere, `~/mc_test/hot_jupiter/combo`) the
+lattice of R3 holds no cell at all: a cell must be thick at $|x| = 3.3$, and the base
+is $7\times10^4$ deep at line centre, 1.3 at the core's edge.  Yet 84 percent of the
+run's scatterings are made in cells more than 4000 mean free paths across at the
+photon's frequency, and 68 percent by one photon of a thousand (330\,000
+scatterings, 157 of the 157 wall seconds of the cycle; 96 percent of the photons
+never scatter).  The deep photon sits in the Doppler core of a cell that is thick
+at $|x| < 2.7$ and thin outside, and the single global core bin cannot hold it.
+
+Design (the toy is `tst/montecarlo/sphere_lya/core_edge_toy.py`, kinetic core visits
+against a hybrid walk, frequency only):
+
+- Each cell gets its own core edge $x_c$ (`ddmc_line_xc`, reference Doppler units):
+  the largest $|x|$ at which $k(x)\,W \ge$ `tau`, by bisection on the Voigt
+  extinction, capped at `core_width`; a cell whose edge in its own Doppler units is
+  below `<ddmc> core_min` (default 2, where a kinetic visit is 260 scatterings) is
+  not a diffusion cell.  The wing bins are unchanged and are nodes only where the
+  full core is (the extinction falls outward, so a partial core has no wing nodes).
+  The core node is the band $|x| < x_c$ of the core bin; `DDMCLineNode(cell, e)`
+  tests the energy against it and the bin-level test keeps its meaning.
+- The core walker's extinction for the scatterings a dwell stands for is the mean of
+  $k$ over the node (flat $J$ within a thick core), its exit through either frequency
+  face the kinetic rate $k/(2N)$ with $N(x_{\rm loc}, s)$ from a two-dimensional
+  visit table over the local edge and the Doppler scale (the R3 table was one row,
+  $x_{\rm loc} = 3.3\,s$), bilinear in $\log N$.  The emergence frequency is the
+  edge plus an overshoot drawn from the quantiles of the exit overshoots of the same
+  visits: the toy's exits land at a mean 0.19 to 0.23 Doppler widths beyond the edge
+  for $x_c$ of 1.5 to 2.5 (near exponential, $d_{99} \approx 0.95$) and 0.31 to 0.46
+  with a heavier tail at 3.0 to 3.3, where the Lorentzian exits join; the R3 rule, a
+  uniform fraction of a Rayleigh step (mean 0.63), places the photon three times too
+  far out, into a cell $e^{-2 x_c d}$ thinner.  An entry into the node from a
+  scattering is admitted with probability 1 (Kac: the mean sojourn from the
+  stationary entrance distribution is $1/p_{\rm out}$, so the stationary exit rate
+  balances the kinetic entries exactly).
+- The visit table is written to `<ddmc> visit_file` after its build and read from it
+  when the header (line temperature, core width, core minimum, visits, grids) matches,
+  so that the setup, 40 s today and about twice that with the second dimension, is
+  paid once per deck.
+- The core node's spatial leakage: the R3 code diffused the core walker with the
+  bin-mean $k$, which is $e^{x_c^2}/(2 x_c^2)$ too large at the edge frequencies
+  that carry the flux (a factor 20 at $x_c$ 2.6, 700 at 3.3; the slab and sphere
+  tests cannot see it, their core mean free path being $10^{-6}$ of the medium).
+  With $J$ flat across the node, each face's rate is the average over the node of
+  the per-frequency rate $2/(3W(k(x)W + k_n(x)W_n))$ (Simpson in $x = x_c\cos\theta$,
+  64 intervals, which resolves the $e^{x^2}$ rise at the edge), the neighbour's
+  node or the boundary form by frequency; the frequency of a hop is drawn in
+  proportion to that face's per-frequency rate and then tested against the
+  neighbour's node (hop or emerge at that frequency), the force deposit at a hop
+  uses $k$ at that frequency, an advective crossing draws uniformly in the node,
+  and the conversion of a transport photon at a face uses $k$ at its own frequency.
+- The report counts the cells with a partial core edge and their mean edge.
+
+Tests and gates: `core_edge_toy.py` (the visit lengths and exit law, and the hybrid
+walk's scatterings and visits to reach $|x| \ge X$ against the kinetic walk, within
+the sampling scale for the quantile exit and the measured failure of the Rayleigh
+rule); the sphere_lya checks unchanged (slab, sphere, rsphere, analog, moving);
+a new `coreedge` check, the slab at $\tau_0$ of $10^4$ and $10^5$ against its analog run
+at 8 and 32 cells, where every cell has a partial edge; the production deck's Lyman
+alpha type against its analog run (spectrum, transmission, the scattering
+histogram, the per-photon lifetimes) and the saving.  Gate: the slab within the
+analog scatter; the hot Jupiter within the two-sample scale with the longest-lived
+photon no longer setting the cycle's wall time.
+
+Status (2026-11-22): built; the record is the guide's Section "What R4 built".  The
+visit table is a stationary chain per point (200 visits and 1e6 scatterings, or 20 000
+visits), its exits kept as 65 tail-weighted quantiles, cached in `<ddmc> visit_file`;
+the core walker's spatial rates are the node averages.  `coreedge` passes at tau0 1e4
+and 1e5 (x within 1.3 scales, paths within 1.4, 20 to 400 times cheaper); the slab and
+sphere checks are unchanged; the production hot Jupiter's Lyman alpha type agrees with
+its analog run to K = 0.001 at 20 000 photons with the transport wall time 6.4 s against
+377 (the longest-lived photon 6 s against 345).  Open: the entry-exit correlation of
+short visits (5 to 10 percent at an edge of 1.5), the 1.2 ms per scattering of the
+analog hot Jupiter deck (a profile is in hand), the table's cost above x_loc of 5.
+
+To do: the radiation force of the lattice against analog.  Nothing in R1 to R4 measured
+the force; the slab and sphere tests have no force gate and the hot Jupiter comparison
+was the escaping spectrum, the transmission and the costs.  On the lattice the force is
+chi F/c with F the face-hop flux (`DDMCHopDeposit`), deposited only at face crossings,
+and in a core cell chi is the Voigt extinction at a frequency drawn in proportion to the
+face's per-frequency rate (`DDMCLineCoreDraw`, `DDMCLineKPhoton`), so the deposit is
+the node integral of k(x) F(x) in expectation under a flat J; the R3 code weighted every
+crossing with the bin-mean k, wrong by the Planck-to-Rosseland ratio over the node.
+What is expected: right in the mean to the lattice's first order in the cell size at
+the interface and marginal where the cell is only `tau` deep at the edge frequencies,
+which carry the flux; the two estimators meet at every node mismatch between
+neighbours; and far noisier per photon in a core cell, where a walker leaves by the
+frequency faces about ten times more often than by a spatial face, so a cell's force
+is a few hops each carrying a whole visit's energy where analog sums thousands of
+kicks.  The measurement: the Lyman alpha force profile of the production hot Jupiter,
+lattice against analog in the `mcsrc` output with the `RadforceF_err` arrays (the
+20 000-photon runs in `$TMPDIR/hj_core/lat20k` and `an20k` both wrote it, so this is a
+post-processing step on runs in hand), then a force gate in `coreedge` on the slab's
+force profile if the hot Jupiter shows a bias.  Until this is done the lattice's force
+is not to be trusted in a coupled run.
+
 ## 6. Keys and the wiki
 
 A block of its own, `<ddmc>`: `enable`, `tau` (the cell threshold on the full width,
