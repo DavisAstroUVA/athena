@@ -134,6 +134,47 @@ void MonteCarloBlock::DDMCCellWidths(int i3, int i2, int i1, Real W[3]) const {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void MonteCarloBlock::DDMCFaceFactors(int i3, int i2, int i1, Real g[6]) const
+//! \brief for each face, the ratio of its area to the cell's volume times the cell's
+//!        width along the face's axis: 1 for a box, and for a spherical polar cell the
+//!        factor that turns the leakage rate of the box form into the finite-volume
+//!        one of the curved cell (the outer radial face larger than the inner one, a
+//!        theta face on the axis of no area)
+
+void MonteCarloBlock::DDMCFaceFactors(int i3, int i2, int i1, Real g[6]) const {
+  for (int f=0; f<6; ++f) g[f] = 1.;
+  if (topology != MCTOPO_SPHERICAL) return;
+  const Real r0 = pcoord->x1f(i1), r1 = pcoord->x1f(i1+1);
+  const Real t0 = pcoord->x2f(i2), t1 = pcoord->x2f(i2+1);
+  const Real dr = r1 - r0, dth = t1 - t0;
+  const Real rc = 0.5*(r0 + r1), thc = 0.5*(t0 + t1);
+  // the radial and polar factors of the volume, and the radial factor of a theta or
+  // phi face; the azimuthal extent cancels
+  const Real vr = (r1*r1*r1 - r0*r0*r0)/3.;
+  const Real vth = std::cos(t0) - std::cos(t1);
+  const Real ar = 0.5*(r1*r1 - r0*r0);
+  g[0] = r0*r0*dr/vr;
+  g[1] = r1*r1*dr/vr;
+  g[2] = ar*std::sin(t0)*rc*dth/(vr*vth);
+  g[3] = ar*std::sin(t1)*rc*dth/(vr*vth);
+  g[4] = ar*dth*rc*std::sin(thc)/(vr*vth);
+  g[5] = g[4];
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool MonteCarloBlock::DDMCPoleFace(int i2, int side) const
+//! \brief whether the lower (side 0) or upper (side 1) theta face of the cells in row i2
+//!        lies on the polar axis of spherical polar coordinates: a face of no area,
+//!        through which nothing diffuses and which no walker, emergence or conversion
+//!        crosses; the pusher carries a transport photon across the axis
+
+bool MonteCarloBlock::DDMCPoleFace(int i2, int side) const {
+  if (topology != MCTOPO_SPHERICAL) return false;
+  const Real th = (side == 0) ? pcoord->x2f(i2) : pcoord->x2f(i2+1);
+  return (side == 0) ? (th < 1.e-10) : (th > PI - 1.e-10);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarloBlock::BuildDDMCRates()
 //! \brief which cells are diffusion cells and the leakage rates of each
 //
@@ -228,8 +269,9 @@ void MonteCarloBlock::BuildDDMCRates() {
         if (line) nnode += 2*ddmc_line_edge(k,j,i) + 1;
         // the table's rates: pure Thomson, or on the frequency lattice the core bin's
         const Real chi_c = line ? ddmc_line_k(core,k,j,i) : species(0,k,j,i)*sigt;
-        Real W[3];
+        Real W[3], G[6];
         DDMCCellWidths(k, j, i, W);
+        DDMCFaceFactors(k, j, i, G);
         Real total = 0.;
         for (int axis=0; axis<3; ++axis) {
           const Real wc = W[axis]*l_cgs;
@@ -239,6 +281,8 @@ void MonteCarloBlock::BuildDDMCRates() {
             const int di = (axis == 0) ? (side ? 1 : -1) : 0;
             const int dj = (axis == 1) ? (side ? 1 : -1) : 0;
             const int dk = (axis == 2) ? (side ? 1 : -1) : 0;
+            // a theta face on the polar axis has no area: no leakage, no interface
+            if (axis == 1 && DDMCPoleFace(j, side)) continue;
             Real rate;
             // a face into a ghost cell beyond a block face to another level: a boundary
             // face of the lattice, flagged for the report
@@ -266,6 +310,7 @@ void MonteCarloBlock::BuildDDMCRates() {
             } else {
               rate = 2./(3.*wc*(chi_c*wc + 2.*kLambda));
             }
+            rate *= G[2*axis + side];
             ddmc_rate(2*axis + side, k, j, i) = rate;
             total += rate;
           }
@@ -280,6 +325,15 @@ void MonteCarloBlock::BuildDDMCRates() {
             const Real bp = vel(k+dk,j+dj,i+di,axis+1)/vel(k+dk,j+dj,i+di,0);
             const Real bm = vel(k-dk,j-dj,i-di,axis+1)/vel(k-dk,j-dj,i-di,0);
             div += (bp - bm)/(2.*W[axis]*l_cgs);
+          }
+          if (topology == MCTOPO_SPHERICAL) {
+            // the geometric terms of the divergence,
+            // 2 beta_r / r + cot(theta) beta_theta / r
+            const Real rc = 0.5*(pcoord->x1f(i) + pcoord->x1f(i+1))*l_cgs;
+            const Real thc = 0.5*(pcoord->x2f(j) + pcoord->x2f(j+1));
+            div += 2.*vel(k,j,i,1)/(vel(k,j,i,0)*rc);
+            if (active2)
+              div += vel(k,j,i,2)/(vel(k,j,i,0)*rc*std::tan(thc));
           }
           ddmc_rate(DDMC_RATE_DIV, k, j, i) = div;
         }
@@ -353,7 +407,12 @@ void MonteCarloBlock::DDMCHopDeposit(int type, int i3, int i2, int i1, int axis,
 //!        on the frequency lattice, the bin holding e is a node of it
 
 bool PhotonPusher::DDMCIsNode(int i3, int i2, int i1, Real e) {
-  if (pmy_mcb->ddmc_cell(i3,i2,i1) == 0) return false;
+  const AthenaArray<int> &cell = pmy_mcb->ddmc_cell;
+  // beyond the array: a direction the mesh does not resolve has no ghost zone
+  if (i1 < 0 || i1 >= cell.GetDim1() || i2 < 0 || i2 >= cell.GetDim2()
+      || i3 < 0 || i3 >= cell.GetDim3())
+    return false;
+  if (cell(i3,i2,i1) == 0) return false;
   return pmy_mc->ddmc_line == DDMC_LINE_NONE || pmy_mcb->DDMCLineNode(i3, i2, i1, e);
 }
 
@@ -750,6 +809,8 @@ Real PhotonPusher::DDMCRates(Photon *pphot, int ip, Real rate[6]) {
     return pmcb->ddmc_rate(MonteCarloBlock::DDMC_RATE_TOT, i3, i2, i1);
   }
   const Real chi_c = pphot->scp[ip] + pphot->acp[ip];
+  Real G[6];
+  pmcb->DDMCFaceFactors(i3, i2, i1, G);
   Real total = 0.;
   for (int axis=0; axis<3; ++axis) {
     const Real wc = pmcb->ddmc_rate(MonteCarloBlock::DDMC_RATE_W + axis, i3, i2, i1);
@@ -770,6 +831,7 @@ Real PhotonPusher::DDMCRates(Photon *pphot, int ip, Real rate[6]) {
       } else {
         rate[f] = 2./(3.*wc*(chi_c*wc + 2.*kLambda));
       }
+      rate[f] *= G[f];
       total += rate[f];
     }
   }
@@ -820,20 +882,34 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
     Real ct_drift = HUGE_NUMBER;
     int face_drift = -1;
     Real u[3] = {0., 0., 0.}, grad[3] = {0., 0., 0.}, half[3] = {0., 0., 0.};
+    // cm of path per unit of coordinate along each axis, times l_cgs: 1 in Cartesian;
+    // in spherical polar r along theta and r sin(theta) along phi, at the cell's centre
+    Real scale[3] = {l_cgs, l_cgs, l_cgs};
+    bool pole[2] = {false, false};
     if (moving) {
       const Real x[3] = {pphot->x1p[ip], pphot->x2p[ip], pphot->x3p[ip]};
       const Real lo[3] = {pcoord->x1f(i1), pcoord->x2f(i2), pcoord->x3f(i3)};
       const Real hi[3] = {pcoord->x1f(i1+1), pcoord->x2f(i2+1), pcoord->x3f(i3+1)};
+      if (pmcb->topology == MCTOPO_SPHERICAL) {
+        const Real rc = 0.5*(lo[0] + hi[0]);
+        scale[1] *= rc;
+        scale[2] *= rc*std::sin(0.5*(lo[1] + hi[1]));
+      }
       for (int a=0; a<3; ++a) {
         if ((a == 1 && pmcb->nx2 == 1) || (a == 2 && pmcb->nx3 == 1)) continue;
-        half[a] = 0.5*(hi[a] - lo[a])*l_cgs;
-        u[a] = (x[a] - 0.5*(lo[a] + hi[a]))*l_cgs;
+        half[a] = 0.5*(hi[a] - lo[a])*scale[a];
+        u[a] = (x[a] - 0.5*(lo[a] + hi[a]))*scale[a];
         const int di = (a == 0) ? 1 : 0, dj = (a == 1) ? 1 : 0, dk = (a == 2) ? 1 : 0;
         grad[a] = (pmcb->vel(i3+dk,i2+dj,i1+di,a+1) - pmcb->vel(i3-dk,i2-dj,i1-di,a+1))
                   /(4.*half[a]);
         const Real gb = gam*beta[a];
         const Real w0 = gb + grad[a]*u[a];
         if (w0 == 0.) continue;
+        // a drift toward a theta face on the polar axis stops a hair inside it
+        if (a == 1 && pmcb->DDMCPoleFace(i2, (w0 > 0.) ? 1 : 0)) {
+          pole[(w0 > 0.) ? 1 : 0] = true;
+          continue;
+        }
         const Real d = DriftTime(gb, grad[a], u[a], (w0 > 0.) ? half[a] : -half[a]);
         if (d < ct_drift) {
           ct_drift = std::max(d, 0.);
@@ -932,13 +1008,17 @@ void PhotonPusher::DDMCWalk(Photon *pphot, MCRandom *pran, int ip) {
       for (int a=0; a<3; ++a) {
         du[a] = (half[a] > 0.) ? DriftMove(gam*beta[a], grad[a], u[a], ct) - u[a] : 0.;
         // the drift is confined to the cell; an advective crossing sets the coordinate
-        du[a] = std::max(std::min(du[a], half[a] - u[a]), -half[a] - u[a]);
+        Real lim_hi = half[a] - u[a], lim_lo = -half[a] - u[a];
+        if (a == 1 && pole[1]) lim_hi -= 2.*kFaceNudge*half[a];
+        if (a == 1 && pole[0]) lim_lo += 2.*kFaceNudge*half[a];
+        du[a] = std::max(std::min(du[a], lim_hi), lim_lo);
       }
-      pphot->x1p[ip] += du[0]/l_cgs;
-      pphot->x2p[ip] += du[1]/l_cgs;
-      pphot->x3p[ip] += du[2]/l_cgs;
+      pphot->x1p[ip] += du[0]/scale[0];
+      pphot->x2p[ip] += du[1]/scale[1];
+      pphot->x3p[ip] += du[2]/scale[2];
     }
-    // A dwell deep in a resonance line can stands for more scatterings than column holds
+    // A dwell deep in a resonance line can stand for more scatterings than the column
+    // holds
     const Real nsc_new = pphot->nscp[ip] + std::round(nscat*fsurv);
     pphot->nscp[ip] = static_cast<int>(std::min(static_cast<Real>(INT_MAX), nsc_new));
     pmcb->nddmc_scat += nscat*fsurv;
@@ -1044,11 +1124,17 @@ bool PhotonPusher::DDMCFaceTest(Photon *pphot, MCRandom *pran, int ip, int face,
   if (face < 0 || face > 2) return false;
   MonteCarloBlock *pmcb = pmy_mcb;
   const int axis = face;
+  // a face of a direction the mesh does not resolve (one cell, periodic or reflecting)
+  // is no interface: the medium beyond it is the same cell
+  if ((axis == 1 && pmcb->nx2 == 1) || (axis == 2 && pmcb->nx3 == 1)) return false;
   const bool up = ascend[axis];
   const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
   const int n1 = i1 + ((axis == 0) ? (up ? 1 : -1) : 0);
   const int n2 = i2 + ((axis == 1) ? (up ? 1 : -1) : 0);
   const int n3 = i3 + ((axis == 2) ? (up ? 1 : -1) : 0);
+  // a theta face on the polar axis is no interface either: the pusher carries the
+  // photon across the axis
+  if (axis == 1 && pmcb->DDMCPoleFace(i2, up ? 1 : 0)) return false;
   // no bin of the cell beyond is a node (the photon's own bin is tested in the
   // diffusion cell's frame below)
   if (pmcb->ddmc_cell(n3,n2,n1) == 0) return false;

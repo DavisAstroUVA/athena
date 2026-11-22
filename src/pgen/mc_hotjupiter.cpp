@@ -391,6 +391,16 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin) {
 
   flag_core_skipping = pin->GetOrAddBoolean("problem", "core_skip", false);
   if (flag_core_skipping) {
+    // CoreSkipping runs on every sample the pusher moves, a walker of the frequency
+    // lattice included, whose energy it would reset: the lattice is the core's
+    // acceleration and the two do not combine
+    if (pin->GetOrAddBoolean("ddmc", "enable", false)) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo::InitUserMonteCarloData" << std::endl
+          << "<problem>/core_skip does not combine with the frequency lattice "
+          << "(<ddmc> enable); set core_skip = false" << std::endl;
+      throw std::runtime_error(msg.str());
+    }
     // CoreSkipping compares the cell's comoving line optical depth against a threshold,
     // so it reads MCCoord::dmin, which is built only under <montecarlo>/compute_dmin
     if (!compute_dmin) {

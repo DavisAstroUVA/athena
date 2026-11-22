@@ -1002,7 +1002,8 @@ void MonteCarloBlock::TransferPhotonsOnBlock(int etype) {
           && ddmc_cell(pphot->i3p[ip],pphot->i2p[ip],pphot->i1p[ip]) != 0)
         DDMCLineEntry(pphot, ip, e_com0);
       nscat++;
-      pphot->nscp[ip]++;
+      // the column saturates where a dwell of the diffusion lattice may have left it
+      if (pphot->nscp[ip] < std::numeric_limits<int>::max()) pphot->nscp[ip]++;
       if (pmy_mc->mrw_report || pmy_mc->ddmc_report) BinScatteringDepth(pphot,ip);
       // Scattering starts a new free flight
       pphot->nmvp[ip] = 0;

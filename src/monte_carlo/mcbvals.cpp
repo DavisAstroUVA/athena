@@ -343,20 +343,20 @@ void ReflectMCInnerX2(MonteCarloBlock *pmcb, MCCoord *pco, Photon *pphot, int ip
 
 //----------------------------------------------------------------------------------------
 //! \fn void ReflectMCOuterX2(MonteCarloBlock *pmcb, MCCoord *pco, Photon *pphot, int ip)
-//! \brief periodic boundary conditions, outer x2 boundary
+//! \brief reflecting boundary conditions, outer x2 boundary
 
 void ReflectMCOuterX2(MonteCarloBlock *pmcb, MCCoord *pco, Photon *pphot, int ip) {
 
   const Real frac = 1.e-8;
   pphot->k2p[ip] *= -1.;
   pphot->i2p[ip] = pmcb->je;
-  pphot->x2p[ip] = pco->x1f(pphot->i2p[ip]+1)*(1.-frac) + pco->x2f(pphot->i2p[ip])*frac;
+  pphot->x2p[ip] = pco->x2f(pphot->i2p[ip]+1)*(1.-frac) + pco->x2f(pphot->i2p[ip])*frac;
 
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void ReflectMCInnerX3(MonteCarloBlock *pmcb, MCCoord *pco, Photon *pphot, int ip)
-//! \brief periodic boundary conditions, inner x3 boundary
+//! \brief reflecting boundary conditions, inner x3 boundary
 
 void ReflectMCInnerX3(MonteCarloBlock *pmcb, MCCoord *pco, Photon *pphot, int ip) {
 
@@ -369,7 +369,7 @@ void ReflectMCInnerX3(MonteCarloBlock *pmcb, MCCoord *pco, Photon *pphot, int ip
 
 //----------------------------------------------------------------------------------------
 //! \fn void ReflectMCOuterX3(MonteCarloBlock *pmcb, MCCoord *pco, Photon *pphot, int ip)
-//! \brief periodic boundary conditions, outer x3 boundary
+//! \brief reflecting boundary conditions, outer x3 boundary
 
 void ReflectMCOuterX3(MonteCarloBlock *pmcb, MCCoord *pco, Photon *pphot, int ip) {
 

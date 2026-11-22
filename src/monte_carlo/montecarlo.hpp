@@ -399,6 +399,11 @@ public:
   int ddmc_line_nwing, ddmc_line_nbin;
   Real ddmc_line_dnu; // the Doppler width at ddmc_line_temp
   std::vector<Real> ddmc_line_xedge; // the nbin + 3 bin edges in reference Doppler units
+  // the scatterings of a kinetic visit to the core, tabulated over log10 of the cell's
+  // Doppler scale s = sqrt(line_temp / T), which sets a s and core_width s in the
+  // cell's Doppler units
+  std::vector<Real> ddmc_line_vlogs, ddmc_line_visit;
+  Real DDMCLineCoreVisit(Real s) const;
   std::vector<Real> ddmc_line_eedge; // the same as energies
   void SetupDDMCLine(ParameterInput *pin);
   //! the bin holding comoving energy e, -1 outside the extended grid
@@ -745,6 +750,8 @@ public:
   void BuildDDMCRates();
   //! widths of a cell along its coordinate directions at its centre, code length
   void DDMCCellWidths(int i3, int i2, int i1, Real W[3]) const;
+  void DDMCFaceFactors(int i3, int i2, int i1, Real g[6]) const;
+  bool DDMCPoleFace(int i2, int side) const;
   //! what a face crossing of energy we in the direction sign along axis leaves in
   //! the cell: its flux, and the radiation force
   void DDMCHopDeposit(int type, int i3, int i2, int i1, int axis, Real sign, Real we,

@@ -11,7 +11,11 @@
 //!        can be a cell of the DDMC lattice and the escape surface runs through the
 //!        empty cells beyond; with the radius pushed past the mesh the medium fills it
 //!        and the escape is at the mesh boundaries instead: a slab when the mesh is one
-//!        cell wide in two directions (periodic there, escape in the third).
+//!        cell wide in two directions (periodic there, escape in the third).  In
+//!        spherical polar coordinates the medium fills the mesh, the source is a shell
+//!        at the inner edge x1min, isotropic outward, which a reflecting inner boundary
+//!        makes the point source as x1min goes to zero, and the escape is the outer
+//!        boundary x1max, the radius.
 //========================================================================================
 
 // C/C++ headers
@@ -48,6 +52,7 @@ namespace {
   // function headers
   void SphericalEscape(MonteCarloBlock *pmcb, Photon *phot, PhotonPusher *ppusher, int ip);
   void TimedEscape(MonteCarloBlock *pmcb, Photon *phot, PhotonPusher *ppusher, int ip);
+  void RadialPath(MonteCarloBlock *pmcb, Photon *phot, PhotonPusher *ppusher, int ip);
 }
 
 //========================================================================================
@@ -67,7 +72,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   if (COORDINATE_SYSTEM == "cartesian") {
     rad0 = pin->GetReal("problem","radius");
   } else if (COORDINATE_SYSTEM == "spherical_polar") {
-    rad0 = pcoord->x1f(ie+1);
+    rad0 = pmy_mesh->mesh_size.x1max;
   }
   Real vel = pin->GetOrAddReal("problem","velocity",0.);
   // uniform: the medium moves along z at velocity; homologous: an expansion,
@@ -127,7 +132,17 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           rc = std::sqrt(SQR(pcoord->x1v(i)) + SQR(pcoord->x2v(j)) + SQR(pcoord->x3v(k)));
         const Real rho = (rc < rad0) ? rho0 : 1.e-20*rho0;
         phydro->u(IDN,k,j,i) = rho;
-        if (homologous) {
+        if (COORDINATE_SYSTEM == "spherical_polar") {
+          // the momenta are the physical components along r, theta and phi
+          if (homologous) {
+            phydro->u(IM1,k,j,i) = rho*vel*pcoord->x1v(i)/rad0;
+            phydro->u(IM2,k,j,i) = 0.0;
+          } else {
+            phydro->u(IM1,k,j,i) = rho*vel*std::cos(pcoord->x2v(j));
+            phydro->u(IM2,k,j,i) = -rho*vel*std::sin(pcoord->x2v(j));
+          }
+          phydro->u(IM3,k,j,i) = 0.0;
+        } else if (homologous) {
           const Real f = rho*vel/rad0;
           phydro->u(IM1,k,j,i) = f*pcoord->x1v(i);
           phydro->u(IM2,k,j,i) = f*pcoord->x2v(j);
@@ -165,12 +180,12 @@ void MonteCarlo::InitUserMonteCarloData(ParameterInput *pin){
   // With <problem> time set the photons stop at that path length (c = 1 in the
   // pushers); otherwise at the sphere
   Real time = pin->GetOrAddReal("problem","time",-1.);
-  if (time > 0.) {
+  if (COORDINATE_SYSTEM == "spherical_polar") {
+    EnrollUserWorkInMove(RadialPath);
+  } else if (time > 0.) {
     EnrollUserWorkInMove(TimedEscape);
   } else {
-    if (COORDINATE_SYSTEM == "cartesian") {
-      EnrollUserWorkInMove(SphericalEscape);
-    }
+    EnrollUserWorkInMove(SphericalEscape);
   }
 }
 
@@ -188,13 +203,14 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
   Real dopw = MCConstants::nu_lya*vth/MCConstants::c_cgs;
   energy0 = MCConstants::h_cgs*(MCConstants::nu_lya + dopw*x0);
 
-  rad0 = pin->GetReal("problem","radius");
   time0 = pin->GetOrAddReal("problem","time",-1.);
 
-  // Whether this block holds the origin, which is assumed to be a cell centre when more
-  // than one cell is specified in a direction; the point source goes to that block
-  bool has_origin = true;
+  // With no emission function the block has to be given its photon count
+  const int64_t nphot = pin->GetInteger64("montecarlo","nphot");
   if (COORDINATE_SYSTEM == "cartesian") {
+    rad0 = pin->GetReal("problem","radius");
+    // Whether this block holds the origin, which is assumed to be a cell centre when
+    // more than one cell is specified in a direction; the point source goes to that block
     int i1start = -1, i2start = -1, i3start = -1;
     for (int i=is; i<=ie; i++)
       if ((0. > pcoord->x1f(i)) && (0. <= pcoord->x1f(i+1))) i1start = i;
@@ -202,10 +218,18 @@ void MonteCarloBlock::MonteCarloProblemGenerator(ParameterInput *pin) {
       if ((0. > pcoord->x2f(j)) && (0. <= pcoord->x2f(j+1))) i2start = j;
     for (int k=ks; k<=ke; k++)
       if ((0. > pcoord->x3f(k)) && (0. <= pcoord->x3f(k+1))) i3start = k;
-    has_origin = (i1start >= 0) && (i2start >= 0) && (i3start >= 0);
+    const bool has_origin = (i1start >= 0) && (i2start >= 0) && (i3start >= 0);
+    nphremain = has_origin ? nphot : 0;
+  } else {
+    // the shell source at the mesh's inner edge, shared among the blocks there in
+    // proportion to their solid angle
+    const Mesh *pm = pmy_block->pmy_mesh;
+    rad0 = pm->mesh_size.x1max;
+    const bool inner = (pcoord->x1f(is) <= pm->mesh_size.x1min*(1. + 1.e-12));
+    const Real dcos = std::cos(pcoord->x2f(js)) - std::cos(pcoord->x2f(je+1));
+    const Real dphi = pcoord->x3f(ke+1) - pcoord->x3f(ks);
+    nphremain = inner ? static_cast<int64_t>(std::llround(nphot*dcos*dphi/(4.*PI))) : 0;
   }
-  // With no emission function the block has to be given its photon count
-  nphremain = has_origin ? pin->GetInteger64("montecarlo","nphot") : 0;
   nphrun = 0;
 
 }
@@ -236,9 +260,6 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
       ATHENA_ERROR(msg);
     }
   }
-  Real nx2 = static_cast<Real>(je-js+1);
-  Real nx3 = static_cast<Real>(ke-ks+1);
-
   for (int ip=ips; ip<=ipe; ip++) {
 
     // user[0] birth energy (set below), user[1] scattering count at escape,
@@ -266,21 +287,27 @@ void MonteCarloBlock::InitializePhoton(Photon *pphot, int ips, int ipe, int etyp
       pphot->k3p[ip] = cth;
 
     } else if (COORDINATE_SYSTEM == "spherical_polar") {
-      // radial photons from the inner edge
+      // the shell source at the inner edge: uniform in solid angle over the block,
+      // isotropic over the outward hemisphere (the reflecting inner boundary turns the
+      // rest around on the spot), the wavevector in the local basis (r, theta, phi)
+      const Real cthh = std::cos(pcoord->x2f(js)), cthl = std::cos(pcoord->x2f(je+1));
+      const Real theta = std::acos(cthl + pran->uniform()*(cthh - cthl));
+      const Real phi = pcoord->x3f(ks)
+                       + pran->uniform()*(pcoord->x3f(ke+1) - pcoord->x3f(ks));
       pphot->i1p[ip] = is;
-      pphot->i2p[ip] = static_cast<int>(pran->uniform()*nx2)+js;
-      pphot->i3p[ip] = static_cast<int>(pran->uniform()*nx3)+ks;
-      pphot->x1p[ip] = pcoord->x1f(pphot->i1p[ip]) * 100.; // at inner edge
-      Real cthh = cos(pcoord->x2f(pphot->i2p[ip]));
-      Real cthl = cos(pcoord->x2f(pphot->i2p[ip]+1));
-      Real cth = cthl + pran->uniform() * (cthh-cthl);
-      pphot->x2p[ip] = acos(cth);
-      Real pl = pcoord->x3f(pphot->i3p[ip]); Real dp = pcoord->x3f(pphot->i3p[ip]+1)-pl;
-      pphot->x3p[ip] = pl+pran->uniform()*dp;
+      pphot->i2p[ip] = js;
+      while (pphot->i2p[ip] < je && theta >= pcoord->x2f(pphot->i2p[ip]+1)) pphot->i2p[ip]++;
+      pphot->i3p[ip] = ks;
+      while (pphot->i3p[ip] < ke && phi >= pcoord->x3f(pphot->i3p[ip]+1)) pphot->i3p[ip]++;
+      pphot->x1p[ip] = pcoord->x1f(is) + 1.e-6*(pcoord->x1f(is+1) - pcoord->x1f(is));
+      pphot->x2p[ip] = theta;
+      pphot->x3p[ip] = phi;
       pphot->x0p[ip] = 0.; //time
-      pphot->k1p[ip] = 1.0;
-      pphot->k2p[ip] = 0.;
-      pphot->k3p[ip] = 0.;
+      const Real mu = pran->uniform();
+      const Real ph = 2.*PI*pran->uniform();
+      pphot->k1p[ip] = mu;
+      pphot->k2p[ip] = std::sqrt(1. - SQR(mu))*std::cos(ph);
+      pphot->k3p[ip] = std::sqrt(1. - SQR(mu))*std::sin(ph);
     }
 
     // weight and energy; a luminosity of 1e20 erg/s shared by the samples
@@ -339,6 +366,13 @@ void SphericalEscape(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher
     pphot->user[1][ip] = pphot->nscp[ip];
     pphot->statp[ip] = ESCAPED;
   }
+}
+
+//! in spherical polar the escape is the mesh's outer boundary; the path and the
+//! scattering count are kept in the user columns at every move
+void RadialPath(MonteCarloBlock *pmcb, Photon *pphot, PhotonPusher *ppusher, int ip) {
+  pphot->user[2][ip] += ppusher->dl;
+  pphot->user[1][ip] = pphot->nscp[ip];
 }
 
 //! the escape surface, and a stop at the path length time0

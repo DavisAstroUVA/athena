@@ -13,6 +13,12 @@ a point source at the centre at line centre.  Four checks:
             Kolmogorov distance of the |x| distribution from the exact one below --gate-k
   sphere    the same against Dijkstra et al. (2006), J(x) ~ x^2 / (1 + cosh(sqrt(2 pi^3/27)
             |x|^3 / a tau0)), median 0.8980 (a tau0)^(1/3)
+  rsphere   the sphere in spherical polar coordinates (the binary of --path-spherical):
+            --nz radial cells from 0.01 R0, where the source is a shell behind a
+            reflecting boundary, to the escape at R0, --ntheta (8) cells in theta and
+            in phi (the spherical-polar pusher needs both resolved), against Dijkstra;
+            --geometry-moving rsphere runs the moving check there too, which is what
+            tests the dwell's drift in curvilinear coordinates
   analog    the lattice at each --nz-analog (default 8 16 32, which moves the node band's
             edge through the spectrum) against one analog run of the slab at --tau-analog
             (default 1e6) and --temp-analog (default 10 K, a tau0 = 1.5e4, where the kernel is
@@ -80,19 +86,38 @@ def cdf_dijkstra(ax, atau):
     return np.tanh(0.5*c*ax**3)
 
 
-MEDIAN = {'slab': 1.0516, 'sphere': 0.8980}
-CDF = {'slab': cdf_neufeld, 'sphere': cdf_dijkstra}
+MEDIAN = {'slab': 1.0516, 'sphere': 0.8980, 'rsphere': 0.8980}
+CDF = {'slab': cdf_neufeld, 'sphere': cdf_dijkstra, 'rsphere': cdf_dijkstra}
+RIN = 0.01   # the inner edge of the spherical-polar sphere in units of R0
 
 
 def write_deck(filename, name, geometry, temp, tau0, nphot, iseed, ddmc, dx, xmax, core,
-               nz=32, nx=32, mcranks=1, ddmc_tau=3., vel=0., profile='homologous'):
+               nz=32, nx=32, mcranks=1, ddmc_tau=3., vel=0., profile='homologous',
+               nr=32, ntheta=1):
     """the slab: nz cells along x1 over +-R0, one periodic cell of 100 R0 in x2 and x3,
     escape at the x1 faces, the escape sphere at 100 R0; the sphere: nx^3 cells over
-    +-1.25 R0 offset half a cell so the origin is a cell centre, escape at R0.  The
-    deck's tau is the line-centre depth over the escape radius, so the slab scales it.
-    vel > 0 (units of c) is a homologous expansion with that velocity at the radius,
-    with boosts on"""
-    if geometry == 'slab':
+    +-1.25 R0 offset half a cell so the origin is a cell centre, escape at R0; the
+    rsphere (spherical polar, the binary of --path-spherical): nr radial cells from
+    RIN R0 to R0, the source at the inner edge behind a reflecting boundary, escape at
+    R0, ntheta cells in theta between reflecting boundaries at the poles and ntheta
+    periodic cells in phi (the spherical-polar pusher needs both angular directions
+    resolved).  The deck's tau is the line-centre depth over the escape radius, so the
+    slab scales it.  vel > 0 (units of c) is a homologous expansion with that velocity
+    at the radius, with boosts on"""
+    if geometry == 'rsphere':
+        radius = R0
+        tau = tau0
+        mb1 = max(nr//mcranks, 1)
+        mesh = (f"nx1 = {nr}\nx1min = {RIN*R0:.6e}\nx1max = {R0:.6e}\n"
+                "ix1_mc_bc = reflecting\nox1_mc_bc = escape\n"
+                f"nx2 = {ntheta}\nx2min = 0.0\nx2max = {np.pi:.16f}\n"
+                "ix2_bc = reflecting\nox2_bc = reflecting\n"
+                "ix2_mc_bc = reflecting\nox2_mc_bc = reflecting\n"
+                f"nx3 = {ntheta}\nx3min = 0.0\nx3max = {2.*np.pi:.16f}\n"
+                "ix3_bc = periodic\nox3_bc = periodic\n"
+                "ix3_mc_bc = periodic\nox3_mc_bc = periodic\n")
+        block = f"nx1 = {mb1}\nnx2 = {ntheta}\nnx3 = {ntheta}\n"
+    elif geometry == 'slab':
         radius = 100.*R0
         tau = tau0*radius/R0
         mb1 = max(nz//mcranks, 1)
@@ -160,8 +185,11 @@ heabund  = 0.09
     open(filename, 'w').write(s)
 
 
-def run(args, workdir, deck, name, mcranks):
-    exe = os.path.join(args.path, 'bin', 'athena')
+def run(args, workdir, deck, name, mcranks, spherical=False):
+    if spherical and not args.path_spherical:
+        sys.exit("the spherical-polar runs need --path-spherical, a build with "
+                 "--coord=spherical_polar")
+    exe = os.path.join(args.path_spherical if spherical else args.path, 'bin', 'athena')
     cmd = [exe, '-i', deck, '-d', workdir]
     if mcranks > 1:
         cmd = ['mpirun', '-n', str(mcranks)] + cmd
@@ -294,8 +322,9 @@ def check_exact(args, geometry, atau, nz, dxf, label, iseed, nphot=None):
     os.makedirs(wd, exist_ok=True)
     deck = os.path.join(wd, f'athinput.{name}')
     write_deck(deck, name, geometry, temp, tau0, nphot or args.nphot, iseed, True, dx, xmax,
-               args.core, nz=nz, nx=args.nx, mcranks=args.mcranks, ddmc_tau=args.ddmc_tau)
-    files, rep = run(args, wd, deck, name, args.mcranks)
+               args.core, nz=nz, nx=args.nx, mcranks=args.mcranks, ddmc_tau=args.ddmc_tau,
+               nr=nz, ntheta=args.ntheta)
+    files, rep = run(args, wd, deck, name, args.mcranks, spherical=(geometry == 'rsphere'))
     x, path, nsc = load(files, temp)
     # the sphere's medium is the cells whose centres lie inside R0, so the exact solution
     # is taken at the radius of a sphere of their volume
@@ -337,12 +366,19 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--path', default=os.path.join(HERE, '..', '..', '..'))
+    ap.add_argument('--path-spherical', default=None,
+                    help='a build with --coord=spherical_polar, for the rsphere runs')
     ap.add_argument('--workdir', required=True)
     ap.add_argument('--reuse', action='store_true',
                     help='keep a run already in the workdir (its lists and a complete log)')
     ap.add_argument('--checks', nargs='+',
                     default=['slab', 'sphere', 'analog', 'scan', 'moving'],
-                    choices=['slab', 'sphere', 'analog', 'scan', 'moving'])
+                    choices=['slab', 'sphere', 'rsphere', 'analog', 'scan', 'moving'])
+    ap.add_argument('--ntheta', type=int, default=8,
+                    help='theta and phi cells of the spherical-polar sphere')
+    ap.add_argument('--geometry-moving', default='sphere', choices=['sphere', 'rsphere'],
+                    help='the moving check on the Cartesian cube or in spherical polar '
+                         '(--nx-moving then counts radial cells)')
     ap.add_argument('--atau', type=float, nargs='+', default=[1.e5, 1.e6, 1.e7])
     ap.add_argument('--temp', type=float, default=1.e4, help='gas temperature, K')
     ap.add_argument('--nz', type=int, default=32, help='cells across the slab')
@@ -390,11 +426,12 @@ def main(args):
     print(f"Lyman alpha at {args.temp:g} K: a = {a:.3e}, Doppler width "
           f"{doppler_width(args.temp):.4e} Hz")
 
-    for geometry in ('slab', 'sphere'):
+    for geometry in ('slab', 'sphere', 'rsphere'):
         if geometry not in args.checks:
             continue
         print(f"{geometry}: the lattice against "
-              f"{'Neufeld 1990' if geometry == 'slab' else 'Dijkstra et al. 2006'}")
+              f"{'Neufeld 1990' if geometry == 'slab' else 'Dijkstra et al. 2006'}"
+              + (" in spherical polar coordinates" if geometry == 'rsphere' else ''))
         ok_all = True
         for i, atau in enumerate(args.atau):
             ok, _ = check_exact(args, geometry, atau, args.nz, args.dxf, f'at{atau:.0e}',
@@ -451,23 +488,27 @@ def main(args):
         dx = args.dxf*atau**(1./3.)
         xmax = args.xmaxf*atau**(1./3.)
         vth = np.sqrt(2.*K_BOLTZ*temp/M_H)
-        print(f"moving: the sphere at tau0 {args.tau_moving:g}, {temp:g} K (a tau0 {atau:.3g}) "
-              f"in {args.profile_moving} flow, lattice against the analog kernel, "
+        geometry = args.geometry_moving
+        spherical = (geometry == 'rsphere')
+        print(f"moving: the {geometry} at tau0 {args.tau_moving:g}, {temp:g} K (a tau0 "
+              f"{atau:.3g}) in {args.profile_moving} flow, lattice against the analog kernel, "
               f"{args.nphot_analog} photons each")
         ok = True
         for iv, vdop in enumerate(args.vel_moving):
             vel = vdop*vth/C_LIGHT
             runs = []
             for nx, ddmc in [(args.nx, False)] + [(nx, True) for nx in args.nx_moving]:
-                name = f'moving{vdop:g}_lattice{nx}' if ddmc else f'moving{vdop:g}_analog'
+                name = (f'moving{vdop:g}_lattice{nx}' if ddmc else f'moving{vdop:g}_analog')
+                if spherical:
+                    name = 'r' + name
                 wd = os.path.join(args.workdir, name)
                 os.makedirs(wd, exist_ok=True)
                 deck = os.path.join(wd, f'athinput.{name}')
-                write_deck(deck, name, 'sphere', temp, args.tau_moving, args.nphot_analog,
+                write_deck(deck, name, geometry, temp, args.tau_moving, args.nphot_analog,
                            args.iseed + 20 + iv, ddmc, dx, xmax, args.core, nx=nx,
                            mcranks=args.mcranks, ddmc_tau=args.ddmc_tau, vel=vel,
-                           profile=args.profile_moving)
-                files, rep = run(args, wd, deck, name, args.mcranks)
+                           profile=args.profile_moving, nr=nx, ntheta=args.ntheta)
+                files, rep = run(args, wd, deck, name, args.mcranks, spherical=spherical)
                 runs.append((name, nx, load(files, temp), rep))
                 print(f"  v = {vdop:g} Doppler widths, {name:20s}: {rep.get('nscat', 0):.3g} "
                       f"scatterings/photon, cpu {rep.get('cpu', 0):.3g} s/photon, wall "

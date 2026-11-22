@@ -1176,8 +1176,8 @@ photons, agrees in the escaping frequencies within 1.2 times the two-sample scal
 in the paths within 1.0 and 0.5 at 16 and 32 cells across, with the red fraction and the
 mean $x$ matching.  The static control at 4000 photons: frequencies within 0.8 and 0.9
 scales, paths 1.8 and 1.2 (the lattice's mean path 4.5 percent long at both resolutions,
-the core bin's residence by the Fokker-Planck exit rate, which the spectrum does not
-feel).
+the core bin's residence by the harmonic exit rate, which the spectrum does not
+feel and R3 corrects).
 
 \textbf{Measured: the homologous expansion} (\texttt{sphere\_lya.py --checks moving},
 the sphere at $\tau_0 = 10^6$ and 10 K, $a\tau_0 = 1.5\times10^4$, 4000 photons each,
@@ -1237,6 +1237,224 @@ scan.  The red/blue peak asymmetry is carried by the drift in the wing bins and 
 erasure in the core, which is the mechanism Smith et al.\ could not reproduce with a
 core bin that blocks leakage across line centre; here the core bin does not block it,
 and the asymmetry comes out right to the accuracy above.
+
+\section{What R3 built: spherical polar, the polar axis, and the core's kinetic exit}
+\label{sec:r3}
+
+Built 2026-10-31.  The hot Jupiter is a wind in spherical polar coordinates whose
+lattice region, the dense base, holds a node band that is the core bin alone, and the
+phase turned out to be mostly about those two facts.  The hot Jupiter measurements
+close the section.
+
+\textbf{The lattice in spherical polar coordinates.}  D1's leakage rates and face
+geometry already took the spherical pusher's cell widths; the moving medium of D4 did
+not.  The dwell's loss now carries the geometric terms of the divergence,
+$2\beta_r/r + \cot\theta\,\beta_\theta/r$, and the drift converts the comoving
+displacement into coordinate steps with the scale factors $r$ along $\theta$ and
+$r\sin\theta$ along $\phi$ at the cell's centre.  Two guards came with it: a face of
+a direction the mesh does not resolve (one cell, periodic or reflecting) is no
+interface, since the medium beyond it is the same cell, and the node test refuses an
+index beyond the array in such a direction.  \texttt{mc\_sphere\_lya} gained the
+geometry: the medium fills a spherical polar mesh, the source is a shell at the inner
+edge, isotropic outward, which the reflecting inner boundary makes the point source as
+the inner radius goes to zero, the escape is the outer boundary, and a move hook keeps
+the path and the scattering count in the user columns; \texttt{sphere\_lya.py
+--checks rsphere} (the binary of \texttt{--path-spherical}, \texttt{--ntheta} cells
+in $\theta$ and $\phi$) runs it against Dijkstra et al., and
+\texttt{--geometry-moving rsphere} runs the moving check there.
+
+\textbf{The polar axis.}  A $\theta$ face on the axis has no area, and the lattice
+had treated it as a face: it leaked through it, emerged photons a hair inside it, and
+the spherical pusher's cone intersection then placed them exactly on $\theta = \pi$,
+where the direction is undefined.  On the spherical sphere this was 89 of 2000
+photons lost to NaN at $a\tau_0 = 10^5$ and photons at the scattering budget at
+$10^6$; the four photons the hot Jupiter lost at its pole in the first R3 runs were
+the same defect, not the deck's periodic $\theta$.  Now \texttt{DDMCPoleFace} names
+such a face and the lattice gives it no rate, no hop, no emergence, no interface, and
+a drift toward it stops a hair inside; the pusher carries a transport photon across
+the axis as before.  The hunt found a pre-existing typo in the reflecting outer
+$\theta$ boundary of the photon exchange (\texttt{ReflectMCOuterX2} read the radial
+faces), fixed in passing.
+
+\textbf{The scattering column's overflow.}  The spherical sphere at $a\tau_0 =
+10^6$ then failed with its spectrum far too wide (median $|x|$ 103 against the exact
+90, a Kolmogorov distance ten times the sampling scale) and $9.5\times10^6$ analog
+scatterings per photon where the Cartesian sphere at the same depth spends five
+thousand, nearly all of them at line centre inside diffusion cells, where a transport
+photon converts at its first scattering.  An instrumented build showed those photons
+carrying a negative scattering count.  A dwell adds the scatterings it stands for to
+the photon's integer column \texttt{nscp}, saturating at \texttt{INT\_MAX} when the
+sum exceeds it (R1), and the next analog scattering incremented the saturated column
+past the limit to a negative number, after which the conversion test's ``has
+scattered at least once'' (\texttt{nscp > 0}, which lets a photon just emitted fly
+once first) failed for the rest of that photon's life: it walked the whole sphere as
+an analog photon.  The spherical mesh resolves the radius with 32 cells where the
+Cartesian cube resolves the diameter, so its walkers take four times the dwells and
+were the first to reach the limit; a Cartesian run at a greater depth or a finer mesh
+would have met it too.  The two analog increments of the column (the scattering
+loop and the random walk's step) now saturate as the dwell does.  The column is a
+count for the report and the problem generators' user columns, and a saturated value
+there means ``more than the column holds''.
+
+\textbf{The leakage rates of a curved cell.}  With the overflow fixed the spherical
+sphere at $a\tau_0 = 10^6$ cost what a lattice run costs (1562 scatterings and 1453
+dwells per photon) and was still 15 percent too wide in the median, where the
+Cartesian sphere at the same depth is right.  The leakage rate of D1 is the box form,
+$1/\Delta$ times $D/\delta$ with $D$ the harmonic mean of the diffusion coefficients
+on the two sides and $\delta$ the width between the centres, and its $1/\Delta$ is the
+face's area over the cell's volume only for a box.  A spherical polar cell has an
+outer radial face larger than its inner one, so a walker in the inner cells, where
+the shell source puts every photon, leaked inward as readily as outward and stayed
+longer than the diffusion equation says; the lattice's time, and with it the
+frequency diffusion, ran long, and the spectrum came out wide, by 4 percent at
+$a\tau_0 = 10^5$ and 15 at $10^6$ as the lattice's share grew.  The rates now carry
+the factor $(A_f/V)\,\Delta$ of each face (\texttt{DDMCFaceFactors}, 1 for a box; for
+the innermost cell of the test mesh 0.14 inward and 2.3 outward, 0.97 and 1.03 at the
+outer edge, 0 for a face on the axis and up to 2 for the other $\theta$ face of a cell
+at the pole, whose cone has more surface away from the axis than the box estimate),
+in the grey table and in the per-dwell rates alike, while the frequency rates, which
+are per unit path, take none.
+With them the spherical sphere at $a\tau_0 = 10^6$ agrees with Dijkstra et al.\ in
+the median of $|x|$ to 0.01 bin (89.96 against 89.80) and in the Kolmogorov distance
+to 0.015 against a sampling scale of 0.022, at 678 scatterings and 1168 dwells per
+photon and 0.7 s of wall time per photon (the test's mesh is split into radial shells
+and the shell source puts every photon in the innermost one, so the ranks work in
+turn; a split in angle would balance it).
+
+\textbf{Measured: the lattice in spherical polar coordinates} (\texttt{sphere\_lya.py
+--checks rsphere} and \texttt{--checks moving --geometry-moving rsphere}, 32 radial
+cells, 8 in $\theta$ and $\phi$, 2000 photons, 8 ranks).  Against Dijkstra et al.\ at
+$10^4$ K: the median of $|x|$, the Kolmogorov distance (sampling scale 0.022), the
+dwells and the analog scatterings per photon, and the node band's edge as a fraction
+of the peak:
+\begin{center}
+\begin{tabular}{lccccc}
+$a\tau_0$ & median (exact) & $K$ & dwells & scatterings & band \\
+\hline
+$10^5$ & 41.74 (41.68) & 0.019 & 453 & 1122 & 0.53 \\
+$10^6$ & 89.31 (89.80) & 0.021 & 1159 & 653 & 0.95 \\
+$10^7$ & 196.2 (193.5) & 0.025 & 2368 & 703 & 1.16 \\
+\end{tabular}
+\end{center}
+These are the numbers with the core bin's edge criterion of the hot Jupiter paragraph
+below; before it the median at $10^5$ was 3.5 percent high (43.16, $K = 0.049$), the
+same trap in the cells of the test mesh whose smallest width is short, and the two
+deeper runs were within 0.01 bin either way.  The homologous expansion at $\tau_0 = 10^6$
+and 10 K against the analog run of the same spherical deck, 2000 photons each, the
+lattice at 16 and 32 radial cells (band at 0.60 and 0.37 of the static peak):
+\begin{center}
+\begin{tabular}{lcccccc}
+$v/v_{\rm th}$ & cells & $K_x$ & $K_{\rm path}$ & red fraction & mean $x$ & path \\
+\hline
+1 & 16 & 0.9 & 0.8 & 0.774 (0.766) & $-15.2$ ($-14.6$) & 0.98 \\
+1 & 32 & 0.8 & 1.0 & 0.775 & $-14.6$ & 0.97 \\
+3 & 16 & 1.7 & 2.0 & 0.974 (0.959) & $-30.6$ ($-29.2$) & 0.91 \\
+3 & 32 & 1.5 & 1.9 & 0.977 & $-30.7$ & 0.93 \\
+10 & 16 & 0.7 & 1.2 & 1.000 (1.000) & $-46.9$ ($-46.2$) & 0.97 \\
+10 & 32 & 1.1 & 1.7 & 1.000 & $-46.9$ & 0.96 \\
+\end{tabular}
+\end{center}
+The spectra agree within 0.7 to 1.7 scales at every velocity, the weak flow included
+(where the Cartesian cube is at 1.8 to 2.1 with the red fraction high by 0.01 to 0.04
+in this run), and the paths run 2 to 9 percent short.  The Cartesian regression on
+the same binaries is unchanged in the slab and sphere medians (within 0.15 bin, $K$
+0.016 to 0.045) and the analog comparison on the slab at $\tau_0 = 10^6$ and 10 K
+gives mean path ratios 1.02, 1.00 and 0.99 at 8, 16 and 32 cells with the core's
+kinetic exit, where R2 had the finest 1.045 long.
+
+\textbf{The core bin's residence.}  R2 recorded the lattice's mean path 4.5 percent
+long in the static sphere and put it down to the core bin's exit rate, which the
+spectrum does not feel.  R3 measured it, because the hot Jupiter's band is the core
+alone and its transit time is what the photoionization feels.  A core-only slab
+($\tau_0 = 10^6$ at 10 K, \key{tau} 30 so that the band is the core bin and nothing
+else, 2000 photons) with a counting build of the generator gave the analog run 607
+visits to the core per photon (median 470) of 2690 scatterings each, and the lattice
+578 dwells of 14\,000 scatterings each: the number of visits agreed and the dwell was
+five times too long, the mean path 1.50 times the analog one.  The exit rate out of
+the core into a bin that is not a node was the harmonic rate of Smith et al.\ (eq.\
+11) with the wing bin's width \key{dx} (5.17 in that run), which is the diffusion
+closure for a hop between two bins of the band and not the kinetic exit from the
+core, whose scatterings per visit depend on the core's half-width and on $a$ alone.
+A kinetic sampler of that visit (an entry from a wing scattering at $|x|$ uniform in
+$(x_c, x_c + 1)$ that lands inside the core, scatterings with the parallel velocity
+of Zheng \& Miralda-Escud\'e, the exit at the first scattering that leaves the core)
+gives 2678 scatterings per visit at $a = 0.0149$ and 64\,342 at $4.7\times10^{-4}$,
+the analog count reproduced; the first version of that sampler had the two pieces of
+the Zheng \& Miralda-Escud\'e envelope swapped and gave 19\,110, which is the lesson
+that a sampler is checked against the code's own count before anything is concluded
+from it.  The rule is now: a hop from the core into a node bin keeps the harmonic
+rate, since that is the discretization the band's diffusion needs, and the emergence
+out of the core into a bin that is not a node is the kinetic rate,
+$k_j/(2N_{\rm visit})$ per side, with $N_{\rm visit}$ tabulated at setup over
+$\log_{10} s$ in $[-0.7, 0.4]$ for $s = \sqrt{T_{\rm line}/T}$, the factor that
+scales $a$ and the core width to the cell's Doppler units (200 visits per point, the
+table printed with the setup line).  On the core-only slab the mean path ratio went
+from 1.50 to 0.997 with the path distribution within 0.6 scales and the spectrum
+within 1.1, and the dwells stand for $1.5\times10^6$ scatterings per photon against
+the analog run's $1.69\times10^6$.  The kinetic exit lands at $|x| - x_c$ of mean
+0.56 and 0.48 at the two $a$ (median 0.40 and 0.30, 90th percentile 1.29 and 1.14),
+close enough to the Rayleigh overshoot of mean 0.63 that the emergence rule stays.
+
+\textbf{Measured: the hot Jupiter} (\texttt{mc\_hotjupiter}, the ionization-only
+snapshot \texttt{pi\_hydro\_rmax30}, 128 by 64 by 64 cells, 2000 recombination
+photons, 8 ranks, the lattice at \key{tau} 3 with \key{line\_temp} 8000 K,
+\key{core\_width} 3.3 and \key{dx} 1).  The first comparisons were worthless and
+the reason is a lesson: the recombination type weights its photons by emission
+(\texttt{lyr\_eqwt = false}), the weights span fifteen decades, and the effective
+sample of 2000 escapers is 150, so two analog seeds differed by a Kolmogorov
+distance of 0.137 and 6 percent in escaped weight, as much as the lattice did.  With
+equal weights (\texttt{lyr\_eqwt = true}; the photons are then born where the
+recombination is, in the dense base, and scatter $1.4\times10^5$ times each) two
+analog seeds agree to $K = 0.016$, half the two-sample scale of 0.035, and the
+escaped weight to 0.7 percent, while the lattice run differs by $K = 0.128$, 3.7
+scales, with the escaped weight equal to 0.1 percent: a real difference in the
+spectrum and none in the transmission.  It is a shift of weight from 20 to 50 km/s
+(0.52 of the escapers in the analog run, 0.39 on the lattice) into 50 to 100 km/s
+(0.34 against 0.48).  The lattice region is the base of the wind, 31 percent of the
+cells, where the analog scatterings of the lattice run fall in cells 1 to 16 mean
+free paths deep at the photon's frequency; the band there is the core bin alone.  A
+core photon at $|x|$ of 2 to 3 sees a cell $e^{-x^2}$, a hundredth to a thousandth,
+as deep as a photon at line centre does, and in the analog run it streams out of
+the base at 25 to 40 km/s; the lattice, which admitted the core bin on its
+bin-averaged extinction, held that photon in the cell until it left the core at
+$|x| > 3.3$ and escaped at 50 to 100 km/s.  A narrow core (\key{core\_width} 1.3 with
+\key{dx} 1.3) changes nothing ($K = 0.121$): the bins from 1.3 to 3.9 are nodes on
+their own averages where their outer edges are thin, and the trap is the same.
+\key{tau} 10 changes nothing either.  The node criterion of the core bin is now the
+extinction at the core's edge, $k(x_c)\,W \ge$ \key{tau}, where a wing bin keeps
+its mean (its extinction varies little across it); the sphere tests are far above
+that line (the cell at $a\tau_0 = 10^5$ is 280 deep at $x_c$) and the hot Jupiter's
+base is far below it (a cell must be $7\times10^4$ deep at line centre for the
+core bin at 8000 K), so there the lattice does not engage, which is the right
+answer: the frequency lattice accelerates a medium whose cells are thick at every
+frequency of the bin, and the hot Jupiter's base is not.  Where it does engage the
+gain per dwell is a kinetic core visit, $e^{x_c^2}$ scatterings; a core narrow
+enough for a thin medium buys little.
+With the edge criterion the lattice on the snapshot holds 5518 cells, one percent of
+the mesh, and the run agrees with both analog seeds ($K = 0.029$ and 0.025, 0.7 to
+0.8 scales; escaped weight 1.000 and 0.993) with 1314 dwells standing for
+$8.5\times10^7$ scatterings, 30 percent of the analog run's, at 1220 CPU seconds
+against 1552, a saving of 21 percent on a snapshot whose base is at the edge of the
+lattice's regime; the ionizing type (\texttt{nion}) is off in these decks, so the
+photoionization coupling is untouched by construction and untested here.
+\texttt{scattering\_histogram.py} on the two runs: the work is concentrated alike,
+half the scatterings in the worst 12 percent of the photons in both, the median
+per photon 60\,700 analog and 50\,800 on the lattice.
+
+\textbf{What is still approximate.}  The harmonic rate from the core into a wing
+node at a wide \key{dx} misstates the core residence the same way (at 10\,000 K and
+\key{dx} 21 it is $5.6\times10^6$ scatterings against the kinetic $6.4\times10^4$),
+which the spectrum of a static run does not feel and the paths and times do; a run
+whose transit time matters wants \key{dx} of order one next to the core, and a
+graded bin width is future work.  The core bin forgets the side it was entered from,
+where the analog photon keeps a memory of its sign over a core visit, a candidate
+cause of the 0.01 to 0.02 red-fraction excess at one Doppler width in R2.  A ghost
+across a periodic mesh boundary is not a lattice cell, so a walker emerges and
+reconverts at every periodic crossing, a cost and a small interface bias that the
+tests carry and R1 left in place.  And the one-dimensional toy's kinetic core carries
+no path while its lattice core bin does, so its path comparison overstates the
+lattice's path by the core's share, an accounting artefact and not a residence
+defect.
 
 \section{Decisions taken before D1}
 \label{sec:decisions}

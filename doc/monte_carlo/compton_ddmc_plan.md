@@ -1,6 +1,6 @@
 # Discrete diffusion Monte Carlo for Compton and resonance scattering: plan
 
-Status: **D0 and D1 done 2026-10-28, D2 and D3 done 2026-10-29, D4 done 2026-10-30, R0 approved, R1 done and R2 done 2026-10-30 (the frequency lattice, `<ddmc> line = lya`, guide Sections "What R1 built" and "What R2 built"; `MRWResonanceAcceleration` removed), all on branch `ddmc`; the XRB count that decides the split-face rates and D5 is in: on the hires snapshot at threshold 3, 132 million diffusion cells, 13 percent of the mesh, 0.9 percent of them at level jumps (no split-face rates), and 67 percent of the scatterings in cells at least 3 deep, a ceiling near 2.8 on the whole run.**  The 2026-10-06
+Status: **D0 and D1 done 2026-10-28, D2 and D3 done 2026-10-29, D4 done 2026-10-30, R0 approved, R1 done and R2 done 2026-10-30 (the frequency lattice, `<ddmc> line = lya`, guide Sections "What R1 built" and "What R2 built"; `MRWResonanceAcceleration` removed), R3 done 2026-10-31 (spherical polar: the face-area rates, the polar axis, the scattering column's overflow; the core bin's kinetic exit and its edge criterion; the hot Jupiter within the analog scatter at a 21 percent saving; guide Section "What R3 built"), all on branch `ddmc`; the XRB count that decides the split-face rates and D5 is in: on the hires snapshot at threshold 3, 132 million diffusion cells, 13 percent of the mesh, 0.9 percent of them at level jumps (no split-face rates), and 67 percent of the scatterings in cells at least 3 deep, a ceiling near 2.8 on the whole run.**  The 2026-10-06
 outline is folded in below with the changes of Section 2.  Order decided: the Compton
 phases D0 to D3 first (they build the lattice, the interface and the block machinery that
 both scatterings share, where an exact reference exists), the XRB phases D4 and D5 as a
@@ -602,6 +602,30 @@ Tests: `mc_hotjupiter` against its analog run at equal photon count: the Lyman a
 emergent spectrum and transmission, the photoionization coupling unchanged
 (`ruser_meshblock_data[1]`), the cost and `scattering_histogram.py`.  Gate: agreement
 within the analog scatter and the speedup recorded; the wiki page updated.
+
+Status (2026-10-31): done; the record is the guide's Section "What R3 built".  The
+phase was mostly the lattice in spherical polar coordinates, which the hot Jupiter
+needs and which no test had exercised: `sphere_lya.py --checks rsphere` (a second
+build, `--path-spherical`) found a polar-axis defect (`DDMCPoleFace`), the overflow of
+the scattering column past `INT_MAX` (now saturating), and the leakage rates in the box
+form, wrong for a curved cell (`DDMCFaceFactors`); with them the spherical sphere
+agrees with Dijkstra et al. to 0.01 bin at 1e6 and 1e7, and the spherical expansion
+with its analog run to 0.5 to 1.3 scales.  The core bin's exit into a non-node bin is
+the kinetic rate (a visit table at setup, `DDMCLineCoreVisit`; the harmonic rate made
+the core-only slab's path 1.5 times the analog one), and the core bin is a node only
+where the cell is thick at the core's edge, not on the bin's average.  The hot Jupiter
+(2000 recombination photons, equal weights, which the comparison needs: the emission
+weights span fifteen decades and two analog seeds then differ as much as the lattice)
+agrees with both analog seeds within the two-sample scale with the transmission equal,
+the lattice holding one percent of the cells and 30 percent of the scatterings, at
+1220 CPU seconds against 1552.  The snapshot's base is at the edge of the lattice's
+regime (a cell must be about 7e4 deep at line centre for the core bin at 8000 K);
+a denser base would gain more.  The photoionization coupling was not exercised
+(`nion = 0`).  Deferred: a graded bin width next to the core (the harmonic
+core-to-node rate at a wide `dx` misstates the core residence), the core bin's memory
+of its entry side, the emergence and reconversion at periodic mesh faces, and an
+angular decomposition of the spherical test mesh (its radial shells serialize the
+ranks).
 
 ## 6. Keys and the wiki
 

@@ -122,6 +122,59 @@ Real DopplerWidth(Real T) {
 } // namespace
 
 //----------------------------------------------------------------------------------------
+//! \fn Real LineCoreVisit(Real a, Real xc, int nvisit, MCRandom *pran)
+//! \brief the mean number of scatterings of a kinetic visit to the Doppler core |x| < xc
+//!        at damping parameter a, over nvisit visits.  A visit begins when a wing photon
+//!        at |x| uniform within one Doppler width above xc scatters into the core and
+//!        ends at the first scattering that leaves it; the kernel is that of
+//!        ScatterResonanceLine (the dipole phase function, the atom's velocity by
+//!        SampleVelocityParallel)
+
+Real LineCoreVisit(Real a, Real xc, int nvisit, MCRandom *pran) {
+  auto scatter = [&](Real x) {
+    Real cgam;
+    do {
+      cgam = 2.*pran->uniform() - 1.;
+    } while (2.*pran->uniform() > 1. + SQR(cgam));
+    const Real sgam = std::sqrt(1. - SQR(cgam));
+    const Real uperp = std::sqrt(-std::log(std::max(pran->uniform(), 1.e-300)))
+                       *std::cos(2.*PI*pran->uniform());
+    const Real upar = SampleVelocityParallel(a, x, pran);
+    return x + (cgam - 1.)*upar + sgam*uperp;
+  };
+  Real nsum = 0.;
+  for (int n=0; n<nvisit; ++n) {
+    Real x;
+    do {
+      x = scatter(xc + pran->uniform());
+    } while (std::abs(x) >= xc);
+    int64_t nsc = 0;
+    do {
+      x = scatter(x);
+      ++nsc;
+    } while (std::abs(x) < xc);
+    nsum += static_cast<Real>(nsc);
+  }
+  return nsum/nvisit;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MonteCarlo::DDMCLineCoreVisit(Real s) const
+//! \brief the scatterings of a kinetic core visit at Doppler scale s, interpolated in
+//!        log10 s from the table of SetupDDMCLine and held at its ends
+
+Real MonteCarlo::DDMCLineCoreVisit(Real s) const {
+  const int ns = static_cast<int>(ddmc_line_vlogs.size());
+  const Real logs = std::log10(s);
+  if (logs <= ddmc_line_vlogs[0]) return ddmc_line_visit[0];
+  if (logs >= ddmc_line_vlogs[ns-1]) return ddmc_line_visit[ns-1];
+  int n = 0;
+  while (n < ns - 2 && ddmc_line_vlogs[n+1] <= logs) ++n;
+  const Real f = (logs - ddmc_line_vlogs[n])/(ddmc_line_vlogs[n+1] - ddmc_line_vlogs[n]);
+  return (1. - f)*ddmc_line_visit[n] + f*ddmc_line_visit[n+1];
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MonteCarlo::SetupDDMCLine(ParameterInput *pin)
 //! \brief read the <ddmc> line keys and lay out the frequency grid
 
@@ -180,12 +233,29 @@ void MonteCarlo::SetupDDMCLine(ParameterInput *pin) {
     ddmc_line_xedge[b] = x;
     ddmc_line_eedge[b] = MCConstants::h_cgs*(MCConstants::nu_lya + x*ddmc_line_dnu);
   }
+  // the core's exit rate into a bin that is not a node is the kinetic one: the
+  // scatterings of a core visit, tabulated over the cell's Doppler scale (the same
+  // seed on every rank, so every rank holds the same table)
+  {
+    MCRandom ran(20261031);
+    const Real a_line = MCConstants::lorwidth_lya/ddmc_line_dnu;
+    const int ns = 12;
+    ddmc_line_vlogs.assign(ns, 0.);
+    ddmc_line_visit.assign(ns, 0.);
+    for (int n=0; n<ns; ++n) {
+      const Real logs = -0.7 + 0.1*n;
+      const Real s = std::pow(10., logs);
+      ddmc_line_vlogs[n] = logs;
+      ddmc_line_visit[n] = LineCoreVisit(a_line*s, ddmc_line_core*s, 200, &ran);
+    }
+  }
   if (Globals::my_rank == 0)
     std::cout << "frequency lattice: Lyman alpha, " << ddmc_line_nbin
               << " bins, core |x| <= " << ddmc_line_core << ", " << ddmc_line_nwing
               << " wing bins of " << ddmc_line_dx << " on each side to |x| = "
               << -ddmc_line_xedge[1] << ", Doppler width " << ddmc_line_dnu << " Hz at "
-              << ddmc_line_temp << " K" << std::endl;
+              << ddmc_line_temp << " K; a kinetic core visit at that temperature is "
+              << DDMCLineCoreVisit(1.) << " scatterings" << std::endl;
 }
 
 //----------------------------------------------------------------------------------------
@@ -243,9 +313,17 @@ int MonteCarloBlock::DDMCLineCell(int i3, int i2, int i1, Real wmin) {
     xlo = xhi;
     hlo = hhi;
   }
-  // the band of nodes about the core, the extinction falling away from it
+  // the band of nodes about the core, the extinction falling away from it.  A wing
+  // bin's extinction varies little across it and its mean decides; the core bin's falls
+  // by exp(-x_c^2) from the centre to its edge, so the core is a node only where the
+  // cell is thick at the edge, since a photon there streams through a cell that is
+  // thick only on the bin's average
+  const Real xc = pmc->ddmc_line_xedge[core+1]*scale;
+  const std::complex<double> zc = ZetaVoigt(std::complex<double>(xc, a));
+  const Real k_edge = pre*zc.imag()/std::sqrt(PI);
   for (int m=0; m<=pmc->ddmc_line_nwing; ++m) {
-    if (ddmc_line_k(core+m,i3,i2,i1)*wmin >= pmc->ddmc_tau)
+    const Real kb = (m == 0) ? k_edge : ddmc_line_k(core+m,i3,i2,i1);
+    if (kb*wmin >= pmc->ddmc_tau)
       edge = m;
     else
       break;
@@ -321,7 +399,9 @@ void MonteCarloBlock::DDMCLineEntry(Photon *pphot, int ip, Real e0) {
 //!        own, per cm of comoving path, and their sum: the harmonic-mean form of
 //!        Smith et al. (2018) with the bin widths in the cell's own Doppler units.  The
 //!        neighbouring bin need not be a node: the rate into a thin bin is the walker's
-//!        emergence rate in frequency
+//!        emergence rate in frequency, which out of the core is the kinetic one, the
+//!        core's extinction over the scatterings of a kinetic core visit (the harmonic
+//!        form would make it depend on the width of the thin bin)
 
 Real PhotonPusher::DDMCLineRates(Photon *pphot, int ip, Real rate[2]) {
   MonteCarloBlock *pmcb = pmy_mcb;
@@ -334,8 +414,13 @@ Real PhotonPusher::DDMCLineRates(Photon *pphot, int ip, Real rate[2]) {
   if (!(kj > 0.)) return 0.;
   const Real scale = pmc->ddmc_line_dnu/DopplerWidth(pmcb->tgas(i3,i2,i1));
   const Real dxj = (pmc->ddmc_line_xedge[b+1] - pmc->ddmc_line_xedge[b])*scale;
+  const bool core = (b == pmc->ddmc_line_nwing + 1);
   for (int side=0; side<2; ++side) {
     const int nb = side ? b + 1 : b - 1;
+    if (core && !pmcb->DDMCLineNodeBin(i3, i2, i1, nb)) {
+      rate[side] = 0.5*kj/pmc->DDMCLineCoreVisit(scale);
+      continue;
+    }
     const Real kn = pmcb->ddmc_line_k(nb,i3,i2,i1);
     if (!(kn > 0.)) continue;
     const Real dxn = (pmc->ddmc_line_xedge[nb+1] - pmc->ddmc_line_xedge[nb])*scale;

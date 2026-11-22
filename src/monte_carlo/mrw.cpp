@@ -45,6 +45,7 @@
 
 // C++ headers
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <iostream>
 #include <sstream>
@@ -842,7 +843,9 @@ bool PhotonPusher::MRWStep(Photon *pphot, MCRandom *pran, int ip) {
   dl = gam*ct/l_cgs/fr.lapse;
   pphot->x0p[ip] += dl;
   pphot->dtp[ip] -= dl/c_code;
-  pphot->nscp[ip] += static_cast<int>(std::lround(pphot->scp[ip]*ct));
+  // the column saturates where a dwell of the diffusion lattice may have left it
+  const Real nsc_new = pphot->nscp[ip] + std::round(pphot->scp[ip]*ct);
+  pphot->nscp[ip] = static_cast<int>(std::min(static_cast<Real>(INT_MAX), nsc_new));
   pmcb->nmrw++;
 
   // Back to the lab while the photon still carries the cell it walked in: the legacy
