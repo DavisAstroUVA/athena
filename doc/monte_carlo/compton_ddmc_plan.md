@@ -704,26 +704,38 @@ its analog run to K = 0.001 at 20 000 photons with the transport wall time 6.4 s
 short visits (5 to 10 percent at an edge of 1.5), the 1.2 ms per scattering of the
 analog hot Jupiter deck (a profile is in hand), the table's cost above x_loc of 5.
 
-To do: the radiation force of the lattice against analog.  Nothing in R1 to R4 measured
-the force; the slab and sphere tests have no force gate and the hot Jupiter comparison
-was the escaping spectrum, the transmission and the costs.  On the lattice the force is
-chi F/c with F the face-hop flux (`DDMCHopDeposit`), deposited only at face crossings,
-and in a core cell chi is the Voigt extinction at a frequency drawn in proportion to the
-face's per-frequency rate (`DDMCLineCoreDraw`, `DDMCLineKPhoton`), so the deposit is
-the node integral of k(x) F(x) in expectation under a flat J; the R3 code weighted every
-crossing with the bin-mean k, wrong by the Planck-to-Rosseland ratio over the node.
-What is expected: right in the mean to the lattice's first order in the cell size at
-the interface and marginal where the cell is only `tau` deep at the edge frequencies,
-which carry the flux; the two estimators meet at every node mismatch between
-neighbours; and far noisier per photon in a core cell, where a walker leaves by the
-frequency faces about ten times more often than by a spatial face, so a cell's force
-is a few hops each carrying a whole visit's energy where analog sums thousands of
-kicks.  The measurement: the Lyman alpha force profile of the production hot Jupiter,
-lattice against analog in the `mcsrc` output with the `RadforceF_err` arrays (the
-20 000-photon runs in `$TMPDIR/hj_core/lat20k` and `an20k` both wrote it, so this is a
-post-processing step on runs in hand), then a force gate in `coreedge` on the slab's
-force profile if the hot Jupiter shows a bias.  Until this is done the lattice's force
-is not to be trusted in a coupled run.
+The radiation force, measured (2026-11-22, after R4).  The production hot Jupiter has
+no power on it: its 20 000-photon lattice and analog runs agree in every lattice cell
+(11 524 cells with a force; pulls mean 0.00, rms 0.67) but the force there is noise in
+both, the net flux through the deep atmosphere being the 90 photons in 20 000 that reach
+the inner boundary.  The slab of `coreedge` is where every photon crosses the lattice
+(`$TMPDIR/force_slab`, `mcsrc` and `mclab` outputs, an HDF5 build of `mc_sphere_lya`;
+`scratchpad/force/cmp_slab.py`).  Two things came out of it.  (1) With the source on a
+cell face, as the test's mesh puts it, the lattice moves the source half a cell: a
+converting photon is placed at the cell's centre, so the lattice's source sits at the
+centre of the cell that holds the origin, the escape split goes 0.516/0.484 and the
+source cell's flux is zero; a mesh shifted by half a cell (source at a cell centre)
+removes all of it, and that is the geometry the force comparison uses.  (2) The lattice's
+flux was 8 percent low in the cells beside the source and 1.5 percent low across the
+slab while the analog's was flat to 0.1 percent: the move from the scattering point to
+the centre at a birth conversion was never deposited, and the photons that enter a
+diffusion cell through a face and convert lose the displacement from that side.
+`DDMCConvert` now deposits that move in the flux (`DDMCHopDeposit` with the move as the
+sign times the half-width) and the flux is conservative to 0.1 percent.  It deposits no
+force: charged at a hop's extinction, the core's harmonic mean on the frequency lattice,
+the move made the slab's force 1.6 times the analog one (the flux and force of the slab
+outside the core are carried by wing photons at a far smaller extinction, and the
+converting photon reached its scattering point as one of them, its force on that leg
+already in its flight's deposit); without it the force agrees.  Result at 400 000
+lattice and 40 000 analog photons on the shifted slab at tau0 1e6: the half-slab force
+integrals 0.99 +- 0.08 and 0.95 +- 0.07 of the analog's (the error the analog run's),
+the 32 per-cell pulls mean 0.15 and rms 1.09 (so `RadforceF_err` is right on the
+lattice), the lattice's force equal to -dE/dx/3 of its own energy density cell by cell,
+the outermost cell 2.6 sigma high (a boundary-cell effect, as the cube's), the energy
+density 1.00 to 1.07 of the analog's across the slab and 1.12 in the edge cells.  The
+change touches the moments only (no random number is drawn), so the list-based tests
+are unaffected; the grey moment comparisons of D1 (the atmosphere's flux) were not
+rerun.  Open: a force gate in `coreedge` on the shifted slab, and the boundary cell.
 
 ## 6. Keys and the wiki
 

@@ -287,7 +287,12 @@ into \texttt{sourceterms(MCRS}$_i$\texttt{)} of each cell sharing the face, each
 its own $\chi$ and width (the factor $1/2$ is the face average), and the same into
 \texttt{MCRF}$_i$, since the flux force and the momentum force coincide on the
 lattice.  The sign convention is that of \texttt{UpdateSourceTerms}, where the gas
-gains minus the photon's momentum change.  \textbf{Energy exchange}
+gains minus the photon's momentum change.  A photon converting at the start of a flight
+is placed at the cell's centre, and \texttt{DDMCConvert} deposits that move in the flux
+(the move as the sign times the half-width) so that the flux remains the sum of every
+move of the sample's energy, but not in the force: the photon reached its scattering
+point by streaming and the force of that leg is in its flight's deposit
+(Section~\ref{sec:r4}, the force measured).  \textbf{Energy exchange}
 \texttt{MCRS0}: $w_{\rm after}E_{\rm after} - w_{\rm before}E_{\rm before}$ per dwell,
 through \texttt{UpdateSourceTerms} with the energy and weight before and after, which
 also covers the absorbed energy.  The per-walker contributions that
@@ -1569,6 +1574,38 @@ at those frequencies, which is the same marginality the spatial lattice carries 
 \key{tau} 3.  A cell whose core node would reach beyond the global core bin (a cold cell,
 $s > 1$) still ends at \key{core\_width}; the rows of the table above $x_{\rm loc}$ of 5
 exist for those cells and cost most of its build.
+
+\textbf{The force, measured.}  Nothing before this measured the lattice's radiation
+force.  The hot Jupiter cannot: its lattice and analog runs agree in every lattice cell
+(pulls of mean 0.00 and rms 0.67 over 11\,524 cells) but the force there is noise in
+both, the net flux through the deep atmosphere being the 90 photons in 20\,000 that
+reach the inner boundary.  The slab of \texttt{coreedge} can, every photon crossing the
+lattice, with \texttt{mcsrc} and \texttt{mclab} outputs.  Two findings.  The test's
+mesh puts the source on a cell face, and the lattice then moves it half a cell: a
+converting photon is placed at its cell's centre, so the source sits at the centre of
+the cell holding the origin, the escape split goes 0.516/0.484 and the source cell's
+flux is zero; a mesh shifted by half a cell removes all of it.  On that mesh the
+lattice's flux was 8 percent low beside the source and 1.5 percent low across the slab
+against an analog flux flat to 0.1 percent: the move from the scattering point to the
+centre at a birth conversion was never deposited, and a photon that enters a diffusion
+cell through a face and converts loses the displacement from that side.
+\texttt{DDMCConvert} now deposits the move in the flux, which is then conservative to
+0.1 percent, and not in the force: charged at a hop's extinction, the node's harmonic
+mean, the move made the force 1.6 times the analog one, because outside the core the
+slab's flux and force are carried by wing photons at a far smaller extinction and the
+converting photon arrived as one of them, its force on that leg in its flight's
+deposit.  With that, at 400\,000 lattice and 40\,000 analog photons on the shifted
+slab at $\tau_0 = 10^6$: the half-slab force integrals 0.99 and 0.95 of the analog's
+with the analog's 7 percent error, the 32 per-cell pulls of mean 0.15 and rms 1.09
+(\texttt{RadforceF\_err} is right on the lattice), the lattice's force equal to
+$-\partial_x E/3$ of its own energy density cell by cell, the outermost cell 2.6 sigma
+high (the boundary cell, as in the cube), the energy density 1.00 to 1.07 of the
+analog's across the slab and 1.12 in the edge cells.  The lattice's force in a core
+cell is therefore the diffusion closure's, right in the mean to the lattice's order and
+with a correct error estimate, and not the noisier estimator the earlier sections
+feared: the slab's per-cell errors are a quarter of the analog's at the same photon
+count, the dwell replacing thousands of cancelling kicks by a few hops of definite
+sign.
 
 \section{Decisions taken before D1}
 \label{sec:decisions}

@@ -487,12 +487,30 @@ void PhotonPusher::DDMCSetWalker(Photon *pphot, int ip, bool comoving) {
 //----------------------------------------------------------------------------------------
 //! \fn void PhotonPusher::DDMCConvert(Photon *pphot, int ip)
 //! \brief a transport photon starting a flight in a diffusion cell (emitted or just
-//!        scattered there) becomes a walker at the cell's centre
+//!        scattered there) becomes a walker at the cell's centre.
 
 void PhotonPusher::DDMCConvert(Photon *pphot, int ip) {
-  DDMCPlaceAtCentre(pphot, ip, pphot->i3p[ip], pphot->i2p[ip], pphot->i1p[ip]);
+  MonteCarloBlock *pmcb = pmy_mcb;
+  const int i1 = pphot->i1p[ip], i2 = pphot->i2p[ip], i3 = pphot->i3p[ip];
+  // the move to the centre as a fraction of the cell along each axis, in the sign
+  // convention of a hop (sign * width / 2)
+  const Real frac[3] = {
+      (0.5*(pcoord->x1f(i1) + pcoord->x1f(i1+1)) - pphot->x1p[ip])
+          /(pcoord->x1f(i1+1) - pcoord->x1f(i1)),
+      (0.5*(pcoord->x2f(i2) + pcoord->x2f(i2+1)) - pphot->x2p[ip])
+          /(pcoord->x2f(i2+1) - pcoord->x2f(i2)),
+      (0.5*(pcoord->x3f(i3) + pcoord->x3f(i3+1)) - pphot->x3p[ip])
+          /(pcoord->x3f(i3+1) - pcoord->x3f(i3))};
+  const Real we = pphot->wp[ip]*DDMCComovingEnergy(pphot, ip);
+  for (int a=0; a<3; ++a) {
+    if (a == 1 && pmcb->nx2 == 1) continue;
+    if (a == 2 && pmcb->nx3 == 1) continue;
+    if (frac[a] != 0.)
+      pmcb->DDMCHopDeposit(pphot->type[ip], i3, i2, i1, a, 2.*frac[a], we, 0.);
+  }
+  DDMCPlaceAtCentre(pphot, ip, i3, i2, i1);
   DDMCSetWalker(pphot, ip);
-  pmy_mcb->nddmc[DDMC_CONVERT_BIRTH]++;
+  pmcb->nddmc[DDMC_CONVERT_BIRTH]++;
 }
 
 //----------------------------------------------------------------------------------------
