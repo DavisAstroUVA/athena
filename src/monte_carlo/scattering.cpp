@@ -7,6 +7,7 @@
 //!  \brief implementation of scattering functions
 
 // C++ headers
+#include <algorithm>
 #include <cmath>
 
 // Athena++ headers
@@ -956,9 +957,85 @@ void SampleDipole(Real theta_in, Real phi_in, Real &theta_out, Real &phi_out,
 
 }
 
+namespace {
+//! the construction SampleVelocityParallel dispatches to, set from <montecarlo>
+//! upar_sampler by the MonteCarlo constructor
+enum VelocityParallelSampler upar_sampler = UPAR_SEON;
+//! the x above which the bound on the Seon & Kim marginal has its extrema, 1 + sqrt(2)
+const Real kSeonXc = 2.414213562373095;
+} // namespace
+
+//----------------------------------------------------------------------------
+//! \fn void SetVelocityParallelSampler(enum VelocityParallelSampler flag)
+//! \brief choose the construction of SampleVelocityParallel
+
+void SetVelocityParallelSampler(enum VelocityParallelSampler flag) {
+  upar_sampler = flag;
+}
+
 //----------------------------------------------------------------------------
 //! \fn Real SampleVelocityParallel(Real a, Real x_in, MCRandom *pran)
-//! \brief Return parallel velocity for scattering atom
+//! \brief the velocity of the scattering atom along the incoming photon, in Doppler
+//!        units, from exp(-u^2) / ((x - u)^2 + a^2) at the photon's frequency x_in
+
+Real SampleVelocityParallel(Real a, Real x_in, MCRandom *pran) {
+  return (upar_sampler == UPAR_ZHENG) ? SampleVelocityParallelZheng(a, x_in, pran)
+                                      : SampleVelocityParallelSeon(a, x_in, pran);
+}
+
+//----------------------------------------------------------------------------
+//! \fn Real SampleVelocityParallelSeon(Real a, Real x_in, MCRandom *pran)
+//! \brief the parallel velocity by the ratio-of-uniforms construction of Seon & Kim
+//!        (2020, ApJS 250, 9, their Appendix A); exact, with an envelope whose extrema
+//!        are in closed form, and the Zheng & Miralda-Escude scheme below x = 1 + sqrt 2
+
+Real SampleVelocityParallelSeon(Real a, Real x_in, MCRandom *pran) {
+  const Real x = std::abs(x_in);
+  const Real X = x*x + a*a;
+  const Real disc = X*X - 6.*X + 1.;
+  if (x < kSeonXc || disc <= 0.) return SampleVelocityParallelZheng(a, x_in, pran);
+  const Real b0 = std::exp(-0.5*x*x);
+  const Real r = std::sqrt(disc);
+  const Real slo = 0.5*((X - 1.) - r), shi = 0.5*((X - 1.) + r);
+  const Real bmin = std::exp(-0.5*shi);
+  // the bound's maximum, raised a hair above its rounded value
+  const Real h2 = (1. + 1.e-8)*(2./PI)*std::exp(-0.5*slo)*std::sqrt(slo)/(X - slo);
+  const Real h0 = bmin/(2.*a);
+  const Real S0 = b0*b0/(2.*a), S1 = h0*(bmin - b0), S2 = h2*(1. - bmin);
+  const Real stot = S0 + S1 + S2;
+  Real u;
+  while (true) {
+    const Real xi = pran->uniform()*stot;
+    const Real eta = pran->uniform();
+    Real beta, comp;
+    if (xi < S0) {
+      beta = b0*std::sqrt(eta);
+      comp = beta/a;
+    } else if (xi < S0 + S1) {
+      beta = b0 + eta*(bmin - b0);
+      comp = h0;
+    } else {
+      beta = bmin + eta*(1. - bmin);
+      comp = h2;
+    }
+    const Real p = std::sqrt(-2.*std::log(std::max(beta, 1.e-300)));
+    // the Lorentzian's mass on [-p, p]: the difference of the two arctangents, formed
+    // as one arctangent where both are near -pi/2 (p < x)
+    const Real thlo = std::atan((-p - x)/a);
+    const Real dth = (p < x) ? std::atan(2.*p*a/(X - p*p))
+                             : std::atan((p - x)/a) - thlo;
+    const Real q = beta/(a*PI)*dth;
+    if (pran->uniform()*comp < q) {
+      u = x + a*std::tan(thlo + pran->uniform()*dth);
+      break;
+    }
+  }
+  return (x_in < 0.) ? -u : u;
+}
+
+//----------------------------------------------------------------------------
+//! \fn Real SampleVelocityParallelZheng(Real a, Real x_in, MCRandom *pran)
+//! \brief the parallel velocity by the rejection scheme of Zheng & Miralda-Escude
 //
 // The rejection scheme of Zheng & Miralda-Escude (2002): the velocity distribution
 // exp(-u^2) / ((x - u)^2 + a^2) is sampled from a Lorentzian comparison function below
@@ -968,7 +1045,7 @@ void SampleDipole(Real theta_in, Real phi_in, Real &theta_out, Real &phi_out,
 // et al. (2015) use it: in the wing, u0 = 4.5 keeps the acceptance near 1.5 / x, where
 // u0 = 0.96 x falls as 3 / x^2 and costs thousands of draws per scattering at |x| ~ 40.
 
-Real SampleVelocityParallel(Real a, Real x_in, MCRandom *pran) {
+Real SampleVelocityParallelZheng(Real a, Real x_in, MCRandom *pran) {
 
   Real x = fabs(x_in); // switch sign at end
   Real u0;

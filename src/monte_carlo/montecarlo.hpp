@@ -203,7 +203,14 @@ Real ElectronDistPozdnyakov(Real tgas, MCRandom *pran);
 Real ElectronDist(Real tgas, MCRandom *pran);
 void SampleDipole(Real theta_in, Real phi_in, Real &theta_out, Real &phi_out,
                   MCRandom *pran);
+//! which construction SampleVelocityParallel uses: the ratio-of-uniforms scheme of
+//! Seon & Kim (2020), the default, or the rejection scheme of Zheng & Miralda-Escude
+//! (2002), <montecarlo> upar_sampler = zheng
+enum VelocityParallelSampler {UPAR_ZHENG = 0, UPAR_SEON = 1};
+void SetVelocityParallelSampler(enum VelocityParallelSampler flag);
 Real SampleVelocityParallel(Real a, Real x_in, MCRandom *pran);
+Real SampleVelocityParallelZheng(Real a, Real x_in, MCRandom *pran);
+Real SampleVelocityParallelSeon(Real a, Real x_in, MCRandom *pran);
 //--------------------- prototypes for emission.cpp functions ----------------------------
 Real GetEmissionFreeFree(MonteCarloBlock *pmcb, int k, int j, int i, int etype);
 void PhotonEmitFreeFree(MonteCarloBlock *pmcb, Photon *pphot, Real lemin, Real lemax,

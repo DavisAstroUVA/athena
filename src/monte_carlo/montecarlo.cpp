@@ -265,6 +265,20 @@ MonteCarlo::MonteCarlo(ParameterInput *pin, Mesh *pmesh) {
     general_pusher_flag = true;
   else
     general_pusher_flag = pin->GetOrAddBoolean("montecarlo","general_pusher",false);
+  {
+    // the sampler of the resonance kernel's parallel atom velocity
+    const std::string us = pin->GetOrAddString("montecarlo","upar_sampler","seon");
+    if (us == "zheng") {
+      SetVelocityParallelSampler(UPAR_ZHENG);
+    } else if (us == "seon") {
+      SetVelocityParallelSampler(UPAR_SEON);
+    } else {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in MonteCarlo constructor" << std::endl
+          << "<montecarlo>/upar_sampler must be zheng or seon, not " << us << std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
   scattering_meth = GetScatteringFlag(pin->GetOrAddString("montecarlo","scattering",
                                                           "none"));
   if (mrw && scattering_meth == SCATRES) {
