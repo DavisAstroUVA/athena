@@ -1605,7 +1605,17 @@ cell is therefore the diffusion closure's, right in the mean to the lattice's or
 with a correct error estimate, and not the noisier estimator the earlier sections
 feared: the slab's per-cell errors are a quarter of the analog's at the same photon
 count, the dwell replacing thousands of cancelling kicks by a few hops of definite
-sign.
+sign.  The measurement is now the \texttt{force} check of \texttt{sphere\_lya.py} (an
+\texttt{-hdf5} build): the shifted slab, the lattice at $10^5$ photons against the
+analog run at $10^4$, gated on the flatness of the lattice's flux within each half,
+the half-slab force integrals within \key{gate-analog} sigma and the rms of the
+per-cell pulls (first run: pulls $-0.5$ and $-0.7$ on the halves, rms 0.94).  The
+edge cells, against an analog run of 160\,000 photons, are high in force by 13 to 20
+percent at both edges and in energy density by 14 percent against 2 to 5 inside, the
+force following the lattice's own pressure gradient; at \key{tau} 6 the excess halves
+(6 to 8 percent in the force, the slab's energy 1.01 of the analog's) at 1.7 times the
+cost.  It is the lattice's first-order edge effect at its threshold depth, the cube's
+boundary deficit with the other sign, and \key{tau} is the knob.
 
 \section{Decisions taken before D1}
 \label{sec:decisions}

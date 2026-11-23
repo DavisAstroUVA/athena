@@ -735,7 +735,21 @@ the outermost cell 2.6 sigma high (a boundary-cell effect, as the cube's), the e
 density 1.00 to 1.07 of the analog's across the slab and 1.12 in the edge cells.  The
 change touches the moments only (no random number is drawn), so the list-based tests
 are unaffected; the grey moment comparisons of D1 (the atmosphere's flux) were not
-rerun.  Open: a force gate in `coreedge` on the shifted slab, and the boundary cell.
+rerun.  The gate is `sphere_lya.py --checks force` (needs an `-hdf5` build): the slab at
+`--tau-force` (1e4) shifted by half a cell, the lattice at 100 000 photons against the
+analog run at 10 000, from the `mclab` and `mcsrc` outputs; the lattice's flux flat
+within each half to `--gate-flux` (0.02; it is exactly flat by construction once the
+conversion's move is deposited, and 8 percent off without it), the half-slab force
+integrals within `--gate-analog` sigma, the per-cell pulls' rms below `--gate-pull`
+(2); first run: pulls -0.48 and -0.65 on the halves, rms 0.94, each run's force over
+its own -dE/dx/3 0.83 to 1.06 per half.  The boundary cell, against an analog run of
+160 000 photons: the lattice's edge cells are high in force by 13 to 20 percent (pulls
+2.7 and 1.9, the same sign at both edges) and in energy density by 14 percent against 2
+to 5 in the interior, the force following the lattice's own pressure gradient; at `tau`
+6 the excess is 6 to 8 percent in the force and 11 to 13 in the energy density, the
+whole slab's energy 1.01 of the analog's instead of 1.04, at 1.7 times the cost.  So it
+is the lattice's first-order edge effect at its threshold depth, as the cube's, and not
+the estimator; nothing to fix, `tau` is the knob.
 
 ## 6. Keys and the wiki
 

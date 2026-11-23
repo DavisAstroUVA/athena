@@ -38,6 +38,16 @@ a point source at the centre at line centre.  Four checks:
   scan      the slab at --atau-scan (default 1e6) over --nz-scan with the bin width on
             Smith et al. (2018)'s matching line dx = (10 a tau0 / nz^2)^(1/3), the
             Kolmogorov distance from Neufeld and the cpu time per photon at each
+  force     the radiation force and the flux of the coreedge slab at --tau-force (1e4)
+            and --temp-core, from the mclab and mcsrc outputs (the binary built with
+            -hdf5), the lattice at --nz (--nphot-force-lattice photons) against one
+            analog run (--nphot-force), on a mesh shifted by half a cell so that the
+            source sits at a cell centre (on a face the lattice moves it half a cell):
+            the lattice's flux flat within each half of the slab to --gate-flux, the
+            force integrated over each half within --gate-analog sigma of the analog
+            one, and the rms of the per-cell pulls (the difference over the combined
+            RadforceF_err) below --gate-pull; the per-cell force against -dE/dx/3 of
+            each run's own energy density is reported
 
 The bins: --dxf and --xmaxf give the wing bin width and the grid's extent in units of
 (a tau0)^(1/3) (defaults 0.21, the matching line at nz = 32, and 2.5); the core bin
@@ -47,7 +57,7 @@ from a tau0.
     python sphere_lya.py --path /path/to/athena --workdir DIR [--checks slab sphere analog scan]
                          [--nz 32 --nx 32 --nphot 4000 --mcranks 8] [--plot]
 
-needs: python configure.py --prob=mc_sphere_lya -mc -mpi && make
+needs: python configure.py --prob=mc_sphere_lya -mc -mpi && make (-hdf5 for the force check)
 """
 import argparse
 import glob
@@ -69,6 +79,20 @@ C_LIGHT = 2.99792458e10
 NU0 = 1.e8*C_LIGHT/1215.6701
 LORWIDTH = 6.265e8/(4.*np.pi)
 R0 = 1.e11   # the slab's half-thickness and the sphere's radius, cm
+
+MOMENT_OUTPUTS = """
+<output2>
+file_type = hdf5
+variable  = mclab
+xdmf      = 0
+dt        = 1.
+
+<output3>
+file_type = hdf5
+variable  = mcsrc
+xdmf      = 0
+dt        = 1.
+"""
 
 
 def doppler_width(temp):
@@ -98,7 +122,7 @@ RIN = 0.01   # the inner edge of the spherical-polar sphere in units of R0
 
 def write_deck(filename, name, geometry, temp, tau0, nphot, iseed, ddmc, dx, xmax, core,
                nz=32, nx=32, mcranks=1, ddmc_tau=3., vel=0., profile='homologous',
-               nr=32, ntheta=1):
+               nr=32, ntheta=1, shift=False, moments=False):
     """the slab: nz cells along x1 over +-R0, one periodic cell of 100 R0 in x2 and x3,
     escape at the x1 faces, the escape sphere at 100 R0; the sphere: nx^3 cells over
     +-1.25 R0 offset half a cell so the origin is a cell centre, escape at R0; the
@@ -108,7 +132,9 @@ def write_deck(filename, name, geometry, temp, tau0, nphot, iseed, ddmc, dx, xma
     periodic cells in phi (the spherical-polar pusher needs both angular directions
     resolved).  The deck's tau is the line-centre depth over the escape radius, so the
     slab scales it.  vel > 0 (units of c) is a homologous expansion with that velocity
-    at the radius, with boosts on"""
+    at the radius, with boosts on.  shift moves the slab's mesh by half a cell so that
+    the source at the origin is at a cell centre instead of on a face; moments adds the
+    mclab and mcsrc outputs (HDF5)"""
     # the kinetic visit table of the core node, built once per temperature and core width
     # and shared by every run of the work directory
     visit_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(filename))),
@@ -130,7 +156,8 @@ def write_deck(filename, name, geometry, temp, tau0, nphot, iseed, ddmc, dx, xma
         radius = 100.*R0
         tau = tau0*radius/R0
         mb1 = max(nz//mcranks, 1)
-        mesh = (f"nx1 = {nz}\nx1min = {-R0:.6e}\nx1max = {R0:.6e}\n"
+        off = -R0/nz if shift else 0.
+        mesh = (f"nx1 = {nz}\nx1min = {-R0 + off:.7e}\nx1max = {R0 + off:.7e}\n"
                 "ix1_mc_bc = escape\nox1_mc_bc = escape\n")
         for d in '23':
             mesh += (f"nx{d} = 1\nx{d}min = {-50.*R0:.6e}\nx{d}max = {50.*R0:.6e}\n"
@@ -152,7 +179,7 @@ problem_id = {name}
 <output1>
 file_type = phlist
 nuser     = 3
-
+{MOMENT_OUTPUTS if moments else ''}
 <mesh>
 {mesh}
 <meshblock>
@@ -377,6 +404,84 @@ def check_exact(args, geometry, atau, nz, dxf, label, iseed, nphot=None):
                                  cpu=rep.get('cpu', 0.), dwells=rep.get('dwells', 0))
 
 
+def load_moments(workdir, name):
+    """the cell-centred profiles along x1 of the slab's mclab and mcsrc outputs: x1v,
+    the energy density E, the flux F1, the flux force f1 and its error, as float64"""
+    import h5py
+    prof = {}
+    for out, dataset, keys in ((2, 'mclab', {'E': 'Ermc', 'F': 'Frmc1'}),
+                               (3, 'mcsrc', {'f': 'RadforceF1', 'ferr': 'RadforceF_err1'})):
+        path = os.path.join(workdir, f'{name}.out{out}.00000.athdf')
+        if not os.path.exists(path):
+            sys.exit(f"{path} is missing: the force check needs a binary built with -hdf5")
+        with h5py.File(path, 'r') as fh:
+            names = [v.decode() for v in fh.attrs['VariableNames']]
+            order = np.argsort(fh['LogicalLocations'][:, 0])
+            data = fh[dataset]
+            for key, var in keys.items():
+                iv = names.index(var)
+                prof[key] = np.concatenate([np.asarray(data[iv, b, 0, 0, :], dtype=np.float64)
+                                            for b in order])
+            prof['x'] = np.concatenate([np.asarray(fh['x1v'][b], dtype=np.float64)
+                                        for b in order])
+    return prof
+
+
+def check_force(args, lat, ana, scale):
+    """the lattice's moments (scaled by scale, the ratio of the photon counts) against
+    the analog run's on the shifted slab; returns ok and prints the record"""
+    x = ana['x']
+    w = x[1] - x[0]
+    isrc = int(np.argmin(np.abs(x)))
+    halves = {'x<0': x < 0., 'x>0': x > 0.}
+    ok = True
+    # the lattice's flux flat within each half (the analog's is, by conservation)
+    for label, sel in halves.items():
+        fl = scale*lat['F'][sel]
+        flat = np.max(np.abs(fl/fl.mean() - 1.))
+        ratio = fl.mean()/ana['F'][sel].mean()
+        ok_flux = flat <= args.gate_flux
+        ok &= ok_flux
+        print(f"  flux {label}: lattice flat to {flat:.4f} (gate {args.gate_flux}), "
+              f"lattice/analog {ratio:.4f}  {'ok' if ok_flux else 'OFF'}")
+    # the force integrated over each half, without the source cell
+    for label, sel in halves.items():
+        sel = sel & (np.arange(x.size) != isrc)
+        fa, ea = ana['f'][sel].sum(), np.sqrt((ana['ferr'][sel]**2).sum())
+        fl, el = scale*lat['f'][sel].sum(), scale*np.sqrt((lat['ferr'][sel]**2).sum())
+        sig = np.sqrt(ea**2 + el**2)
+        pull = (fl - fa)/sig if sig > 0. else np.inf
+        ok_half = abs(pull) <= args.gate_analog
+        ok &= ok_half
+        print(f"  force {label}: analog {fa:+.4e} +- {ea:.1e}, lattice {fl:+.4e} +- {el:.1e}, "
+              f"ratio {fl/fa:.3f}, pull {pull:+.2f}  {'ok' if ok_half else 'OFF'}")
+    # the per-cell pulls
+    sig = np.sqrt(ana['ferr']**2 + (scale*lat['ferr'])**2)
+    good = sig > 0.
+    pulls = (scale*lat['f'][good] - ana['f'][good])/sig[good]
+    rms = np.sqrt(np.mean(pulls**2))
+    ok_pull = rms <= args.gate_pull
+    ok &= ok_pull
+    print(f"  per-cell pulls over {pulls.size} cells: mean {pulls.mean():+.3f}, rms {rms:.3f} "
+          f"(gate {args.gate_pull})  {'ok' if ok_pull else 'OFF'}")
+    # each run's force against its own pressure gradient, the diffusion closure, over
+    # each half without the source and edge cells
+    for label, prof, sc in (('analog', ana, 1.), ('lattice', lat, scale)):
+        grad = -np.gradient(sc*prof['E'], w)/3.
+        rs = []
+        for sel in halves.values():
+            inner = sel.copy()
+            inner[[0, x.size - 1, isrc]] = False
+            rs.append((sc*prof['f'][inner]).sum()/grad[inner].sum())
+        print(f"  {label}: force over -dE/dx/3 of its own energy density, summed over the "
+              f"interior cells of each half: {rs[0]:.3f}, {rs[1]:.3f}")
+    e_ratio = scale*lat['E'].sum()/ana['E'].sum()
+    print(f"  energy density lattice/analog: {e_ratio:.3f} over the slab, "
+          f"{scale*lat['E'][isrc]/ana['E'][isrc]:.3f} in the source cell, "
+          f"{scale*lat['E'][[0, -1]].mean()/ana['E'][[0, -1]].mean():.3f} in the edge cells")
+    return ok
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -389,7 +494,7 @@ def parse_args(argv=None):
     ap.add_argument('--checks', nargs='+',
                     default=['slab', 'sphere', 'analog', 'scan', 'moving'],
                     choices=['slab', 'sphere', 'rsphere', 'analog', 'scan', 'moving',
-                             'coreedge'])
+                             'coreedge', 'force'])
     ap.add_argument('--ntheta', type=int, default=8,
                     help='theta and phi cells of the spherical-polar sphere')
     ap.add_argument('--geometry-moving', default='sphere', choices=['sphere', 'rsphere'],
@@ -417,6 +522,15 @@ def parse_args(argv=None):
     ap.add_argument('--nz-core', type=int, nargs='+', default=[8, 32],
                     help='cells across the slab of the coreedge lattice runs')
     ap.add_argument('--nphot-core', type=int, default=1000)
+    ap.add_argument('--tau-force', type=float, default=1.e4,
+                    help='line-centre depth of the force slab')
+    ap.add_argument('--nphot-force', type=int, default=10000,
+                    help='analog photons of the force check')
+    ap.add_argument('--nphot-force-lattice', type=int, default=100000)
+    ap.add_argument('--gate-flux', type=float, default=0.02,
+                    help='flatness of the lattice flux within each half of the slab')
+    ap.add_argument('--gate-pull', type=float, default=2.,
+                    help='rms of the per-cell force pulls')
     ap.add_argument('--tau-moving', type=float, default=1.e6)
     ap.add_argument('--temp-moving', type=float, default=10.)
     ap.add_argument('--vel-moving', type=float, nargs='+', default=[1., 3., 10.],
@@ -540,6 +654,35 @@ def main(args):
                       f"median |x| {np.median(np.abs(xl)):.2f} vs {np.median(np.abs(xa)):.2f}; "
                       f"mean path ratio {pl.mean()/pa.mean():.4f}  {'ok' if ok_nz else 'OFF'}")
         results['coreedge'] = ok
+
+    if 'force' in args.checks:
+        temp = args.temp_core
+        tau0 = args.tau_force
+        atau = voigt_a(temp)*tau0
+        dx = args.dxf*max(atau, 1.)**(1./3.)
+        xmax = max(args.xmaxf*atau**(1./3.), args.core + 4.*dx)
+        print(f"force: the slab at tau0 {tau0:g}, {temp:g} K (a tau0 {atau:.3g}) shifted by "
+              f"half a cell, the lattice's flux and radiation force against the analog "
+              f"run's, {args.nphot_force_lattice} and {args.nphot_force} photons")
+        profs = {}
+        for ddmc, nphot in ((False, args.nphot_force), (True, args.nphot_force_lattice)):
+            name = f'force{tau0:.0e}_{"lattice" if ddmc else "analog"}{args.nz}'
+            wd = os.path.join(args.workdir, name)
+            os.makedirs(wd, exist_ok=True)
+            deck = os.path.join(wd, f'athinput.{name}')
+            write_deck(deck, name, 'slab', temp, tau0, nphot, args.iseed + 40 + int(ddmc),
+                       ddmc, dx, xmax, args.core, nz=args.nz, mcranks=args.mcranks,
+                       ddmc_tau=args.ddmc_tau, shift=True, moments=True)
+            _, rep = run(args, wd, deck, name, args.mcranks)
+            print(f"  {name:22s}: {rep.get('nscat', 0):.3g} scatterings/photon, wall "
+                  f"{rep.get('wall', 0):.0f} s"
+                  + (f"; {rep.get('cells', 0)} diffusion cells, {rep.get('partial', 0)} with "
+                     f"the edge inside the core (mean edge {rep.get('edge', 0.):.2f})"
+                     if ddmc else ''))
+            profs[ddmc] = load_moments(wd, name)
+        ok = check_force(args, profs[True], profs[False],
+                         args.nphot_force/args.nphot_force_lattice)
+        results['force'] = ok
 
     if 'moving' in args.checks:
         temp = args.temp_moving

@@ -142,10 +142,12 @@ python ddmc_blocks.py --path /path/to/athena --workdir DIR [--mcranks 1 4 16 --c
 # rsphere is the sphere in spherical polar coordinates (a second build, --path-spherical,
 # shell source at the inner edge with a reflecting boundary, escape at the outer one), and
 # --geometry-moving rsphere runs the moving check there
-# needs: python configure.py --prob=mc_sphere_lya -mc -mpi && make
+# needs: python configure.py --prob=mc_sphere_lya -mc -mpi && make (-hdf5 for force: the
+#        lattice's flux and radiation force against analog on the slab shifted so the source
+#        is at a cell centre, from the mclab and mcsrc outputs)
 #        and for rsphere: python configure.py --prob=mc_sphere_lya --coord=spherical_polar -mc -mpi && make
 cd tst/montecarlo/sphere_lya
-python sphere_lya.py --path /path/to/athena --workdir DIR [--checks slab sphere rsphere analog scan moving coreedge] [--path-spherical /path/to/spherical/athena --ntheta 8 --geometry-moving sphere|rsphere] [--atau 1e5 1e6 1e7 --nz 32 --nx 32 --nphot 4000 --mcranks 8 --plot] [--vel-moving 1 3 10 --nx-moving 16 32 --profile-moving homologous|uniform] [--reuse]
+python sphere_lya.py --path /path/to/athena --workdir DIR [--checks slab sphere rsphere analog scan moving coreedge force] [--path-spherical /path/to/spherical/athena --ntheta 8 --geometry-moving sphere|rsphere] [--atau 1e5 1e6 1e7 --nz 32 --nx 32 --nphot 4000 --mcranks 8 --plot] [--vel-moving 1 3 10 --nx-moving 16 32 --profile-moving homologous|uniform] [--reuse]
 python freq_interface_toy.py [--dx 10 5 2.5]     # the entry rule of the frequency interface, 1D diffusion
 python freq_drift_toy.py [--u 0 1 10] [--variants]   # the lattice's rules with a drift against the kinetic walk, frequency only
 python core_edge_toy.py [--xc 1.5 2 2.5 3 3.3] [--nvisit 2000]   # a core edge inside the Doppler core: visit lengths, the exit law, the hybrid walk against the kinetic one
